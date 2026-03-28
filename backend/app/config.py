@@ -1,4 +1,8 @@
+import logging
+
 from pydantic_settings import BaseSettings
+
+logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
@@ -12,8 +16,14 @@ class Settings(BaseSettings):
     github_webhook_secret: str = ""
     github_org: str = ""
 
-    # Auth (Phase 1 — single admin token)
-    devpulse_admin_token: str = ""
+    # GitHub OAuth
+    github_client_id: str = ""
+    github_client_secret: str = ""
+
+    # Auth
+    jwt_secret: str = ""
+    devpulse_initial_admin: str = ""
+    frontend_url: str = "http://localhost:5173"
 
     # AI (optional — only needed for AI analysis)
     anthropic_api_key: str = ""
@@ -26,3 +36,6 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+if not settings.jwt_secret:
+    logger.warning("JWT_SECRET is not set — authentication will be insecure")

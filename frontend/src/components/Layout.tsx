@@ -1,9 +1,12 @@
 import type { ReactNode } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { useDateRange } from '@/hooks/useDateRange'
+import { useAuth } from '@/hooks/useAuth'
 import { cn } from '@/lib/utils'
+import { Button } from '@/components/ui/button'
+import DateRangePicker from '@/components/DateRangePicker'
 
-const navItems = [
+const adminNavItems = [
   { to: '/', label: 'Dashboard' },
   { to: '/team', label: 'Team' },
   { to: '/repos', label: 'Repos' },
@@ -14,6 +17,13 @@ const navItems = [
 export default function Layout({ children }: { children: ReactNode }) {
   const location = useLocation()
   const { dateFrom, dateTo, setDateFrom, setDateTo } = useDateRange()
+  const { user, isAdmin, logout } = useAuth()
+
+  const navItems = isAdmin
+    ? adminNavItems
+    : [
+        { to: `/team/${user?.developer_id}`, label: 'My Stats' },
+      ]
 
   return (
     <div className="min-h-screen bg-background text-foreground">
@@ -39,20 +49,22 @@ export default function Layout({ children }: { children: ReactNode }) {
             ))}
           </nav>
           <div className="ml-auto flex items-center gap-2 text-sm">
-            <label className="text-muted-foreground">From</label>
-            <input
-              type="date"
-              value={dateFrom}
-              onChange={(e) => setDateFrom(e.target.value)}
-              className="rounded-md border bg-background px-2 py-1 text-sm"
+            <DateRangePicker
+              dateFrom={dateFrom}
+              dateTo={dateTo}
+              onDateFromChange={setDateFrom}
+              onDateToChange={setDateTo}
             />
-            <label className="text-muted-foreground">To</label>
-            <input
-              type="date"
-              value={dateTo}
-              onChange={(e) => setDateTo(e.target.value)}
-              className="rounded-md border bg-background px-2 py-1 text-sm"
-            />
+            {user && (
+              <>
+                <span className="text-muted-foreground">
+                  {user.display_name}
+                </span>
+                <Button variant="ghost" size="sm" onClick={logout}>
+                  Logout
+                </Button>
+              </>
+            )}
           </div>
         </div>
       </header>

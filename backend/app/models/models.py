@@ -33,6 +33,7 @@ class Developer(Base):
     location: Mapped[str | None] = mapped_column(String(255))
     timezone: Mapped[str | None] = mapped_column(String(50))
     team: Mapped[str | None] = mapped_column(String(255))
+    app_role: Mapped[str] = mapped_column(String(20), nullable=False, default="developer")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     avatar_url: Mapped[str | None] = mapped_column(Text)
     notes: Mapped[str | None] = mapped_column(Text)
@@ -97,6 +98,26 @@ class PullRequest(Base):
     first_review_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     time_to_first_review_s: Mapped[int | None] = mapped_column(Integer)
     time_to_merge_s: Mapped[int | None] = mapped_column(Integer)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    approval_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    time_to_approve_s: Mapped[int | None] = mapped_column(Integer)
+    time_after_approve_s: Mapped[int | None] = mapped_column(Integer)
+    merged_without_approval: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false"
+    )
+    review_round_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    closes_issue_numbers: Mapped[list | None] = mapped_column(JSONB)
+    labels: Mapped[list | None] = mapped_column(JSONB)
+    merged_by_username: Mapped[str | None] = mapped_column(String(255))
+    head_branch: Mapped[str | None] = mapped_column(String(255))
+    base_branch: Mapped[str | None] = mapped_column(String(255))
+    is_self_merged: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false"
+    )
+    is_revert: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false"
+    )
+    reverted_pr_number: Mapped[int | None] = mapped_column(Integer)
     html_url: Mapped[str | None] = mapped_column(Text)
 
     repo: Mapped["Repository"] = relationship(back_populates="pull_requests")
@@ -245,5 +266,8 @@ class DeveloperGoal(Base):
     target_date: Mapped[datetime | None] = mapped_column(Date)
     achieved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     notes: Mapped[str | None] = mapped_column(Text)
+    created_by: Mapped[str | None] = mapped_column(
+        String(10), server_default="admin"
+    )
 
     developer: Mapped["Developer"] = relationship(back_populates="goals")

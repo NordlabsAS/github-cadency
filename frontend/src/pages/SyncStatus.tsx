@@ -1,4 +1,6 @@
 import { useSyncEvents, useTriggerSync } from '@/hooks/useSync'
+import ErrorCard from '@/components/ErrorCard'
+import TableSkeleton from '@/components/TableSkeleton'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import {
@@ -20,7 +22,7 @@ function statusColor(status: string | null) {
 }
 
 export default function SyncStatus() {
-  const { data: events, isLoading } = useSyncEvents()
+  const { data: events, isLoading, isError, refetch } = useSyncEvents()
   const triggerSync = useTriggerSync()
 
   return (
@@ -44,8 +46,10 @@ export default function SyncStatus() {
         </div>
       </div>
 
-      {isLoading ? (
-        <div className="text-muted-foreground">Loading events...</div>
+      {isError ? (
+        <ErrorCard message="Could not load sync events." onRetry={() => refetch()} />
+      ) : isLoading ? (
+        <TableSkeleton columns={7} rows={5} headers={['Type', 'Status', 'Repos', 'PRs', 'Issues', 'Duration', 'Started']} />
       ) : (
         <div className="rounded-md border">
           <Table>

@@ -16,7 +16,7 @@ DevPulse — an engineering intelligence dashboard that tracks developer activit
 
 - **Backend:** Python 3.11+, FastAPI, SQLAlchemy 2.0 (async with asyncpg), Alembic migrations
 - **Database:** PostgreSQL 15+ (async via asyncpg)
-- **Frontend:** React 19, TypeScript, Vite, Tailwind CSS v4, shadcn/ui (base-nova style), TanStack Query v5, pnpm
+- **Frontend:** React 19, TypeScript, Vite, Tailwind CSS v4, shadcn/ui (base-nova style), TanStack Query v5, Recharts 3, pnpm
 - **GitHub integration:** REST API via httpx, GitHub App auth (JWT + installation tokens)
 - **AI:** Anthropic Claude API (claude-sonnet-4-0), on-demand only
 - **Scheduling:** APScheduler AsyncIOScheduler (in-process, configured in FastAPI lifespan)
@@ -45,10 +45,11 @@ React Frontend (Vite :5173)  ──/api proxy──>  FastAPI Backend (:8000)  �
 ```
 backend/app/
 ├── api/              # FastAPI routers (thin delegation to services)
-│   ├── auth.py       # HTTPBearer token validation
+│   ├── auth.py       # JWT validation, get_current_user(), require_admin()
+│   ├── oauth.py      # GitHub OAuth login/callback/me endpoints
 │   ├── developers.py # Team registry CRUD
 │   ├── stats.py      # Stats, benchmarks, trends, workload, collaboration endpoints
-│   ├── goals.py      # Developer goals CRUD + progress
+│   ├── goals.py      # Developer goals CRUD + progress + self-goal endpoints
 │   ├── sync.py       # Sync trigger/status endpoints
 │   ├── webhooks.py   # GitHub webhook receiver (HMAC-verified)
 │   └── ai_analysis.py # AI analysis + 1:1 prep + team health endpoints
@@ -73,10 +74,25 @@ backend/app/
 frontend/src/
 ├── pages/            # Route components (Dashboard, TeamRegistry, DeveloperDetail, Repos, SyncStatus, AIAnalysis)
 ├── components/
-│   ├── Layout.tsx    # Sticky header, nav, global date range picker
-│   ├── StatCard.tsx  # Reusable stat display card
-│   └── ui/           # shadcn/ui primitives (button, card, table, dialog, select, etc.)
-├── hooks/            # TanStack Query hooks (useDevelopers, useStats, useSync, useAI, useDateRange)
+│   ├── Layout.tsx    # Sticky header, nav, global date range picker, quick-select date presets (7d/14d/30d/90d/quarter)
+│   ├── StatCard.tsx  # Reusable stat display card with optional trend delta and methodology tooltip
+│   ├── StatCardSkeleton.tsx  # Skeleton loading variant for StatCard
+│   ├── TableSkeleton.tsx     # Skeleton loading variant for table rows
+│   ├── ErrorCard.tsx         # Reusable error state: icon, message, retry button
+│   ├── ErrorBoundary.tsx     # React error boundary with "Try Again" and "Go to Dashboard" fallback
+│   ├── DateRangePicker.tsx   # Calendar popover + quick-select presets (7d/14d/30d/90d/quarter)
+│   ├── ai/           # AI analysis result renderers
+│   │   ├── AnalysisResultRenderer.tsx  # Router: switches on analysis_type to select view
+│   │   ├── OneOnOnePrepView.tsx        # Structured 1:1 brief: metrics table, talking points accordion, goal progress
+│   │   ├── TeamHealthView.tsx          # Structured health check: score gauge, action items, flags
+│   │   └── GenericAnalysisView.tsx     # Auto-renders scores + lists for communication/conflict/sentiment
+│   ├── charts/       # Recharts-based data visualization components
+│   │   ├── TrendChart.tsx         # AreaChart with regression line overlay and direction badge
+│   │   ├── PercentileBar.tsx      # Horizontal bar showing developer position vs team p25/p50/p75
+│   │   ├── ReviewQualityDonut.tsx # PieChart with quality tier segments and center score
+│   │   └── GoalSparkline.tsx     # Compact LineChart with target ReferenceLine for goal progress
+│   └── ui/           # shadcn/ui primitives (button, card, table, dialog, skeleton, calendar, popover, tooltip, accordion, etc.)
+├── hooks/            # TanStack Query hooks (useDevelopers, useStats [incl. useDeveloperTrends, useWorkload], useSync, useAI, useGoals, useDateRange)
 ├── utils/
 │   ├── api.ts        # apiFetch<T>() wrapper with Bearer auth from localStorage
 │   └── types.ts      # TypeScript interfaces mirroring backend schemas
@@ -89,22 +105,25 @@ frontend/src/
 
 | Table | Purpose | Key Relationships |
 |-------|---------|-------------------|
-| `developers` | Team registry with GitHub username, role, team, skills | Has many: pull_requests, reviews, issues, goals |
+| `developers` | Team registry with GitHub username, role, team, skills, app_role | Has many: pull_requests, reviews, issues, goals |
 | `repositories` | GitHub repos with tracking toggle | Has many: pull_requests, issues |
-| `pull_requests` | PRs with pre-computed cycle times | Belongs to: repo, author. Has many: reviews, review_comments |
+| `pull_requests` | PRs with pre-computed cycle times, approval tracking, and issue linkage | Belongs to: repo, author. Has many: reviews, review_comments |
 | `pr_reviews` | Reviews with quality tier classification | Belongs to: pr, reviewer. Has many: comments |
 | `pr_review_comments` | Inline code review comments | Belongs to: pr, review |
 | `issues` | Issues with close-time computation | Belongs to: repo, assignee. Has many: comments |
 | `issue_comments` | Issue comment bodies | Belongs to: issue |
 | `sync_events` | Sync run audit log | Standalone |
 | `ai_analyses` | AI analysis results (JSONB) | Standalone (scope_type + scope_id reference other tables) |
-| `developer_goals` | Goal tracking with metric targets | Belongs to: developer |
+| `developer_goals` | Goal tracking with metric targets + `created_by` (self/admin) | Belongs to: developer |
 
 **Key design decisions:**
 - Author/reviewer FKs are **nullable** — external contributors not in the team registry get `NULL`
-- Cycle-time fields (`time_to_first_review_s`, `time_to_merge_s`, `time_to_close_s`) are pre-computed at sync time
+- Cycle-time fields (`time_to_first_review_s`, `time_to_merge_s`, `time_to_close_s`, `time_to_approve_s`, `time_after_approve_s`) are pre-computed at sync time
+- Approval tracking: `approved_at` (last APPROVED review), `approval_count` (>1 = re-review cycle), `merged_without_approval` (merged with zero approvals)
+- Revert tracking: `is_revert` (boolean), `reverted_pr_number` (nullable int) — detected at sync time via title/body parsing + DB fallback
 - `pr_reviews.quality_tier` is computed deterministically: `thorough` (>500 chars or 3+ inline comments), `standard` (100-500 chars), `rubber_stamp` (APPROVED + <20 chars), `minimal` (default)
-- JSONB columns: `skills`, `labels`, `errors`, `result` (AI analysis output)
+- JSONB columns: `skills`, `labels`, `errors`, `result` (AI analysis output), `closes_issue_numbers` (PR → issue linkage via closing keywords)
+- `developer_goals.created_by` — `"self"` or `"admin"` (server_default `"admin"`); developers can only modify their own self-created goals
 - No commit-level data — stats are PR-level only to stay within GitHub rate limits
 
 ## GitHub Integration
@@ -149,18 +168,27 @@ frontend/src/
 
 ## API Structure
 
-All endpoints except `/api/health` and `/api/webhooks/github` require `Authorization: Bearer {DEVPULSE_ADMIN_TOKEN}`.
+Authentication uses GitHub OAuth → JWT. Two roles: `admin` (full access) and `developer` (own data only).
+Endpoints `/api/health`, `/api/webhooks/github`, and `/api/auth/*` are public. All others require a valid JWT.
+
+### Auth Endpoints
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/auth/login` | Returns GitHub OAuth authorize URL |
+| `GET /api/auth/callback?code=` | OAuth code exchange → create/login user → JWT → redirect to frontend |
+| `GET /api/auth/me` | Returns current user info (requires JWT) |
 
 ### Core Endpoints
 
-| Group | Endpoints |
-|-------|-----------|
-| **Health** | `GET /api/health` |
-| **Developers** | `GET/POST /api/developers`, `GET/PATCH/DELETE /api/developers/{id}` |
-| **Stats** | `GET /api/stats/developer/{id}`, `GET /api/stats/team`, `GET /api/stats/repo/{id}` |
-| **Sync** | `POST /api/sync/full`, `POST /api/sync/incremental`, `GET /api/sync/repos`, `PATCH /api/sync/repos/{id}/track`, `GET /api/sync/events` |
-| **Webhooks** | `POST /api/webhooks/github` |
-| **AI** | `POST /api/ai/analyze`, `GET /api/ai/history`, `GET /api/ai/history/{id}` |
+| Group | Endpoints | Access |
+|-------|-----------|--------|
+| **Health** | `GET /api/health` | Public |
+| **Developers** | `GET/POST /api/developers`, `GET/PATCH/DELETE /api/developers/{id}` | Admin (GET /{id} also developer self-access) |
+| **Stats** | `GET /api/stats/developer/{id}`, `GET /api/stats/team`, `GET /api/stats/repo/{id}` | Developer: own stats + repo stats. Admin: all. |
+| **Sync** | `POST /api/sync/full`, `POST /api/sync/incremental`, `GET /api/sync/repos`, `PATCH /api/sync/repos/{id}/track`, `GET /api/sync/events` | Admin only |
+| **Webhooks** | `POST /api/webhooks/github` | Public (HMAC-verified) |
+| **AI** | `POST /api/ai/analyze`, `GET /api/ai/history`, `GET /api/ai/history/{id}` | Admin only |
 
 ### Management Feature Endpoints (M1-M8)
 
@@ -171,8 +199,11 @@ All endpoints except `/api/health` and `/api/webhooks/github` require `Authoriza
 | **M2: Percentiles** | `GET /api/stats/developer/{id}?include_percentiles=true` | Developer stats with team-relative percentile placement |
 | **M3: Trends** | `GET /api/stats/developer/{id}/trends` | Period-bucketed stats with linear regression |
 | **M4: Workload** | `GET /api/stats/workload` | Per-developer load indicators + automated alerts |
+| **P2-01: Stale PRs** | `GET /api/stats/stale-prs` | Open PRs needing attention, sorted by staleness (no_review, changes_requested, approved_not_merged) |
+| **P2-04: Issue Linkage** | `GET /api/stats/issue-linkage` | Issue-to-PR linkage stats via closing keywords (linked/unlinked counts, avg PRs per issue) |
 | **M5: Collaboration** | `GET /api/stats/collaboration` | Reviewer-author matrix + insights (silos, bus factors) |
 | **M6: Goals** | `POST/GET /api/goals`, `PATCH /api/goals/{id}`, `GET /api/goals/{id}/progress` | Developer goal CRUD with auto-achievement |
+| **P1-03: Self Goals** | `POST /api/goals/self`, `PATCH /api/goals/self/{id}` | Developer self-goal creation + update (own self-created goals only) |
 | **M7: 1:1 Prep** | `POST /api/ai/one-on-one-prep` | AI-generated structured 1:1 meeting brief |
 | **M8: Team Health** | `POST /api/ai/team-health` | AI-generated comprehensive team health assessment |
 
@@ -190,7 +221,11 @@ Defined in `backend/app/config.py` via pydantic-settings. Copy `.env.example` to
 | `GITHUB_APP_INSTALLATION_ID` | Yes | `0` | GitHub App installation ID for the org |
 | `GITHUB_WEBHOOK_SECRET` | Yes | `""` | HMAC secret for webhook signature verification |
 | `GITHUB_ORG` | Yes | `""` | GitHub organization name (e.g. `my-company`) |
-| `DEVPULSE_ADMIN_TOKEN` | Yes | `""` | Bearer token for API authentication |
+| `GITHUB_CLIENT_ID` | Yes | `""` | GitHub OAuth client ID (from GitHub App settings) |
+| `GITHUB_CLIENT_SECRET` | Yes | `""` | GitHub OAuth client secret |
+| `JWT_SECRET` | Yes | `""` | Secret for signing JWT tokens (min 32 chars recommended) |
+| `DEVPULSE_INITIAL_ADMIN` | No | `""` | GitHub username auto-promoted to admin on first login |
+| `FRONTEND_URL` | No | `http://localhost:5173` | Frontend URL for OAuth redirect |
 | `ANTHROPIC_API_KEY` | For AI | `""` | Anthropic API key (only needed for AI features) |
 | `SYNC_INTERVAL_MINUTES` | No | `15` | Incremental sync interval |
 | `FULL_SYNC_CRON_HOUR` | No | `2` | Hour (UTC) for nightly full sync |
@@ -247,6 +282,7 @@ Tests use SQLite in-memory via aiosqlite (no PostgreSQL needed for testing).
 ## Key Patterns and Conventions
 
 ### Backend patterns
+- **Auth:** GitHub OAuth → JWT (7-day expiry). Two roles: `admin` (full access), `developer` (own data only). Dependencies: `get_current_user()` returns `AuthUser`, `require_admin()` raises 403 if not admin. Per-endpoint injection (not router-level) for mixed-access routers.
 - **Thin API routes:** Routes validate input and delegate to service functions — no business logic in routes
 - **Service functions:** All async, accept `AsyncSession` as first param, return Pydantic models or ORM objects
 - **Upsert pattern:** SELECT by unique key → create if not found → always overwrite mutable fields (idempotent)
@@ -255,14 +291,27 @@ Tests use SQLite in-memory via aiosqlite (no PostgreSQL needed for testing).
 - **Percentile band inversion:** For lower-is-better metrics (time_to_merge, time_to_first_review, review_turnaround), `_percentile_band()` inverts labels so `above_p75` always means "best"
 - **Trend regression:** Simple OLS `_linear_regression()` with polarity-aware direction classification; <5% change = "stable"
 - **Goal auto-achievement:** Checked on progress fetch — if metric crosses target for 2 consecutive weekly periods, auto-marks as achieved
-- **AI analysis:** Data gathering → structured system prompt → Claude API call → JSON parse → store in `ai_analyses`
+- **Issue-PR linkage:** `extract_closing_issue_numbers(body)` parses closing keywords (`close/closes/closed/fix/fixes/fixed/resolve/resolves/resolved #N`) from PR body at sync time, stores as `closes_issue_numbers` JSONB array. Linkage stats cross-reference by `(repo_id, issue_number)`.
+- **Draft PR filtering:** Open PR counts and workload metrics use `PullRequest.is_draft.isnot(True)` to exclude drafts (handles `NULL` safely). Drafts are counted separately via `prs_draft` / `drafts_open`. Stale PR alerts also exclude drafts.
+- **Workload score:** Heuristic based on pending work only: `total_load = open_authored + open_reviewing + open_issues`. Completed reviews are output, not load — they are excluded from the score formula.
+- **Revert detection:** `detect_revert()` parses title (`Revert "..."`) and body (`Reverts #NNN` / `Reverts owner/repo#NNN`). Falls back to DB title lookup via `_resolve_revert_pr_number()`. `prs_reverted` counts via self-join on `reverted_pr_number` + `repo_id`. Alert threshold: 5% revert rate.
+- **AI analysis:** Data gathering → structured system prompt → Claude API call → JSON parse → store in `ai_analyses`. PR data for 1:1 briefs includes `html_url` for GitHub links.
 
 ### Frontend patterns
 - **Global date range:** React Context (`DateRangeContext`) set in Layout header, consumed by all pages
 - **Server state:** TanStack Query with 30s stale time, 1 retry
-- **Auth:** Bearer token from `localStorage` key `devpulse_token`, injected by `apiFetch()` wrapper
+- **Auth:** GitHub OAuth login → JWT stored in `localStorage` key `devpulse_token`, injected by `apiFetch()` wrapper. `AuthContext` provides user info and role. Auto-redirect to `/login` on 401. Role-aware nav in Layout (admin sees all, developer sees own stats).
 - **API proxy:** Vite dev server proxies `/api/*` → `http://localhost:8000`
 - **Component library:** shadcn/ui with base-nova style, neutral base color, CSS variables, Lucide icons
+- **Charts:** Recharts 3 wrapped in `components/charts/`. Use `ResponsiveContainer`, CSS variables for colors (`hsl(var(--primary))`), and `useId()` for unique SVG gradient IDs
+- **Dashboard zones:** Alert strip (workload alerts + merged-without-approval warnings) → Stale PRs table (needs attention, color-coded by age/reason) → Team status grid (sortable table) → Period velocity (stat cards with trend deltas from previous period comparison)
+- **Trend deltas:** Computed on the frontend by comparing current period stats vs same-duration previous period. For lower-is-better metrics (time_to_merge, time_to_first_review), green = decrease
+- **Toast notifications:** `sonner` (bottom-right, 4s auto-dismiss, rich colors). All mutations wrapped with success/error toasts in hook files.
+- **Error states:** `ErrorCard` component with icon + message + retry button. All query pages check `isError` and render `ErrorCard`. `ErrorBoundary` wraps page routes in `App.tsx`.
+- **Skeleton loading:** `StatCardSkeleton` and `TableSkeleton` replace "Loading..." text. Use shadcn `Skeleton` primitive for custom inline skeletons.
+- **Date range picker:** `DateRangePicker` component with quick-select presets (7d/14d/30d/90d/quarter) + dual Calendar popover for custom range selection. Uses `react-day-picker` + `date-fns`.
+- **Methodology tooltips:** `StatCard` accepts an optional `tooltip` prop — renders a `HelpCircle` icon (Lucide) next to the title with a hover tooltip (`@base-ui/react/tooltip`). Every stat card on Dashboard and DeveloperDetail explains how the metric is computed. Section headers (Trends, Team Context) also have tooltips.
+- **AI result rendering:** `AnalysisResultRenderer` switches on `analysis_type` to select a structured view component (`OneOnOnePrepView`, `TeamHealthView`, `GenericAnalysisView`). Falls back to formatted JSON for unknown types. Color convention: green (positive/on-track), amber (needs attention), red (concern/blocker).
 
 ## Specification
 
@@ -272,10 +321,22 @@ Tests use SQLite in-memory via aiosqlite (no PostgreSQL needed for testing).
 
 ## Task System
 
-Task files live in `.claude/tasks/` (core spec) and `.claude/tasks/management-improvements/` (M1-M8).
+Task files live in `.claude/tasks/` (core spec), `.claude/tasks/management-improvements/` (M1-M8), and `.claude/tasks/improvements/` (P1-P4 phases).
 
-**All tasks are completed:**
+**Core + Management tasks are completed:**
 - Core: 01-12 (project scaffolding through frontend pages)
 - Management Phase 1: M1 (review quality), M2 (benchmarks), M3 (trends), M4 (workload)
 - Management Phase 2: M5 (collaboration matrix), M6 (developer goals)
 - Management Phase 3: M7 (1:1 prep brief), M8 (team health check)
+
+**Improvement tasks completed:**
+- P1-05: Recharts + Trend Visualizations (charts, percentile bars, review quality donut on DeveloperDetail)
+- P1-02: Actionable Dashboard (alert strip, team status grid, stat cards with trend deltas, date presets)
+- P1-04: Structured AI Result Rendering (OneOnOnePrepView, TeamHealthView, GenericAnalysisView, tabbed AIAnalysis page, 1:1 prep button on DeveloperDetail)
+- P1-07: Draft PR Filtering (draft PRs excluded from `prs_open`, workload counts, and stale alerts; workload score formula fixed)
+- P1-08: Methodology Tooltips (HelpCircle + hover tooltip on every StatCard and section header explaining how each metric is computed)
+- P2-03: Approved-At Timestamp & Post-Approval Merge Latency (approved_at, time_to_approve_s, time_after_approve_s, approval_count, merged_without_approval on PRs; approval metrics in stats, benchmarks, and workload alerts)
+- P2-01: Stale PR List Endpoint (dedicated endpoint + Dashboard "Needs Attention" table with 3 staleness categories)
+- P2-04: Approval Metrics Frontend (approval StatCards + percentile bars on DeveloperDetail, `merged_without_approval` alerts on Dashboard)
+- P2-04: Issue-to-PR Linkage via Closing Keywords (`closes_issue_numbers` JSONB on PRs, `extract_closing_issue_numbers()` parser, `GET /api/stats/issue-linkage` endpoint)
+- P2-06: Revert PR Detection (`is_revert`, `reverted_pr_number` on PRs; `detect_revert()` with DB fallback; `prs_reverted`/`reverts_authored` in developer stats; `revert_rate` in team stats; `revert_spike` workload alert; frontend stat cards on DeveloperDetail + Dashboard)

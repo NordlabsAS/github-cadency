@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { toast } from 'sonner'
 import { apiFetch } from '@/utils/api'
 import type { Repo, SyncEvent } from '@/utils/types'
 
@@ -17,7 +18,11 @@ export function useToggleTracking() {
         method: 'PATCH',
         body: JSON.stringify({ is_tracked: isTracked }),
       }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['repos'] }),
+    onSuccess: (_data, { isTracked }) => {
+      qc.invalidateQueries({ queryKey: ['repos'] })
+      toast.success(isTracked ? 'Repository tracking enabled' : 'Repository tracking disabled')
+    },
+    onError: () => toast.error('Failed to update tracking'),
   })
 }
 
@@ -34,6 +39,10 @@ export function useTriggerSync() {
   return useMutation({
     mutationFn: (type: 'full' | 'incremental') =>
       apiFetch(`/sync/${type}`, { method: 'POST' }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['sync-events'] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['sync-events'] })
+      toast.success('Sync started')
+    },
+    onError: () => toast.error('Failed to start sync'),
   })
 }

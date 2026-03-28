@@ -1,30 +1,26 @@
-"""Integration tests for authentication behavior."""
+"""Integration tests for JWT authentication and role-based access."""
 import pytest
 
-from conftest import TEST_TOKEN
+from conftest import make_admin_token, make_developer_token
 
 
-class TestAuth:
+class TestJWTAuth:
     @pytest.mark.asyncio
     async def test_no_auth_header_returns_401(self, raw_client):
         resp = await raw_client.get("/api/developers")
-        # FastAPI's HTTPBearer returns 401 when no credentials provided
-        assert resp.status_code == 401
+        assert resp.status_code in (401, 403)
 
     @pytest.mark.asyncio
-    async def test_wrong_token_returns_401(self, raw_client):
+    async def test_invalid_jwt_returns_401(self, raw_client):
         resp = await raw_client.get(
             "/api/developers",
-            headers={"Authorization": "Bearer wrong-token"},
+            headers={"Authorization": "Bearer not-a-valid-jwt"},
         )
         assert resp.status_code == 401
 
     @pytest.mark.asyncio
-    async def test_valid_token_returns_200(self, raw_client):
-        resp = await raw_client.get(
-            "/api/developers",
-            headers={"Authorization": f"Bearer {TEST_TOKEN}"},
-        )
+    async def test_valid_admin_jwt_returns_200(self, client):
+        resp = await client.get("/api/developers")
         assert resp.status_code == 200
 
     @pytest.mark.asyncio
@@ -35,6 +31,176 @@ class TestAuth:
 
     @pytest.mark.asyncio
     async def test_webhooks_no_bearer_auth_needed(self, raw_client):
-        # Webhooks use HMAC, not bearer — should get 422 (missing headers), not 403
         resp = await raw_client.post("/api/webhooks/github")
         assert resp.status_code == 422  # Missing required headers
+
+
+class TestDeveloperAccess:
+    @pytest.mark.asyncio
+    async def test_developer_can_view_own_stats(self, developer_client, sample_developer):
+        resp = await developer_client.get(f"/api/stats/developer/{sample_developer.id}")
+        assert resp.status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_developer_cannot_view_other_stats(self, developer_client, sample_admin):
+        resp = await developer_client.get(f"/api/stats/developer/{sample_admin.id}")
+        assert resp.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_developer_cannot_access_team_stats(self, developer_client):
+        resp = await developer_client.get("/api/stats/team")
+        assert resp.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_developer_cannot_access_benchmarks(self, developer_client):
+        resp = await developer_client.get("/api/stats/benchmarks")
+        assert resp.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_developer_cannot_access_workload(self, developer_client):
+        resp = await developer_client.get("/api/stats/workload")
+        assert resp.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_developer_cannot_access_collaboration(self, developer_client):
+        resp = await developer_client.get("/api/stats/collaboration")
+        assert resp.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_developer_can_view_repo_stats(self, developer_client, sample_repo):
+        resp = await developer_client.get(f"/api/stats/repo/{sample_repo.id}")
+        assert resp.status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_developer_can_view_own_profile(self, developer_client, sample_developer):
+        resp = await developer_client.get(f"/api/developers/{sample_developer.id}")
+        assert resp.status_code == 200
+        assert resp.json()["github_username"] == "testuser"
+
+    @pytest.mark.asyncio
+    async def test_developer_cannot_view_other_profile(self, developer_client, sample_admin):
+        resp = await developer_client.get(f"/api/developers/{sample_admin.id}")
+        assert resp.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_developer_cannot_list_developers(self, developer_client):
+        resp = await developer_client.get("/api/developers")
+        assert resp.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_developer_cannot_create_developer(self, developer_client):
+        resp = await developer_client.post(
+            "/api/developers",
+            json={"github_username": "newuser", "display_name": "New"},
+        )
+        assert resp.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_developer_cannot_update_developer(self, developer_client, sample_developer):
+        resp = await developer_client.patch(
+            f"/api/developers/{sample_developer.id}",
+            json={"team": "frontend"},
+        )
+        assert resp.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_developer_cannot_delete_developer(self, developer_client, sample_developer):
+        resp = await developer_client.delete(f"/api/developers/{sample_developer.id}")
+        assert resp.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_developer_can_view_own_goals(self, developer_client, sample_developer):
+        resp = await developer_client.get(f"/api/goals?developer_id={sample_developer.id}")
+        assert resp.status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_developer_cannot_view_other_goals(self, developer_client, sample_admin):
+        resp = await developer_client.get(f"/api/goals?developer_id={sample_admin.id}")
+        assert resp.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_developer_cannot_create_goal(self, developer_client, sample_developer):
+        resp = await developer_client.post(
+            "/api/goals",
+            json={
+                "developer_id": sample_developer.id,
+                "title": "My goal",
+                "metric_key": "prs_merged",
+                "target_value": 10,
+            },
+        )
+        assert resp.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_developer_cannot_access_sync(self, developer_client):
+        resp = await developer_client.get("/api/sync/repos")
+        assert resp.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_developer_cannot_access_ai(self, developer_client):
+        resp = await developer_client.get("/api/ai/history")
+        assert resp.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_developer_can_view_own_trends(self, developer_client, sample_developer):
+        resp = await developer_client.get(f"/api/stats/developer/{sample_developer.id}/trends")
+        assert resp.status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_developer_cannot_view_other_trends(self, developer_client, sample_admin):
+        resp = await developer_client.get(f"/api/stats/developer/{sample_admin.id}/trends")
+        assert resp.status_code == 403
+
+
+class TestAdminAccess:
+    @pytest.mark.asyncio
+    async def test_admin_can_list_developers(self, client):
+        resp = await client.get("/api/developers")
+        assert resp.status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_admin_can_view_any_developer(self, client, sample_developer):
+        resp = await client.get(f"/api/developers/{sample_developer.id}")
+        assert resp.status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_admin_can_access_team_stats(self, client):
+        resp = await client.get("/api/stats/team")
+        assert resp.status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_admin_can_promote_developer(self, client, sample_developer):
+        resp = await client.patch(
+            f"/api/developers/{sample_developer.id}",
+            json={"app_role": "admin"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["app_role"] == "admin"
+
+    @pytest.mark.asyncio
+    async def test_admin_can_access_sync(self, client):
+        resp = await client.get("/api/sync/repos")
+        assert resp.status_code == 200
+
+
+class TestAuthMe:
+    @pytest.mark.asyncio
+    async def test_auth_me_returns_user_info(self, client, sample_admin):
+        resp = await client.get("/api/auth/me")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["github_username"] == "admin"
+        assert data["app_role"] == "admin"
+
+    @pytest.mark.asyncio
+    async def test_auth_me_developer(self, developer_client, sample_developer):
+        resp = await developer_client.get("/api/auth/me")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["github_username"] == "testuser"
+        assert data["app_role"] == "developer"
+
+    @pytest.mark.asyncio
+    async def test_auth_me_no_token_returns_401(self, raw_client):
+        resp = await raw_client.get("/api/auth/me")
+        assert resp.status_code in (401, 403)

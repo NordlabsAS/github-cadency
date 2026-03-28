@@ -1,4 +1,5 @@
 import logging
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -177,6 +178,70 @@ async def upsert_repo(db: AsyncSession, repo_data: dict) -> Repository:
     return repo
 
 
+_CLOSING_PATTERN = re.compile(
+    r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)", re.IGNORECASE
+)
+
+
+def extract_closing_issue_numbers(body: str | None) -> list[int]:
+    """Parse closing keywords from PR body and return deduplicated issue numbers."""
+    if not body:
+        return []
+    return sorted(set(int(m) for m in _CLOSING_PATTERN.findall(body)))
+
+
+# Revert detection patterns
+_REVERT_TITLE_PATTERN = re.compile(r'^Revert "(.+)"', re.IGNORECASE)
+_REVERT_BODY_PR_PATTERN = re.compile(
+    r"Reverts\s+(?:[\w.-]+/[\w.-]+)?#(\d+)", re.IGNORECASE
+)
+
+
+def detect_revert(title: str | None, body: str | None) -> tuple[bool, int | None]:
+    """Detect if a PR is a revert and extract the reverted PR number.
+
+    Checks title for GitHub's standard ``Revert "..."`` pattern and body for
+    ``Reverts #NNN`` or ``Reverts owner/repo#NNN`` references.
+
+    Returns ``(is_revert, reverted_pr_number)``.
+    """
+    if not title:
+        return False, None
+
+    title_match = _REVERT_TITLE_PATTERN.match(title)
+    body_has_revert = bool(body and "revert" in body.lower())
+
+    if not title_match and not body_has_revert:
+        return False, None
+
+    # Try to extract PR number from body first (most reliable)
+    if body:
+        pr_match = _REVERT_BODY_PR_PATTERN.search(body)
+        if pr_match:
+            return True, int(pr_match.group(1))
+
+    # Title matched but no PR number found yet — still a revert
+    if title_match:
+        return True, None
+
+    # Body mentions "revert" but no standard title pattern — not a revert
+    return False, None
+
+
+async def _resolve_revert_pr_number(
+    db: AsyncSession, repo_id: int, original_title: str
+) -> int | None:
+    """Fallback: look up the reverted PR by matching its title in the same repo."""
+    result = await db.execute(
+        select(PullRequest.number).where(
+            PullRequest.repo_id == repo_id,
+            PullRequest.title == original_title,
+        ).limit(1)
+    )
+    row = result.scalar_one_or_none()
+    return row
+
+
 async def upsert_pull_request(
     db: AsyncSession,
     client: httpx.AsyncClient,
@@ -197,23 +262,32 @@ async def upsert_pull_request(
     pr.github_id = pr_data["id"]
     pr.title = pr_data.get("title")
     pr.body = pr_data.get("body")
+    pr.closes_issue_numbers = extract_closing_issue_numbers(pr.body)
     pr.state = pr_data.get("state")
     pr.is_merged = pr_data.get("merged", False)
     pr.is_draft = pr_data.get("draft", False)
     pr.comments_count = pr_data.get("comments", 0)
     pr.review_comments_count = pr_data.get("review_comments", 0)
     pr.html_url = pr_data.get("html_url")
+    pr.labels = [l["name"] for l in pr_data.get("labels", [])]
+    pr.head_branch = (pr_data.get("head") or {}).get("ref")
+    pr.base_branch = (pr_data.get("base") or {}).get("ref")
 
     user = pr_data.get("user") or {}
-    pr.author_id = await resolve_author(db, user.get("login"))
+    author_login = user.get("login")
+    pr.author_id = await resolve_author(db, author_login)
 
     for field in ("created_at", "updated_at", "merged_at", "closed_at"):
         val = pr_data.get(field)
         if val:
             setattr(pr, field, datetime.fromisoformat(val.replace("Z", "+00:00")))
 
-    # Fetch detail stats (additions/deletions/changed_files)
-    needs_detail = pr.additions is None or pr.state == "open"
+    # Fetch detail stats (additions/deletions/changed_files/merged_by)
+    needs_detail = (
+        pr.additions is None
+        or pr.state == "open"
+        or (pr.merged_by_username is None and pr.merged_at is not None)
+    )
     if needs_detail:
         try:
             detail_resp = await github_get(
@@ -225,6 +299,7 @@ async def upsert_pull_request(
             pr.deletions = detail.get("deletions")
             pr.changed_files = detail.get("changed_files")
             pr.is_merged = detail.get("merged", pr.is_merged)
+            pr.merged_by_username = (detail.get("merged_by") or {}).get("login")
             if detail.get("merged_at"):
                 pr.merged_at = datetime.fromisoformat(
                     detail["merged_at"].replace("Z", "+00:00")
@@ -235,6 +310,25 @@ async def upsert_pull_request(
     # Compute time_to_merge_s
     if pr.merged_at and pr.created_at:
         pr.time_to_merge_s = int((pr.merged_at - pr.created_at).total_seconds())
+
+    # Compute is_self_merged
+    pr.is_self_merged = (
+        pr.is_merged is True
+        and pr.merged_by_username is not None
+        and pr.merged_by_username == author_login
+    )
+
+    # Detect revert PRs
+    is_revert, reverted_pr_number = detect_revert(pr.title, pr.body)
+    if is_revert and reverted_pr_number is None:
+        # Fallback: look up by original title extracted from revert title
+        title_match = _REVERT_TITLE_PATTERN.match(pr.title or "")
+        if title_match:
+            reverted_pr_number = await _resolve_revert_pr_number(
+                db, repo.id, title_match.group(1)
+            )
+    pr.is_revert = is_revert
+    pr.reverted_pr_number = reverted_pr_number
 
     return pr
 
@@ -435,6 +529,48 @@ async def upsert_issue_comment(
     return comment
 
 
+def _safe_delta_seconds(a: datetime | None, b: datetime | None) -> int | None:
+    """Compute (a - b) in seconds, normalizing timezone-aware/naive mismatch (SQLite strips tz)."""
+    if a is None or b is None:
+        return None
+    # Strip tzinfo if only one side has it (SQLite returns naive datetimes)
+    if a.tzinfo is not None and b.tzinfo is None:
+        a = a.replace(tzinfo=None)
+    elif b.tzinfo is not None and a.tzinfo is None:
+        b = b.replace(tzinfo=None)
+    return int((a - b).total_seconds())
+
+
+async def compute_approval_metrics(
+    db: AsyncSession, pr: PullRequest
+) -> None:
+    """Compute approved_at, approval_count, time_to_approve_s, time_after_approve_s,
+    and merged_without_approval from synced reviews."""
+    approved_reviews = await db.execute(
+        select(PRReview.submitted_at).where(
+            PRReview.pr_id == pr.id,
+            PRReview.state == "APPROVED",
+            PRReview.submitted_at.isnot(None),
+        )
+    )
+    approved_timestamps = [row[0] for row in approved_reviews.all()]
+
+    pr.approval_count = len(approved_timestamps)
+
+    if approved_timestamps:
+        pr.approved_at = max(approved_timestamps)
+        pr.time_to_approve_s = _safe_delta_seconds(pr.approved_at, pr.created_at)
+        pr.time_after_approve_s = _safe_delta_seconds(pr.merged_at, pr.approved_at)
+    else:
+        pr.approved_at = None
+        pr.time_to_approve_s = None
+        pr.time_after_approve_s = None
+
+    pr.merged_without_approval = (
+        pr.is_merged is True and pr.approval_count == 0
+    )
+
+
 # --- Sync Orchestration ---
 
 
@@ -483,6 +619,18 @@ async def sync_repo(
         # Flush so comment counts are visible, then recompute quality tiers
         await db.flush()
         await recompute_review_quality_tiers(db, pr)
+
+        # Compute approval metrics from synced reviews
+        await compute_approval_metrics(db, pr)
+
+        # Compute review round count (number of CHANGES_REQUESTED reviews)
+        round_count = await db.scalar(
+            select(func.count()).where(
+                PRReview.pr_id == pr.id,
+                PRReview.state == "CHANGES_REQUESTED",
+            )
+        ) or 0
+        pr.review_round_count = round_count
 
     # Fetch issues (skip PRs — they have a pull_request key)
     issue_params: dict = {"state": "all", "sort": "updated", "direction": "desc"}

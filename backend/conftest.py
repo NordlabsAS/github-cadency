@@ -7,8 +7,8 @@ JSONB columns are compiled as JSON for SQLite compatibility.
 import os
 
 # Set test env vars before importing app modules
-os.environ.setdefault("DEVPULSE_ADMIN_TOKEN", "test-token-123")
 os.environ.setdefault("GITHUB_WEBHOOK_SECRET", "test-webhook-secret")
+os.environ.setdefault("JWT_SECRET", "test-jwt-secret-for-testing")
 
 import pytest_asyncio
 from datetime import datetime, timedelta, timezone
@@ -22,7 +22,7 @@ import sqlalchemy.dialects.sqlite.base as sqlite_base
 
 sqlite_base.SQLiteTypeCompiler.visit_JSONB = sqlite_base.SQLiteTypeCompiler.visit_JSON
 
-from app.api.auth import require_auth
+from app.api.auth import create_jwt, get_current_user
 from app.main import app
 from app.models.database import Base, get_db
 from app.models.models import (
@@ -35,9 +35,17 @@ from app.models.models import (
     Repository,
     SyncEvent,
 )
+from app.schemas.schemas import AuthUser
 
-TEST_TOKEN = "test-token-123"
 WEBHOOK_SECRET = "test-webhook-secret"
+
+
+def make_admin_token(developer_id: int = 1, github_username: str = "admin") -> str:
+    return create_jwt(developer_id, github_username, "admin")
+
+
+def make_developer_token(developer_id: int = 2, github_username: str = "testuser") -> str:
+    return create_jwt(developer_id, github_username, "developer")
 
 
 @pytest_asyncio.fixture
@@ -61,22 +69,46 @@ async def db_session(engine):
 
 
 @pytest_asyncio.fixture
-async def client(engine):
-    """HTTP client with auth bypassed — for standard API tests."""
+async def client(engine, sample_admin):
+    """HTTP client authenticated as admin — for standard API tests."""
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
     async def override_get_db():
         async with factory() as session:
             yield session
 
-    async def override_auth():
-        return TEST_TOKEN
+    app.dependency_overrides[get_db] = override_get_db
+
+    token = make_admin_token(developer_id=sample_admin.id, github_username=sample_admin.github_username)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(
+        transport=transport,
+        base_url="http://test",
+        headers={"Authorization": f"Bearer {token}"},
+    ) as ac:
+        yield ac
+
+    app.dependency_overrides.clear()
+
+
+@pytest_asyncio.fixture
+async def developer_client(engine, sample_developer):
+    """HTTP client authenticated as a regular developer."""
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+    async def override_get_db():
+        async with factory() as session:
+            yield session
 
     app.dependency_overrides[get_db] = override_get_db
-    app.dependency_overrides[require_auth] = override_auth
 
+    token = make_developer_token(developer_id=sample_developer.id, github_username=sample_developer.github_username)
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+    async with AsyncClient(
+        transport=transport,
+        base_url="http://test",
+        headers={"Authorization": f"Bearer {token}"},
+    ) as ac:
         yield ac
 
     app.dependency_overrides.clear()
@@ -84,7 +116,7 @@ async def client(engine):
 
 @pytest_asyncio.fixture
 async def raw_client(engine):
-    """HTTP client WITHOUT auth bypass — for testing auth behavior."""
+    """HTTP client WITHOUT auth — for testing auth behavior."""
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
     async def override_get_db():
@@ -92,7 +124,6 @@ async def raw_client(engine):
             yield session
 
     app.dependency_overrides[get_db] = override_get_db
-    # Do NOT override require_auth
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
@@ -109,6 +140,25 @@ ONE_WEEK_AGO = NOW - timedelta(days=7)
 
 
 @pytest_asyncio.fixture
+async def sample_admin(db_session: AsyncSession) -> Developer:
+    dev = Developer(
+        github_username="admin",
+        display_name="Admin User",
+        email="admin@example.com",
+        role="lead",
+        team="platform",
+        app_role="admin",
+        is_active=True,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    db_session.add(dev)
+    await db_session.commit()
+    await db_session.refresh(dev)
+    return dev
+
+
+@pytest_asyncio.fixture
 async def sample_developer(db_session: AsyncSession) -> Developer:
     dev = Developer(
         github_username="testuser",
@@ -116,6 +166,7 @@ async def sample_developer(db_session: AsyncSession) -> Developer:
         email="test@example.com",
         role="developer",
         team="backend",
+        app_role="developer",
         is_active=True,
         created_at=NOW,
         updated_at=NOW,
@@ -134,6 +185,7 @@ async def sample_developer_b(db_session: AsyncSession) -> Developer:
         email="test2@example.com",
         role="senior_developer",
         team="backend",
+        app_role="developer",
         is_active=True,
         created_at=NOW,
         updated_at=NOW,
@@ -182,6 +234,11 @@ async def sample_pr(
         created_at=ONE_WEEK_AGO,
         merged_at=ONE_DAY_AGO,
         time_to_merge_s=int((ONE_DAY_AGO - ONE_WEEK_AGO).total_seconds()),
+        labels=["bug"],
+        merged_by_username="reviewer",
+        head_branch="fix/critical-bug",
+        base_branch="main",
+        is_self_merged=False,
     )
     db_session.add(pr)
     await db_session.commit()

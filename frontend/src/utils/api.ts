@@ -16,6 +16,11 @@ export async function apiFetch<T>(
   })
 
   if (!res.ok) {
+    if (res.status === 401) {
+      localStorage.removeItem('devpulse_token')
+      window.location.href = '/login'
+      throw new Error('Session expired')
+    }
     const body = await res.text()
     throw new Error(`${res.status}: ${body}`)
   }

@@ -1,21 +1,29 @@
 from datetime import datetime, timezone
+from enum import Enum as PyEnum
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.auth import require_auth
+from app.api.auth import get_current_user, require_admin
 from app.models.database import get_db
 from app.models.models import Developer
-from app.schemas.schemas import DeveloperCreate, DeveloperResponse, DeveloperUpdate
+from app.schemas.schemas import (
+    AppRole,
+    AuthUser,
+    DeveloperCreate,
+    DeveloperResponse,
+    DeveloperUpdateAdmin,
+)
 
-router = APIRouter(dependencies=[Depends(require_auth)])
+router = APIRouter()
 
 
 @router.get("/developers", response_model=list[DeveloperResponse])
 async def list_developers(
     team: str | None = Query(None),
     is_active: bool = Query(True),
+    _: AuthUser = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
     stmt = select(Developer).where(Developer.is_active == is_active)
@@ -33,6 +41,7 @@ async def list_developers(
 )
 async def create_developer(
     data: DeveloperCreate,
+    _: AuthUser = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
     existing = await db.execute(
@@ -55,8 +64,11 @@ async def create_developer(
 @router.get("/developers/{developer_id}", response_model=DeveloperResponse)
 async def get_developer(
     developer_id: int,
+    user: AuthUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    if user.app_role != AppRole.admin and user.developer_id != developer_id:
+        raise HTTPException(status_code=403, detail="Access denied")
     dev = await db.get(Developer, developer_id)
     if not dev:
         raise HTTPException(status_code=404, detail="Developer not found")
@@ -66,7 +78,8 @@ async def get_developer(
 @router.patch("/developers/{developer_id}", response_model=DeveloperResponse)
 async def update_developer(
     developer_id: int,
-    data: DeveloperUpdate,
+    data: DeveloperUpdateAdmin,
+    _: AuthUser = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
     dev = await db.get(Developer, developer_id)
@@ -75,7 +88,7 @@ async def update_developer(
 
     updates = data.model_dump(exclude_unset=True)
     for field, value in updates.items():
-        setattr(dev, field, value)
+        setattr(dev, field, value.value if isinstance(value, PyEnum) else value)
     dev.updated_at = datetime.now(timezone.utc)
 
     await db.commit()
@@ -88,6 +101,7 @@ async def update_developer(
 )
 async def delete_developer(
     developer_id: int,
+    _: AuthUser = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
     dev = await db.get(Developer, developer_id)

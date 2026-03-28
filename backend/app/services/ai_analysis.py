@@ -456,7 +456,7 @@ async def run_one_on_one_prep(
     # 4. PRs merged/opened with titles
     prs = (
         await db.execute(
-            select(PullRequest.number, PullRequest.title, PullRequest.state, PullRequest.is_merged)
+            select(PullRequest.number, PullRequest.title, PullRequest.state, PullRequest.is_merged, PullRequest.html_url)
             .where(
                 PullRequest.author_id == developer_id,
                 PullRequest.created_at >= date_from,
@@ -527,7 +527,7 @@ async def run_one_on_one_prep(
             "metrics": {k: v.model_dump() for k, v in benchmarks.metrics.items()},
         } if benchmarks.metrics else None,
         "prs": [
-            {"number": pr.number, "title": pr.title, "state": pr.state, "merged": pr.is_merged}
+            {"number": pr.number, "title": pr.title, "state": pr.state, "merged": pr.is_merged, "url": pr.html_url}
             for pr in prs
         ],
         "review_quality": {tier: count for tier, count in review_quality_rows},

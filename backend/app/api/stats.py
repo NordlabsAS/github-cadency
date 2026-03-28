@@ -3,16 +3,20 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.auth import require_auth
+from app.api.auth import get_current_user, require_admin
 from app.models.database import get_db
 from app.models.models import Developer, Repository
 from app.schemas.schemas import (
+    AppRole,
+    AuthUser,
     BenchmarksResponse,
     CollaborationResponse,
     DeveloperStatsResponse,
     DeveloperStatsWithPercentilesResponse,
     DeveloperTrendsResponse,
+    IssueLinkageStats,
     RepoStatsResponse,
+    StalePRsResponse,
     TeamStatsResponse,
     WorkloadResponse,
 )
@@ -22,12 +26,14 @@ from app.services.stats import (
     get_developer_stats,
     get_developer_stats_with_percentiles,
     get_developer_trends,
+    get_issue_linkage_stats,
     get_repo_stats,
+    get_stale_prs,
     get_team_stats,
     get_workload,
 )
 
-router = APIRouter(dependencies=[Depends(require_auth)])
+router = APIRouter()
 
 
 @router.get(
@@ -39,8 +45,11 @@ async def developer_stats(
     date_from: datetime | None = Query(None),
     date_to: datetime | None = Query(None),
     include_percentiles: bool = Query(False),
+    user: AuthUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    if user.app_role != AppRole.admin and user.developer_id != developer_id:
+        raise HTTPException(status_code=403, detail="Access denied")
     dev = await db.get(Developer, developer_id)
     if not dev:
         raise HTTPException(status_code=404, detail="Developer not found")
@@ -56,6 +65,7 @@ async def team_stats(
     team: str | None = Query(None),
     date_from: datetime | None = Query(None),
     date_to: datetime | None = Query(None),
+    _: AuthUser = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
     return await get_team_stats(db, team, date_from, date_to)
@@ -66,6 +76,7 @@ async def repo_stats(
     repo_id: int,
     date_from: datetime | None = Query(None),
     date_to: datetime | None = Query(None),
+    _: AuthUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     repo = await db.get(Repository, repo_id)
@@ -79,6 +90,7 @@ async def benchmarks(
     team: str | None = Query(None),
     date_from: datetime | None = Query(None),
     date_to: datetime | None = Query(None),
+    _: AuthUser = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
     return await get_benchmarks(db, team, date_from, date_to)
@@ -93,8 +105,11 @@ async def developer_trends(
     periods: int = Query(8, ge=2, le=52),
     period_type: str = Query("week"),
     sprint_length_days: int = Query(14, ge=7, le=28),
+    user: AuthUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    if user.app_role != AppRole.admin and user.developer_id != developer_id:
+        raise HTTPException(status_code=403, detail="Access denied")
     dev = await db.get(Developer, developer_id)
     if not dev:
         raise HTTPException(status_code=404, detail="Developer not found")
@@ -108,9 +123,20 @@ async def collaboration(
     team: str | None = Query(None),
     date_from: datetime | None = Query(None),
     date_to: datetime | None = Query(None),
+    _: AuthUser = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
     return await get_collaboration(db, team, date_from, date_to)
+
+
+@router.get("/stats/stale-prs", response_model=StalePRsResponse)
+async def stale_prs(
+    team: str | None = Query(None),
+    threshold_hours: int = Query(24, ge=1, le=720),
+    _: AuthUser = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    return await get_stale_prs(db, team, threshold_hours)
 
 
 @router.get("/stats/workload", response_model=WorkloadResponse)
@@ -118,6 +144,18 @@ async def workload(
     team: str | None = Query(None),
     date_from: datetime | None = Query(None),
     date_to: datetime | None = Query(None),
+    _: AuthUser = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
     return await get_workload(db, team, date_from, date_to)
+
+
+@router.get("/stats/issue-linkage", response_model=IssueLinkageStats)
+async def issue_linkage(
+    team: str | None = Query(None),
+    date_from: datetime | None = Query(None),
+    date_to: datetime | None = Query(None),
+    _: AuthUser = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    return await get_issue_linkage_stats(db, team, date_from, date_to)

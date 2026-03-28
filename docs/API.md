@@ -2,12 +2,74 @@
 
 Base URL: `http://localhost:8000/api`
 
-All endpoints except `GET /api/health` and `POST /api/webhooks/github` require:
+## Authentication
+
+DevPulse uses GitHub OAuth for authentication. After login, all protected endpoints require a JWT:
 ```
-Authorization: Bearer {DEVPULSE_ADMIN_TOKEN}
+Authorization: Bearer {jwt_token}
 ```
 
+**Two roles:**
+- `admin` — full access to all endpoints
+- `developer` — read-only access to own stats, profile, goals, and repo stats
+
+**Public endpoints** (no auth required): `GET /api/health`, `POST /api/webhooks/github`, `GET /api/auth/login`, `GET /api/auth/callback`
+
+### Access Control Summary
+
+| Endpoint Group | Admin | Developer |
+|----------------|-------|-----------|
+| **Auth** (`/api/auth/*`) | Public | Public |
+| **Developer stats** (`/api/stats/developer/{id}`) | Any ID | Own ID only |
+| **Team/benchmarks/workload/collaboration/stale-prs/issue-linkage** | Yes | No (403) |
+| **Repo stats** (`/api/stats/repo/{id}`) | Yes | Yes |
+| **Developers CRUD** (`/api/developers/*`) | Full access | GET own profile only |
+| **Goals** (`/api/goals/*`) | Full access | GET own goals, POST/PATCH self-goals |
+| **Sync** (`/api/sync/*`) | Yes | No (403) |
+| **AI Analysis** (`/api/ai/*`) | Yes | No (403) |
+
 Date parameters accept ISO 8601 format: `2026-01-01T00:00:00Z`. When `date_from`/`date_to` are omitted, defaults to the last 30 days.
+
+---
+
+## Auth
+
+### GET /api/auth/login
+
+Returns the GitHub OAuth authorization URL. The frontend should redirect the user to this URL.
+
+**Response:** `200 OK`
+```json
+{
+  "url": "https://github.com/login/oauth/authorize?client_id=...&redirect_uri=...&scope=read:user"
+}
+```
+
+### GET /api/auth/callback?code={code}
+
+OAuth callback. Exchanges the GitHub authorization code for an access token, fetches user profile, creates or updates the developer record, and issues a JWT.
+
+**Behavior:**
+- New user → creates developer record (`app_role: "developer"`, or `"admin"` if username matches `DEVPULSE_INITIAL_ADMIN`)
+- Existing user → updates `avatar_url`
+- Deactivated user → returns `403 Forbidden`
+
+**Response:** `302 Redirect` to `{FRONTEND_URL}/auth/callback?token={jwt}`
+
+### GET /api/auth/me
+
+Returns the currently authenticated user's info.
+
+**Response:** `200 OK`
+```json
+{
+  "developer_id": 1,
+  "github_username": "octocat",
+  "display_name": "Octo Cat",
+  "app_role": "admin",
+  "avatar_url": "https://avatars.githubusercontent.com/u/583231"
+}
+```
 
 ---
 
@@ -28,9 +90,13 @@ Returns service status. No authentication required.
 
 Team registry CRUD. Developers are the core entity linking GitHub usernames to internal profiles.
 
+**Access:** Admin-only for list, create, update, delete. Developers can GET their own profile.
+
+**DeveloperResponse** includes `app_role` field (`"admin"` or `"developer"`).
+
 ### GET /api/developers
 
-List developers.
+List developers. **Admin only.**
 
 | Query Param | Type | Default | Description |
 |-------------|------|---------|-------------|
@@ -41,7 +107,7 @@ List developers.
 
 ### POST /api/developers
 
-Create a developer.
+Create a developer. **Admin only.**
 
 **Request Body:**
 ```json
@@ -66,20 +132,23 @@ Create a developer.
 
 ### GET /api/developers/{developer_id}
 
+**Access:** Admin can view any developer. Developers can view their own profile only.
+
 **Response:** `200 OK` — `DeveloperResponse`
-**Errors:** `404 Not Found`
+**Errors:** `404 Not Found`, `403 Forbidden` (developer accessing another profile)
 
 ### PATCH /api/developers/{developer_id}
 
-Partial update. Only provided fields are changed.
+Partial update. Only provided fields are changed. **Admin only.**
 
-**Request Body:** Any subset of `DeveloperCreate` fields (except `github_username`)
+**Request Body:** Any subset of `DeveloperCreate` fields (except `github_username`), plus:
+- `app_role`: `"admin"` or `"developer"` — promotes or demotes a user
 
 **Response:** `200 OK` — `DeveloperResponse`
 
 ### DELETE /api/developers/{developer_id}
 
-Soft-delete: sets `is_active = false`.
+Soft-delete: sets `is_active = false`. **Admin only.** Deactivated developers cannot log in via OAuth.
 
 **Response:** `204 No Content`
 
@@ -91,7 +160,7 @@ All stats endpoints accept optional `date_from` and `date_to` query parameters.
 
 ### GET /api/stats/developer/{developer_id}
 
-Developer metrics for a date range.
+Developer metrics for a date range. **Developers can only access their own stats.**
 
 | Query Param | Type | Default | Description |
 |-------------|------|---------|-------------|
@@ -106,6 +175,7 @@ Developer metrics for a date range.
   "prs_merged": 10,
   "prs_closed_without_merge": 1,
   "prs_open": 3,
+  "prs_draft": 1,
   "total_additions": 2450,
   "total_deletions": 890,
   "total_changed_files": 45,
@@ -152,7 +222,7 @@ Percentile bands: `below_p25`, `p25_to_p50`, `p50_to_p75`, `above_p75`. For lowe
 
 ### GET /api/stats/team
 
-Team-wide aggregate metrics.
+Team-wide aggregate metrics. **Admin only.**
 
 | Query Param | Type | Default | Description |
 |-------------|------|---------|-------------|
@@ -193,7 +263,7 @@ Repository-scoped metrics with top contributors.
 
 ### GET /api/stats/benchmarks
 
-Team percentile bands (p25/p50/p75) across all active developers.
+Team percentile bands (p25/p50/p75) across all active developers. **Admin only.**
 
 | Query Param | Type | Default | Description |
 |-------------|------|---------|-------------|
@@ -219,7 +289,7 @@ Team percentile bands (p25/p50/p75) across all active developers.
 
 ### GET /api/stats/developer/{developer_id}/trends
 
-Period-bucketed stats with linear regression trend analysis.
+Period-bucketed stats with linear regression trend analysis. **Developers can only access their own trends.**
 
 | Query Param | Type | Default | Description |
 |-------------|------|---------|-------------|
@@ -256,7 +326,7 @@ Direction respects metric polarity: decreasing `avg_time_to_merge_h` = "improvin
 
 ### GET /api/stats/collaboration
 
-Reviewer-author collaboration matrix with team insights.
+Reviewer-author collaboration matrix with team insights. **Admin only.**
 
 | Query Param | Type | Default | Description |
 |-------------|------|---------|-------------|
@@ -295,7 +365,7 @@ Insights:
 
 ### GET /api/stats/workload
 
-Per-developer workload indicators and automated alerts.
+Per-developer workload indicators and automated alerts. **Admin only.**
 
 | Query Param | Type | Default | Description |
 |-------------|------|---------|-------------|
@@ -310,6 +380,7 @@ Per-developer workload indicators and automated alerts.
       "github_username": "octocat",
       "display_name": "Octo Cat",
       "open_prs_authored": 3,
+      "drafts_open": 1,
       "open_prs_reviewing": 2,
       "open_issues_assigned": 1,
       "reviews_given_this_period": 8,
@@ -330,13 +401,105 @@ Per-developer workload indicators and automated alerts.
 
 Workload scores: `low` (no activity), `balanced` (<= 5 total load), `high` (<= 12), `overloaded` (> 12). Total load = open PRs authored + reviewing + open issues + reviews given.
 
+### GET /api/stats/stale-prs
+
+Open PRs that need attention, sorted by staleness (most stale first). **Admin only.**
+
+| Query Param | Type | Default | Description |
+|-------------|------|---------|-------------|
+| `team` | string | - | Filter by team (PRs authored by team members) |
+| `threshold_hours` | int (1-720) | `24` | Minimum age in hours before a PR is considered stale |
+
+**Three staleness categories:**
+1. **`no_review`** — open, non-draft, no first review received, older than threshold
+2. **`changes_requested_no_response`** — most recent review is `CHANGES_REQUESTED`, author hasn't updated the PR since (within 1h tolerance), review older than threshold
+3. **`approved_not_merged`** — has at least one `APPROVED` review, last approval older than threshold, still not merged
+
+PRs are deduplicated across categories (priority: no_review > changes_requested > approved_not_merged).
+
+**Response:** `200 OK`
+```json
+{
+  "stale_prs": [
+    {
+      "pr_id": 42,
+      "number": 123,
+      "title": "Fix authentication middleware",
+      "html_url": "https://github.com/org/repo/pull/123",
+      "repo_name": "org/repo",
+      "author_name": "Alice",
+      "author_id": 1,
+      "age_hours": 72.5,
+      "is_draft": false,
+      "review_count": 0,
+      "has_approved": false,
+      "has_changes_requested": false,
+      "last_activity_at": "2026-03-25T10:00:00Z",
+      "stale_reason": "no_review"
+    },
+    {
+      "pr_id": 55,
+      "number": 145,
+      "title": "Update caching layer",
+      "html_url": "https://github.com/org/repo/pull/145",
+      "repo_name": "org/repo",
+      "author_name": "Bob",
+      "author_id": 2,
+      "age_hours": 48.2,
+      "is_draft": false,
+      "review_count": 1,
+      "has_approved": true,
+      "has_changes_requested": false,
+      "last_activity_at": "2026-03-26T08:30:00Z",
+      "stale_reason": "approved_not_merged"
+    }
+  ],
+  "total_count": 2
+}
+```
+
+---
+
+### GET /api/stats/issue-linkage
+
+Issue-to-PR linkage statistics via closing keywords parsed from PR bodies. Shows how well issues are connected to the PRs that resolved them. **Admin only.**
+
+| Query Param | Type | Default | Description |
+|-------------|------|---------|-------------|
+| `date_from` | datetime | 30 days ago | Start of date range (ISO 8601) |
+| `date_to` | datetime | now | End of date range (ISO 8601) |
+| `team` | string | - | Filter by team (PRs by author team, issues by assignee team) |
+
+**Closing keywords recognized:** `close`, `closes`, `closed`, `fix`, `fixes`, `fixed`, `resolve`, `resolves`, `resolved` — case-insensitive, followed by `#N` where N is an issue number in the same repo.
+
+**Response:** `200 OK`
+```json
+{
+  "issues_with_linked_prs": 15,
+  "issues_without_linked_prs": 3,
+  "avg_prs_per_issue": 1.2,
+  "issues_with_multiple_prs": 2,
+  "prs_without_linked_issues": 8
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `issues_with_linked_prs` | Closed issues referenced by at least one PR's closing keywords |
+| `issues_without_linked_prs` | Closed issues with no PR referencing them (work outside PR process) |
+| `avg_prs_per_issue` | Average PRs per linked issue (`null` if no linked issues) |
+| `issues_with_multiple_prs` | Issues linked to 2+ PRs (may indicate scope was too large) |
+| `prs_without_linked_issues` | PRs in the date range that don't reference any issue (undocumented work) |
+
 ---
 
 ## Developer Goals
 
+**Access:** Admin has full CRUD. Developers can view their own goals, create self-goals via `/goals/self`, and update their own self-created goals.
+
 ### POST /api/goals
 
-Create a goal for a developer. Baseline value is auto-computed from the current 30-day window.
+Create a goal for a developer. Baseline value is auto-computed from the current 30-day window. **Admin only.**
 
 **Request Body:**
 ```json
@@ -359,13 +522,14 @@ Create a goal for a developer. Baseline value is auto-computed from the current 
 
 ### GET /api/goals?developer_id={id}
 
-List all goals for a developer, ordered by creation date (newest first).
+List all goals for a developer, ordered by creation date (newest first). **Developers can only list their own goals.**
 
 **Response:** `200 OK` — `GoalResponse[]`
+**Errors:** `403 Forbidden` (developer accessing another developer's goals)
 
 ### PATCH /api/goals/{goal_id}
 
-Update goal status or notes.
+Update goal status or notes. **Admin only.**
 
 **Request Body:**
 ```json
@@ -379,9 +543,48 @@ Update goal status or notes.
 
 **Response:** `200 OK` — `GoalResponse`
 
+### POST /api/goals/self
+
+Create a goal for the authenticated developer. `developer_id` is derived from the JWT token. Baseline value is auto-computed from the current 30-day window. The goal is marked `created_by: "self"`. **Any authenticated user.**
+
+**Request Body:**
+```json
+{
+  "title": "Ship more PRs",
+  "description": "Focus on smaller, frequent merges",
+  "metric_key": "prs_merged",
+  "target_value": 12,
+  "target_direction": "above",
+  "target_date": "2026-06-01"
+}
+```
+
+Only `title`, `metric_key`, and `target_value` are required. No `developer_id` field — it is set from the token.
+
+**Response:** `200 OK` — `GoalResponse` (with `created_by: "self"`)
+
+### PATCH /api/goals/self/{goal_id}
+
+Update a self-created goal. Developers can only update goals they created themselves (`created_by: "self"`). Admin-created goals return `403`. **Any authenticated user (own goals only).**
+
+**Request Body:**
+```json
+{
+  "target_value": 15,
+  "target_date": "2026-07-01",
+  "status": "achieved",
+  "notes": "Consistently hitting target"
+}
+```
+
+All fields are optional. `status` values: `active`, `achieved`, `abandoned`.
+
+**Response:** `200 OK` — `GoalResponse`
+**Errors:** `403 Forbidden` (goal belongs to another developer, or goal was admin-created), `404 Not Found`
+
 ### GET /api/goals/{goal_id}/progress
 
-Get goal progress with 8-week history. Triggers auto-achievement check: if the metric crosses the target for 2 consecutive weekly periods, the goal is automatically marked as achieved.
+Get goal progress with 8-week history. Triggers auto-achievement check: if the metric crosses the target for 2 consecutive weekly periods, the goal is automatically marked as achieved. **Developers can only view their own goals' progress.**
 
 **Response:** `200 OK`
 ```json
@@ -404,6 +607,8 @@ Get goal progress with 8-week history. Triggers auto-achievement check: if the m
 ---
 
 ## Sync
+
+**All sync endpoints are admin only.**
 
 ### POST /api/sync/full
 
@@ -466,7 +671,7 @@ GitHub webhook receiver. No Bearer auth — uses HMAC signature verification.
 
 ## AI Analysis
 
-AI features require `ANTHROPIC_API_KEY` to be set. All analysis calls are synchronous (wait for Claude response). Results are persisted in `ai_analyses` table.
+**All AI endpoints are admin only.** AI features require `ANTHROPIC_API_KEY` to be set. All analysis calls are synchronous (wait for Claude response). Results are persisted in `ai_analyses` table.
 
 ### POST /api/ai/analyze
 

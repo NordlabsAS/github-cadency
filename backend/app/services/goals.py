@@ -8,6 +8,7 @@ from app.schemas.schemas import (
     GoalCreate,
     GoalProgressPoint,
     GoalProgressResponse,
+    GoalSelfUpdate,
     GoalUpdate,
 )
 
@@ -127,7 +128,7 @@ async def _get_metric_value(
 
 
 async def create_goal(
-    db: AsyncSession, goal_data: GoalCreate
+    db: AsyncSession, goal_data: GoalCreate, created_by: str = "admin"
 ) -> DeveloperGoal:
     now = datetime.now(timezone.utc)
     date_from = now - timedelta(days=30)
@@ -146,6 +147,7 @@ async def create_goal(
         target_direction=goal_data.target_direction,
         baseline_value=baseline,
         target_date=goal_data.target_date,
+        created_by=created_by,
     )
     db.add(goal)
     await db.commit()
@@ -171,6 +173,29 @@ async def update_goal(
     if not goal:
         return None
 
+    if update.status is not None:
+        goal.status = update.status
+        if update.status == "achieved" and not goal.achieved_at:
+            goal.achieved_at = datetime.now(timezone.utc)
+    if update.notes is not None:
+        goal.notes = update.notes
+
+    await db.commit()
+    await db.refresh(goal)
+    return goal
+
+
+async def update_goal_self(
+    db: AsyncSession, goal_id: int, update: GoalSelfUpdate
+) -> DeveloperGoal | None:
+    goal = await db.get(DeveloperGoal, goal_id)
+    if not goal:
+        return None
+
+    if update.target_value is not None:
+        goal.target_value = update.target_value
+    if update.target_date is not None:
+        goal.target_date = update.target_date
     if update.status is not None:
         goal.status = update.status
         if update.status == "achieved" and not goal.achieved_at:

@@ -2,13 +2,13 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.auth import require_auth
+from app.api.auth import require_admin
 from app.models.database import get_db
 from app.models.models import Repository, SyncEvent
 from app.schemas.schemas import RepoResponse, RepoTrackUpdate, SyncEventResponse
 from app.services.github_sync import run_sync
 
-router = APIRouter(dependencies=[Depends(require_auth)])
+router = APIRouter(dependencies=[Depends(require_admin)])
 
 
 @router.post("/sync/full", status_code=202)

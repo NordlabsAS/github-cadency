@@ -5,7 +5,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import ai_analysis, developers, goals, stats, sync, webhooks
+from app.api import ai_analysis, developers, goals, oauth, stats, sync, webhooks
 from app.config import settings
 from app.services.github_sync import run_sync
 
@@ -52,12 +52,13 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=[settings.frontend_url],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+app.include_router(oauth.router, prefix="/api", tags=["auth"])
 app.include_router(developers.router, prefix="/api", tags=["developers"])
 app.include_router(stats.router, prefix="/api", tags=["stats"])
 app.include_router(sync.router, prefix="/api", tags=["sync"])

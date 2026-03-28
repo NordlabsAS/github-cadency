@@ -1,6 +1,8 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useDevelopers, useCreateDeveloper, useUpdateDeveloper } from '@/hooks/useDevelopers'
+import ErrorCard from '@/components/ErrorCard'
+import TableSkeleton from '@/components/TableSkeleton'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import {
@@ -152,7 +154,7 @@ function DeveloperForm({
 export default function TeamRegistry() {
   const navigate = useNavigate()
   const [teamFilter, setTeamFilter] = useState('')
-  const { data: developers, isLoading } = useDevelopers(teamFilter || undefined)
+  const { data: developers, isLoading, isError, refetch } = useDevelopers(teamFilter || undefined)
   const createDev = useCreateDeveloper()
   const [editDev, setEditDev] = useState<Developer | null>(null)
   const updateDev = useUpdateDeveloper(editDev?.id ?? 0)
@@ -196,8 +198,10 @@ export default function TeamRegistry() {
         </div>
       </div>
 
-      {isLoading ? (
-        <div className="text-muted-foreground">Loading...</div>
+      {isError ? (
+        <ErrorCard message="Could not load developers." onRetry={() => refetch()} />
+      ) : isLoading ? (
+        <TableSkeleton columns={8} rows={5} headers={['Name', 'GitHub', 'Role', 'Team', 'Skills', 'Location', 'Timezone', '']} />
       ) : (
         <div className="rounded-md border">
           <Table>

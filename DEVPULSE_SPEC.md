@@ -328,9 +328,30 @@ GET    /api/ai/history/{id}             Get a specific analysis result
 
 ### 5.6 Authentication
 
-**Phase 1 (MVP):** Bearer token in `Authorization` header. Single admin token set via environment variable. All endpoints require it except `/api/webhooks/github` (uses its own HMAC verification).
+**Implemented:** GitHub OAuth with JWT sessions and role-based access control.
 
-**Phase 2:** Azure AD / Entra ID SSO integration. Map AD groups to DevPulse roles (admin, viewer).
+**Auth flow:**
+1. User clicks "Login with GitHub" → frontend calls `GET /api/auth/login` → receives GitHub OAuth authorize URL
+2. User authorizes on GitHub → redirected to `GET /api/auth/callback?code=...`
+3. Backend exchanges code for GitHub access token, fetches GitHub user profile
+4. Backend looks up or creates developer by `github_username`, issues a signed JWT (7-day expiry)
+5. Backend redirects to frontend with JWT → frontend stores in `localStorage`
+6. All subsequent API calls include `Authorization: Bearer {jwt}`
+
+**Roles:**
+- `admin` — full access to all endpoints (manage developers, view all stats, sync, AI analysis)
+- `developer` — read-only access to own stats, profile, goals, and repo stats
+
+**Bootstrap:** Set `DEVPULSE_INITIAL_ADMIN` env var to a GitHub username. That user is auto-promoted to `admin` on first OAuth login. Subsequently, admins can promote other users via `PATCH /api/developers/{id}` with `app_role: "admin"`.
+
+**Access control:** Endpoints use per-route dependency injection — `get_current_user()` returns `AuthUser(developer_id, github_username, app_role)`, `require_admin()` raises `403 Forbidden` for non-admin users. Public endpoints: `/api/health`, `/api/webhooks/github`, `/api/auth/*`.
+
+**Environment variables:**
+- `GITHUB_CLIENT_ID` — GitHub OAuth client ID (from GitHub App settings)
+- `GITHUB_CLIENT_SECRET` — GitHub OAuth client secret
+- `JWT_SECRET` — secret for signing JWT tokens (min 32 chars recommended)
+- `DEVPULSE_INITIAL_ADMIN` — GitHub username auto-promoted to admin on first login (optional)
+- `FRONTEND_URL` — frontend URL for OAuth redirect (default: `http://localhost:5173`)
 
 
 ## 6. AI Analysis Module

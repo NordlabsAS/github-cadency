@@ -4,18 +4,23 @@ import pytest
 
 class TestListDevelopers:
     @pytest.mark.asyncio
-    async def test_empty_list(self, client):
+    async def test_list_includes_admin(self, client, sample_admin):
+        """With only the admin user, list should have 1 entry."""
         resp = await client.get("/api/developers")
         assert resp.status_code == 200
-        assert resp.json() == []
+        data = resp.json()
+        assert len(data) == 1
+        assert data[0]["github_username"] == "admin"
 
     @pytest.mark.asyncio
     async def test_list_returns_active_developers(self, client, sample_developer):
         resp = await client.get("/api/developers")
         assert resp.status_code == 200
         data = resp.json()
-        assert len(data) == 1
-        assert data[0]["github_username"] == "testuser"
+        # admin + sample_developer
+        assert len(data) == 2
+        usernames = {d["github_username"] for d in data}
+        assert "testuser" in usernames
         assert data[0]["is_active"] is True
 
     @pytest.mark.asyncio
@@ -47,6 +52,7 @@ class TestCreateDeveloper:
         assert data["display_name"] == "New Developer"
         assert data["team"] == "frontend"
         assert data["is_active"] is True
+        assert data["app_role"] == "developer"
         assert "id" in data
 
     @pytest.mark.asyncio
@@ -120,13 +126,15 @@ class TestDeleteDeveloper:
         resp = await client.delete(f"/api/developers/{sample_developer.id}")
         assert resp.status_code == 204
 
-        # Should no longer appear in active list
+        # Should no longer appear in active list (admin still there)
         resp = await client.get("/api/developers")
-        assert len(resp.json()) == 0
+        usernames = [d["github_username"] for d in resp.json()]
+        assert "testuser" not in usernames
 
         # Should appear in inactive list
         resp = await client.get("/api/developers?is_active=false")
         assert len(resp.json()) == 1
+        assert resp.json()[0]["github_username"] == "testuser"
 
     @pytest.mark.asyncio
     async def test_delete_not_found(self, client):

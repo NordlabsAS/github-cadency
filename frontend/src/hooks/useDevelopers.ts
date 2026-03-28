@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { toast } from 'sonner'
 import { apiFetch } from '@/utils/api'
 import type { Developer, DeveloperCreate, DeveloperUpdate } from '@/utils/types'
 
@@ -28,7 +29,11 @@ export function useCreateDeveloper() {
         method: 'POST',
         body: JSON.stringify(data),
       }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['developers'] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['developers'] })
+      toast.success('Developer added')
+    },
+    onError: () => toast.error('Failed to add developer'),
   })
 }
 
@@ -43,7 +48,9 @@ export function useUpdateDeveloper(id: number) {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['developers'] })
       qc.invalidateQueries({ queryKey: ['developer', id] })
+      toast.success('Developer updated')
     },
+    onError: () => toast.error('Failed to update developer'),
   })
 }
 
@@ -52,6 +59,10 @@ export function useDeleteDeveloper() {
   return useMutation({
     mutationFn: (id: number) =>
       apiFetch(`/developers/${id}`, { method: 'DELETE' }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['developers'] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['developers'] })
+      toast.success('Developer removed')
+    },
+    onError: () => toast.error('Failed to remove developer'),
   })
 }

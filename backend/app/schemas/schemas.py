@@ -18,6 +18,11 @@ class DeveloperRole(str, Enum):
     intern = "intern"
 
 
+class AppRole(str, Enum):
+    developer = "developer"
+    admin = "admin"
+
+
 class AnalysisType(str, Enum):
     communication = "communication"
     conflict = "conflict"
@@ -28,6 +33,23 @@ class ScopeType(str, Enum):
     developer = "developer"
     team = "team"
     repo = "repo"
+
+
+# --- Auth schemas ---
+
+
+class AuthUser(BaseModel):
+    developer_id: int
+    github_username: str
+    app_role: AppRole
+
+
+class AuthMeResponse(BaseModel):
+    developer_id: int
+    github_username: str
+    display_name: str
+    app_role: AppRole
+    avatar_url: str | None
 
 
 # --- Developer schemas ---
@@ -58,6 +80,10 @@ class DeveloperUpdate(BaseModel):
     notes: str | None = None
 
 
+class DeveloperUpdateAdmin(DeveloperUpdate):
+    app_role: AppRole | None = None
+
+
 class DeveloperResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -71,6 +97,7 @@ class DeveloperResponse(BaseModel):
     location: str | None
     timezone: str | None
     team: str | None
+    app_role: str
     is_active: bool
     avatar_url: str | None
     notes: str | None
@@ -104,6 +131,7 @@ class DeveloperStatsResponse(BaseModel):
     prs_merged: int = 0
     prs_closed_without_merge: int = 0
     prs_open: int = 0
+    prs_draft: int = 0
     total_additions: int = 0
     total_deletions: int = 0
     total_changed_files: int = 0
@@ -113,9 +141,19 @@ class DeveloperStatsResponse(BaseModel):
     review_quality_score: float | None = None
     avg_time_to_first_review_hours: float | None = None
     avg_time_to_merge_hours: float | None = None
+    avg_time_to_approve_hours: float | None = None
+    avg_time_after_approve_hours: float | None = None
+    prs_merged_without_approval: int = 0
     issues_assigned: int = 0
     issues_closed: int = 0
     avg_time_to_close_issue_hours: float | None = None
+    avg_review_rounds: float | None = None
+    prs_merged_first_pass: int = 0
+    first_pass_rate: float | None = None
+    prs_self_merged: int = 0
+    self_merge_rate: float | None = None
+    prs_reverted: int = 0
+    reverts_authored: int = 0
 
 
 class TopContributor(BaseModel):
@@ -134,6 +172,9 @@ class TeamStatsResponse(BaseModel):
     avg_time_to_merge_hours: float | None = None
     total_reviews: int = 0
     total_issues_closed: int = 0
+    avg_review_rounds: float | None = None
+    first_pass_rate: float | None = None
+    revert_rate: float | None = None
 
 
 class RepoStatsResponse(BaseModel):
@@ -207,6 +248,7 @@ class DeveloperWorkload(BaseModel):
     github_username: str
     display_name: str
     open_prs_authored: int = 0
+    drafts_open: int = 0
     open_prs_reviewing: int = 0
     open_issues_assigned: int = 0
     reviews_given_this_period: int = 0
@@ -225,6 +267,42 @@ class WorkloadAlert(BaseModel):
 class WorkloadResponse(BaseModel):
     developers: list[DeveloperWorkload]
     alerts: list[WorkloadAlert]
+
+
+# --- Stale PR schemas (P2-01) ---
+
+
+class StalePR(BaseModel):
+    pr_id: int
+    number: int
+    title: str
+    html_url: str
+    repo_name: str
+    author_name: str | None = None
+    author_id: int | None = None
+    age_hours: float
+    is_draft: bool = False
+    review_count: int = 0
+    has_approved: bool = False
+    has_changes_requested: bool = False
+    last_activity_at: datetime
+    stale_reason: str  # "no_review", "changes_requested_no_response", "approved_not_merged"
+
+
+class StalePRsResponse(BaseModel):
+    stale_prs: list[StalePR]
+    total_count: int
+
+
+# --- Issue-PR Linkage schemas (P2-04) ---
+
+
+class IssueLinkageStats(BaseModel):
+    issues_with_linked_prs: int
+    issues_without_linked_prs: int
+    avg_prs_per_issue: float | None
+    issues_with_multiple_prs: int
+    prs_without_linked_issues: int
 
 
 # --- Collaboration schemas (M5) ---
@@ -285,7 +363,23 @@ class GoalCreate(BaseModel):
     target_date: date | None = None
 
 
+class GoalSelfCreate(BaseModel):
+    title: str
+    description: str | None = None
+    metric_key: MetricKey
+    target_value: float
+    target_direction: Literal["above", "below"] = "above"
+    target_date: date | None = None
+
+
 class GoalUpdate(BaseModel):
+    status: Literal["active", "achieved", "abandoned"] | None = None
+    notes: str | None = None
+
+
+class GoalSelfUpdate(BaseModel):
+    target_value: float | None = None
+    target_date: date | None = None
     status: Literal["active", "achieved", "abandoned"] | None = None
     notes: str | None = None
 
@@ -306,6 +400,7 @@ class GoalResponse(BaseModel):
     target_date: date | None
     achieved_at: datetime | None
     notes: str | None
+    created_by: str | None
 
 
 class GoalProgressPoint(BaseModel):

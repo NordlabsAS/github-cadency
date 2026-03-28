@@ -2,6 +2,9 @@ import { useState } from 'react'
 import { useRepos, useToggleTracking } from '@/hooks/useSync'
 import { useRepoStats } from '@/hooks/useStats'
 import { useDateRange } from '@/hooks/useDateRange'
+import ErrorCard from '@/components/ErrorCard'
+import TableSkeleton from '@/components/TableSkeleton'
+import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
 import { Badge } from '@/components/ui/badge'
 import {
@@ -17,7 +20,18 @@ function RepoStatsPanel({ repoId }: { repoId: number }) {
   const { dateFrom, dateTo } = useDateRange()
   const { data: stats, isLoading } = useRepoStats(repoId, dateFrom, dateTo)
 
-  if (isLoading) return <div className="p-4 text-sm text-muted-foreground">Loading stats...</div>
+  if (isLoading) {
+    return (
+      <div className="grid grid-cols-2 gap-4 p-4 sm:grid-cols-4">
+        {Array.from({ length: 4 }).map((_, i) => (
+          <div key={i} className="space-y-1">
+            <Skeleton className="h-3 w-16" />
+            <Skeleton className="h-5 w-24" />
+          </div>
+        ))}
+      </div>
+    )
+  }
   if (!stats) return null
 
   return (
@@ -59,11 +73,19 @@ function RepoStatsPanel({ repoId }: { repoId: number }) {
 }
 
 export default function Repos() {
-  const { data: repos, isLoading } = useRepos()
+  const { data: repos, isLoading, isError, refetch } = useRepos()
   const toggle = useToggleTracking()
   const [expandedId, setExpandedId] = useState<number | null>(null)
 
-  if (isLoading) return <div className="text-muted-foreground">Loading repos...</div>
+  if (isError) return <ErrorCard message="Could not load repositories." onRetry={() => refetch()} />
+  if (isLoading) {
+    return (
+      <div className="space-y-4">
+        <h1 className="text-2xl font-bold">Repositories</h1>
+        <TableSkeleton columns={4} rows={6} headers={['Repository', 'Language', 'Tracked', 'Last Synced']} />
+      </div>
+    )
+  }
 
   return (
     <div className="space-y-4">
