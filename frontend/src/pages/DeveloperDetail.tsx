@@ -7,8 +7,6 @@ import { useAuth } from '@/hooks/useAuth'
 import {
   useGoals,
   useGoalProgress,
-  useCreateSelfGoal,
-  useCreateAdminGoal,
   useUpdateSelfGoal,
 } from '@/hooks/useGoals'
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
@@ -19,15 +17,6 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
 import {
   Dialog,
   DialogContent,
@@ -41,9 +30,10 @@ import TrendChart from '@/components/charts/TrendChart'
 import PercentileBar from '@/components/charts/PercentileBar'
 import ReviewQualityDonut from '@/components/charts/ReviewQualityDonut'
 import GoalSparkline from '@/components/charts/GoalSparkline'
+import GoalCreateDialog, { metricKeyLabels } from '@/components/GoalCreateDialog'
 import AnalysisResultRenderer from '@/components/ai/AnalysisResultRenderer'
 import { useState } from 'react'
-import type { TrendPeriod, GoalMetricKey, GoalResponse } from '@/utils/types'
+import type { TrendPeriod, GoalResponse } from '@/utils/types'
 
 const trendCharts: {
   title: string
@@ -63,16 +53,6 @@ const trendCharts: {
   { title: 'Additions', metricKey: 'additions', trendKey: 'additions' },
 ]
 
-const metricKeyLabels: Record<string, string> = {
-  prs_merged: 'PRs Merged',
-  prs_opened: 'PRs Opened',
-  time_to_merge_h: 'Time to Merge (h)',
-  time_to_first_review_h: 'Time to First Review (h)',
-  reviews_given: 'Reviews Given',
-  review_quality_score: 'Review Quality Score',
-  issues_closed: 'Issues Closed',
-  avg_pr_additions: 'Avg PR Additions',
-}
 
 function GoalProgressRow({ goal }: { goal: GoalResponse }) {
   const { data: progress } = useGoalProgress(goal.id)
@@ -144,18 +124,10 @@ export default function DeveloperDetail() {
   const runOneOnOnePrep = useRunOneOnOnePrep()
   const { user, isAdmin } = useAuth()
   const { data: goals } = useGoals(devId)
-  const createSelfGoal = useCreateSelfGoal()
-  const createAdminGoal = useCreateAdminGoal()
   const updateSelfGoal = useUpdateSelfGoal()
   const [analysisType, setAnalysisType] = useState<'communication' | 'sentiment'>('communication')
   const [analyzeOpen, setAnalyzeOpen] = useState(false)
   const [prepOpen, setPrepOpen] = useState(false)
-  const [goalOpen, setGoalOpen] = useState(false)
-  const [goalTitle, setGoalTitle] = useState('')
-  const [goalMetric, setGoalMetric] = useState<GoalMetricKey>('prs_merged')
-  const [goalTarget, setGoalTarget] = useState('')
-  const [goalDirection, setGoalDirection] = useState<'above' | 'below'>('above')
-  const [goalDate, setGoalDate] = useState('')
 
   const isOwnPage = user?.developer_id === devId
   const canCreateGoal = isAdmin || isOwnPage
@@ -376,107 +348,11 @@ export default function DeveloperDetail() {
         <div className="flex items-center justify-between">
           <h2 className="text-lg font-semibold">{isOwnPage ? 'My Goals' : 'Goals'}</h2>
           {canCreateGoal && (
-            <Dialog open={goalOpen} onOpenChange={(open) => {
-              setGoalOpen(open)
-              if (!open) {
-                setGoalTitle('')
-                setGoalTarget('')
-                setGoalDate('')
-                setGoalMetric('prs_merged')
-                setGoalDirection('above')
-              }
-            }}>
-              <DialogTrigger asChild>
-                <Button variant="outline" size="sm">Add Goal</Button>
-              </DialogTrigger>
-              <DialogContent>
-                <DialogHeader>
-                  <DialogTitle>Create Goal</DialogTitle>
-                </DialogHeader>
-                <div className="space-y-4">
-                  <div className="space-y-1.5">
-                    <Label>Title</Label>
-                    <Input
-                      value={goalTitle}
-                      onChange={(e) => setGoalTitle(e.target.value)}
-                      placeholder="e.g. Improve review quality"
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label>Metric</Label>
-                    <Select value={goalMetric} onValueChange={(v) => setGoalMetric(v as GoalMetricKey)}>
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {Object.entries(metricKeyLabels).map(([key, label]) => (
-                          <SelectItem key={key} value={key}>{label}</SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div className="grid grid-cols-2 gap-4">
-                    <div className="space-y-1.5">
-                      <Label>Target Value</Label>
-                      <Input
-                        type="number"
-                        value={goalTarget}
-                        onChange={(e) => setGoalTarget(e.target.value)}
-                        placeholder="e.g. 10"
-                      />
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label>Direction</Label>
-                      <Select value={goalDirection} onValueChange={(v) => setGoalDirection(v as 'above' | 'below')}>
-                        <SelectTrigger>
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="above">Above</SelectItem>
-                          <SelectItem value="below">Below</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label>Target Date (optional)</Label>
-                    <Input
-                      type="date"
-                      value={goalDate}
-                      onChange={(e) => setGoalDate(e.target.value)}
-                    />
-                  </div>
-                  <div className="flex justify-end gap-2">
-                    <DialogClose asChild>
-                      <Button variant="outline">Cancel</Button>
-                    </DialogClose>
-                    <Button
-                      disabled={!goalTitle || !goalTarget || createSelfGoal.isPending || createAdminGoal.isPending}
-                      onClick={() => {
-                        const payload = {
-                          title: goalTitle,
-                          metric_key: goalMetric,
-                          target_value: Number(goalTarget),
-                          target_direction: goalDirection,
-                          target_date: goalDate || undefined,
-                        }
-                        const onSuccess = () => setGoalOpen(false)
-                        if (isAdmin && !isOwnPage) {
-                          createAdminGoal.mutate(
-                            { ...payload, developer_id: devId },
-                            { onSuccess }
-                          )
-                        } else {
-                          createSelfGoal.mutate(payload, { onSuccess })
-                        }
-                      }}
-                    >
-                      {createSelfGoal.isPending || createAdminGoal.isPending ? 'Creating...' : 'Create'}
-                    </Button>
-                  </div>
-                </div>
-              </DialogContent>
-            </Dialog>
+            <GoalCreateDialog
+              developerId={devId}
+              isAdmin={isAdmin}
+              isOwnPage={isOwnPage}
+            />
           )}
         </div>
 

@@ -305,6 +305,73 @@ class IssueLinkageStats(BaseModel):
     prs_without_linked_issues: int
 
 
+# --- Issue Quality schemas (P3-03) ---
+
+
+class IssueQualityStats(BaseModel):
+    total_issues_created: int
+    avg_body_length: float
+    pct_with_checklist: float
+    avg_comment_count: float
+    pct_closed_not_planned: float
+    avg_reopen_count: float
+    issues_without_body: int
+    label_distribution: dict[str, int]
+
+
+# --- Issue Creator Analytics schemas (P3-04) ---
+
+
+class IssueCreatorStats(BaseModel):
+    github_username: str
+    display_name: str | None
+    team: str | None
+    role: str | None
+    issues_created: int
+    avg_time_to_close_hours: float | None
+    avg_comment_count_before_pr: float | None
+    pct_with_checklist: float
+    pct_reopened: float
+    pct_closed_not_planned: float
+    avg_prs_per_issue: float | None
+    issues_with_body_under_100_chars: int
+    avg_time_to_first_pr_hours: float | None
+
+
+class IssueCreatorStatsResponse(BaseModel):
+    creators: list[IssueCreatorStats]
+    team_averages: IssueCreatorStats
+
+
+# --- Code Churn schemas (P3-06) ---
+
+
+class FileChurnEntry(BaseModel):
+    path: str
+    change_frequency: int
+    total_additions: int
+    total_deletions: int
+    total_churn: int
+    contributor_count: int
+    last_modified_at: datetime | None
+
+
+class StaleDirectory(BaseModel):
+    path: str
+    file_count: int
+    last_pr_activity: datetime | None
+
+
+class CodeChurnResponse(BaseModel):
+    repo_id: int
+    repo_name: str
+    hotspot_files: list[FileChurnEntry]
+    stale_directories: list[StaleDirectory]
+    total_files_in_repo: int
+    total_files_changed: int
+    tree_truncated: bool = False
+
+
 # --- Collaboration schemas (M5) ---
 
 
@@ -499,3 +566,33 @@ class TeamHealthRequest(BaseModel):
     team: str | None = None
     date_from: datetime
     date_to: datetime
+
+
+# --- PR Risk Scoring schemas (P3-05) ---
+
+
+class RiskFactor(BaseModel):
+    factor: str  # e.g. "large_pr"
+    weight: float
+    description: str
+
+
+class RiskAssessment(BaseModel):
+    pr_id: int
+    number: int
+    title: str
+    html_url: str
+    repo_name: str
+    author_name: str | None = None
+    author_id: int | None = None
+    risk_score: float  # 0.0-1.0
+    risk_level: str  # low, medium, high, critical
+    risk_factors: list[RiskFactor]
+    is_open: bool = False
+
+
+class RiskSummaryResponse(BaseModel):
+    high_risk_prs: list[RiskAssessment]
+    total_scored: int
+    avg_risk_score: float
+    prs_by_level: dict[str, int]

@@ -276,6 +276,49 @@ export interface StalePRsResponse {
   total_count: number
 }
 
+// --- Benchmarks Response (M2) ---
+
+export interface BenchmarksResponse {
+  period_start: string
+  period_end: string
+  sample_size: number
+  team: string | null
+  metrics: Record<string, BenchmarkMetric>
+}
+
+// --- Collaboration (M5) ---
+
+export interface CollaborationPair {
+  reviewer_id: number
+  reviewer_name: string
+  reviewer_team: string | null
+  author_id: number
+  author_name: string
+  author_team: string | null
+  reviews_count: number
+  approvals: number
+  changes_requested: number
+}
+
+export interface BusFactorEntry {
+  repo_name: string
+  sole_reviewer_id: number
+  sole_reviewer_name: string
+  review_share_pct: number
+}
+
+export interface CollaborationInsights {
+  silos: Array<{ team_a: string; team_b: string; note: string }>
+  bus_factors: BusFactorEntry[]
+  isolated_developers: Array<{ developer_id: number; display_name: string }>
+  strongest_pairs: CollaborationPair[]
+}
+
+export interface CollaborationResponse {
+  matrix: CollaborationPair[]
+  insights: CollaborationInsights
+}
+
 // --- Goals (M6 + P1-03) ---
 
 export type GoalMetricKey =
@@ -325,6 +368,81 @@ export interface GoalSelfUpdate {
   notes?: string | null
 }
 
+export interface GoalAdminUpdate {
+  status?: 'active' | 'achieved' | 'abandoned' | null
+  notes?: string | null
+}
+
+// --- Issue Creator Analytics (P3-04) ---
+
+export interface IssueCreatorStats {
+  github_username: string
+  display_name: string | null
+  team: string | null
+  role: string | null
+  issues_created: number
+  avg_time_to_close_hours: number | null
+  avg_comment_count_before_pr: number | null
+  pct_with_checklist: number
+  pct_reopened: number
+  pct_closed_not_planned: number
+  avg_prs_per_issue: number | null
+  issues_with_body_under_100_chars: number
+  avg_time_to_first_pr_hours: number | null
+}
+
+export interface IssueCreatorStatsResponse {
+  creators: IssueCreatorStats[]
+  team_averages: IssueCreatorStats
+}
+
+// --- PR Risk Scoring (P3-05) ---
+
+export interface RiskFactor {
+  factor: string
+  weight: number
+  description: string
+}
+
+export type RiskLevel = 'low' | 'medium' | 'high' | 'critical'
+
+export interface RiskAssessment {
+  pr_id: number
+  number: number
+  title: string
+  html_url: string
+  repo_name: string
+  author_name: string | null
+  author_id: number | null
+  risk_score: number
+  risk_level: RiskLevel
+  risk_factors: RiskFactor[]
+  is_open: boolean
+}
+
+export interface RiskSummaryResponse {
+  high_risk_prs: RiskAssessment[]
+  total_scored: number
+  avg_risk_score: number
+  prs_by_level: Record<string, number>
+}
+
+export const riskLevelLabels: Record<RiskLevel, string> = {
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High',
+  critical: 'Critical',
+}
+
+export const riskLevelStyles: Record<RiskLevel, string> = {
+  low: 'bg-emerald-500/10 text-emerald-600',
+  medium: 'bg-amber-500/10 text-amber-600',
+  high: 'bg-orange-500/10 text-orange-600',
+  critical: 'bg-red-500/10 text-red-600',
+}
+
+// --- Goals ---
+
 export interface GoalProgressPoint {
   period_end: string
   value: number
@@ -339,4 +457,32 @@ export interface GoalProgressResponse {
   current_value: number | null
   status: string
   history: GoalProgressPoint[]
+}
+
+// --- Code Churn (P3-06) ---
+
+export interface FileChurnEntry {
+  path: string
+  change_frequency: number
+  total_additions: number
+  total_deletions: number
+  total_churn: number
+  contributor_count: number
+  last_modified_at: string | null
+}
+
+export interface StaleDirectory {
+  path: string
+  file_count: number
+  last_pr_activity: string | null
+}
+
+export interface CodeChurnResponse {
+  repo_id: number
+  repo_name: string
+  hotspot_files: FileChurnEntry[]
+  stale_directories: StaleDirectory[]
+  total_files_in_repo: number
+  total_files_changed: number
+  tree_truncated: boolean
 }

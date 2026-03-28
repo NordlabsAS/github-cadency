@@ -171,10 +171,10 @@ ALTER TABLE pr_reviews ADD COLUMN quality_tier varchar(20) DEFAULT 'minimal';
 ```
 
 **Quality tier rules (computed on upsert, no AI needed):**
-- `rubber_stamp`: state=APPROVED, body is empty or < 20 chars
-- `minimal`: body is 20-100 chars, or state=COMMENTED with < 50 chars
-- `standard`: body is 100-500 chars or has inline code suggestions
-- `thorough`: body > 500 chars, or review has 3+ individual review comments on the PR
+- `thorough`: body > 500 chars, or 3+ inline review comments, or CHANGES_REQUESTED with body > 100 chars
+- `standard`: body 100-500 chars, or CHANGES_REQUESTED (any length), or body contains code blocks
+- `rubber_stamp`: state=APPROVED with body < 20 chars and 0 inline comments
+- `minimal`: everything else
 
 **Stats extension:** `DeveloperStats` gains:
 ```json

@@ -4,7 +4,7 @@
 Phase 2 — Make It Smart
 
 ## Status
-pending
+completed
 
 ## Blocked By
 - M6-developer-goals
@@ -22,48 +22,58 @@ Build a dedicated Goals page that surfaces the fully-implemented goals API (`/ap
 Route: `/goals`
 
 **Team view (admin):**
-- Filter by developer (dropdown) or show all
-- List of all goals grouped by developer:
-  - Goal card: metric name, target value, current value, progress bar (baseline -> current -> target)
-  - Status badge: active (blue), achieved (green), abandoned (gray)
-  - Target date with "N days remaining" or "overdue" indicator
-  - 8-week sparkline showing progress history (Recharts `Sparkline` or small `LineChart`)
-- "Create Goal" button → modal/dialog with form:
-  - Developer selector
-  - Metric key selector (dropdown of MetricKey enum values with human-readable labels)
-  - Target value input
-  - Target date picker
-  - Optional notes field
+- [x] Filter by developer (dropdown) or show all
+- [x] Flat table of all goals with columns: Developer, Goal, Metric, Progress, Trend, Status, Due, Actions
+  - [x] Progress bar (baseline -> current -> target)
+  - [x] Status badge: active (secondary), achieved (default/green), abandoned (destructive)
+  - [x] Target date with "N days remaining", "today", or "overdue" indicator
+  - [x] 8-week sparkline showing progress history (GoalSparkline)
+- [x] "Add Goal" button → GoalCreateDialog with developer selector
 
 **Developer view (personal token):**
-- Shows only own goals
-- "Add Personal Goal" button (calls `POST /api/goals/self` from P1-03)
-- Same goal cards with progress bars and sparklines
+- [x] Shows only own goals
+- [x] "Add Goal" button (calls `POST /api/goals/self`)
+- [x] Same goal table with progress bars and sparklines
 
-### frontend/src/hooks/useGoals.ts (new)
-- `useGoals(developerId?: number)` — `GET /api/goals?developer_id={id}`
-- `useGoalProgress(goalId: number)` — `GET /api/goals/{id}/progress`
-- `useCreateGoal()` — mutation for `POST /api/goals`
-- `useUpdateGoal()` — mutation for `PATCH /api/goals/{id}`
+### frontend/src/components/GoalCreateDialog.tsx (new — shared component)
+- [x] Extracted from DeveloperDetail inline dialog
+- [x] Developer selector (admin creating for any developer)
+- [x] Metric key selector with human-readable labels
+- [x] Target value input with validation (rejects negative/zero/NaN)
+- [x] Direction selector (above/below)
+- [x] Target date picker (optional)
+- [x] Exports `metricKeyLabels` for reuse
 
-### frontend/src/utils/types.ts (extend)
-Add interfaces for: `DeveloperGoal`, `GoalCreate`, `GoalUpdate`, `GoalProgressResponse`, `GoalProgressPoint`
+### frontend/src/hooks/useGoals.ts (extended)
+- [x] `useUpdateAdminGoal()` — mutation for `PATCH /api/goals/{id}` (admin status/notes update)
 
-### Goal metric labels
-Map `MetricKey` enum values to human-readable labels:
-```typescript
-const METRIC_LABELS: Record<string, string> = {
-  avg_pr_additions: "Avg PR Size (additions)",
-  time_to_merge_h: "Time to Merge (hours)",
-  reviews_given: "Reviews Given",
-  review_quality_score: "Review Quality Score",
-  prs_merged: "PRs Merged",
-  time_to_first_review_h: "Time to First Review (hours)",
-  issues_closed: "Issues Closed",
-  prs_opened: "PRs Opened",
-}
-```
+### frontend/src/utils/types.ts (extended)
+- [x] `GoalAdminUpdate` interface (`status`, `notes`)
 
 ### Navigation
-- Add "Goals" to primary or secondary nav in `Layout.tsx`
-- Add route in `App.tsx`: `/goals` -> `Goals`
+- [x] Add "Goals" to admin nav in `Layout.tsx`
+- [x] Add "My Goals" to developer nav in `Layout.tsx`
+- [x] Add route in `App.tsx`: `/goals` -> `Goals` (accessible to both roles)
+
+### DeveloperDetail.tsx refactored
+- [x] Replaced ~100-line inline goal creation dialog with shared `GoalCreateDialog`
+- [x] Removed unused imports (`Input`, `Label`, `Select*`, `createSelfGoal`, `createAdminGoal`, goal form state)
+
+## Deviations from Original Spec
+
+- **Flat table instead of grouped cards:** Spec said "goals grouped by developer" with goal cards. Implemented as a flat table with developer column and filter dropdown — more scannable and consistent with Dashboard patterns.
+- **Shared GoalCreateDialog:** Spec didn't mention extracting a shared component. Created one to eliminate duplication between Goals page and DeveloperDetail.
+- **useGoals.ts extended, not new:** The hooks file already existed with `useGoals`, `useGoalProgress`, `useCreateSelfGoal`, `useCreateAdminGoal`, `useUpdateSelfGoal`. Only `useUpdateAdminGoal` was added.
+- **Types partially pre-existing:** `GoalResponse`, `GoalSelfCreate`, `GoalAdminCreate`, `GoalSelfUpdate`, `GoalProgressPoint`, `GoalProgressResponse` already existed. Only `GoalAdminUpdate` was added.
+- **No `notes` form field in create dialog:** Spec mentioned optional notes. Kept parity with existing DeveloperDetail dialog which also omitted it. Notes are visible in the table when present.
+
+## Files Created
+- `frontend/src/pages/Goals.tsx`
+- `frontend/src/components/GoalCreateDialog.tsx`
+
+## Files Modified
+- `frontend/src/hooks/useGoals.ts` — added `useUpdateAdminGoal()`
+- `frontend/src/utils/types.ts` — added `GoalAdminUpdate` interface
+- `frontend/src/components/Layout.tsx` — added Goals nav items for admin and developer
+- `frontend/src/App.tsx` — added `/goals` route, imported Goals page
+- `frontend/src/pages/DeveloperDetail.tsx` — replaced inline dialog with shared GoalCreateDialog, cleaned up imports

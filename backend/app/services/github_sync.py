@@ -6,7 +6,7 @@ from pathlib import Path
 
 import httpx
 import jwt
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -15,9 +15,11 @@ from app.models.models import (
     Developer,
     Issue,
     IssueComment,
+    PRFile,
     PRReview,
     PRReviewComment,
     PullRequest,
+    RepoTreeFile,
     Repository,
     SyncEvent,
 )
@@ -175,6 +177,7 @@ async def upsert_repo(db: AsyncSession, repo_data: dict) -> Repository:
     repo.full_name = repo_data.get("full_name")
     repo.description = repo_data.get("description")
     repo.language = repo_data.get("language")
+    repo.default_branch = repo_data.get("default_branch")
     return repo
 
 
@@ -337,20 +340,29 @@ def classify_review_quality(
     state: str | None,
     body_length: int,
     reviewer_comment_count: int,
+    body: str = "",
 ) -> str:
     """Classify a PR review into a quality tier.
 
     Tiers (checked highest-first):
-      thorough:     body > 500 chars, or 3+ inline review comments by this reviewer
-      standard:     body 100-500 chars
-      rubber_stamp: state=APPROVED with body < 20 chars
+      thorough:     body > 500 chars, or 3+ inline comments,
+                    or CHANGES_REQUESTED with body > 100 chars
+      standard:     body 100-500 chars, or CHANGES_REQUESTED (any length),
+                    or body contains code blocks
+      rubber_stamp: state=APPROVED with body < 20 chars and 0 inline comments
       minimal:      everything else
     """
+    has_code_blocks = "```" in body if body else False
+
     if body_length > 500 or reviewer_comment_count >= 3:
         return "thorough"
-    if 100 <= body_length <= 500:
+    if state == "CHANGES_REQUESTED" and body_length > 100:
+        return "thorough"
+    if state == "CHANGES_REQUESTED":
         return "standard"
-    if state == "APPROVED" and body_length < 20:
+    if body_length >= 100 or has_code_blocks:
+        return "standard"
+    if state == "APPROVED" and body_length < 20 and reviewer_comment_count == 0:
         return "rubber_stamp"
     return "minimal"
 
@@ -393,7 +405,7 @@ async def upsert_review(
     # Quality tier — reviewer comment count is updated after review comments sync
     # For now, classify without comments; recompute_review_quality_tiers fixes it
     review.quality_tier = classify_review_quality(
-        review.state, review.body_length, 0
+        review.state, review.body_length, 0, body=body_text
     )
 
     return review
@@ -467,7 +479,7 @@ async def recompute_review_quality_tiers(
             comment_count = 0
 
         review.quality_tier = classify_review_quality(
-            review.state, review.body_length, comment_count
+            review.state, review.body_length, comment_count, body=review.body or ""
         )
 
 
@@ -484,25 +496,52 @@ async def upsert_issue(
         issue = Issue(repo_id=repo.id, number=issue_data["number"])
         db.add(issue)
 
+    # Detect reopen before overwriting state
+    incoming_state = issue_data.get("state")
+    if issue.state == "closed" and incoming_state == "open":
+        issue.reopen_count = (issue.reopen_count or 0) + 1
+
     issue.github_id = issue_data["id"]
     issue.title = issue_data.get("title")
     issue.body = issue_data.get("body")
-    issue.state = issue_data.get("state")
+    issue.state = incoming_state
     issue.labels = [l["name"] for l in issue_data.get("labels", [])]
     issue.html_url = issue_data.get("html_url")
 
     assignee = issue_data.get("assignee") or {}
     issue.assignee_id = await resolve_author(db, assignee.get("login"))
 
+    # Quality scoring fields
+    body = issue_data.get("body") or ""
+    issue.comment_count = issue_data.get("comments", 0)
+    issue.body_length = len(body)
+    issue.has_checklist = bool(re.search(r'- \[[ xX]\]', body))
+    issue.state_reason = issue_data.get("state_reason")
+    issue.creator_github_username = issue_data.get("user", {}).get("login")
+
+    milestone = issue_data.get("milestone") or {}
+    issue.milestone_title = milestone.get("title")
+    due_on = milestone.get("due_on")
+    if due_on:
+        issue.milestone_due_on = datetime.fromisoformat(
+            due_on.replace("Z", "+00:00")
+        ).date()
+    else:
+        issue.milestone_due_on = None
+
     for field in ("created_at", "updated_at", "closed_at"):
         val = issue_data.get(field)
         if val:
             setattr(issue, field, datetime.fromisoformat(val.replace("Z", "+00:00")))
+        else:
+            setattr(issue, field, None)
 
     if issue.closed_at and issue.created_at:
         issue.time_to_close_s = int(
             (issue.closed_at - issue.created_at).total_seconds()
         )
+    else:
+        issue.time_to_close_s = None
 
     return issue
 
@@ -571,6 +610,68 @@ async def compute_approval_metrics(
     )
 
 
+# --- PR Files & Repo Tree ---
+
+
+async def upsert_pr_file(
+    db: AsyncSession, file_data: dict, pr: PullRequest
+) -> PRFile:
+    filename = file_data["filename"]
+    result = await db.execute(
+        select(PRFile).where(PRFile.pr_id == pr.id, PRFile.filename == filename)
+    )
+    pr_file = result.scalar_one_or_none()
+    if not pr_file:
+        pr_file = PRFile(pr_id=pr.id, filename=filename)
+        db.add(pr_file)
+
+    pr_file.additions = file_data.get("additions", 0)
+    pr_file.deletions = file_data.get("deletions", 0)
+    pr_file.status = file_data.get("status")
+    pr_file.previous_filename = file_data.get("previous_filename")
+    return pr_file
+
+
+async def sync_repo_tree(
+    client: httpx.AsyncClient, db: AsyncSession, repo: Repository
+) -> tuple[int, bool]:
+    """Fetch the full file tree for a repo's default branch.
+
+    Returns (count_of_entries, truncated).
+    """
+    if not repo.default_branch:
+        return 0, False
+
+    resp = await github_get(
+        client,
+        f"/repos/{repo.full_name}/git/trees/{repo.default_branch}",
+        params={"recursive": "1"},
+    )
+    data = resp.json()
+    truncated = data.get("truncated", False)
+
+    # Full snapshot replacement — delete old entries, insert fresh
+    await db.execute(
+        delete(RepoTreeFile).where(RepoTreeFile.repo_id == repo.id)
+    )
+
+    now = datetime.now(timezone.utc)
+    count = 0
+    for item in data.get("tree", []):
+        if item["type"] in ("blob", "tree"):
+            db.add(
+                RepoTreeFile(
+                    repo_id=repo.id,
+                    path=item["path"],
+                    type=item["type"],
+                    last_synced_at=now,
+                )
+            )
+            count += 1
+
+    return count, truncated
+
+
 # --- Sync Orchestration ---
 
 
@@ -632,6 +733,13 @@ async def sync_repo(
         ) or 0
         pr.review_round_count = round_count
 
+        # Fetch file-level changes for this PR
+        files_data = await github_get_paginated(
+            client, f"/repos/{repo.full_name}/pulls/{pr.number}/files"
+        )
+        for file_data in files_data:
+            await upsert_pr_file(db, file_data, pr)
+
     # Fetch issues (skip PRs — they have a pull_request key)
     issue_params: dict = {"state": "all", "sort": "updated", "direction": "desc"}
     if since:
@@ -667,6 +775,13 @@ async def sync_repo(
             parent_issue = result.scalar_one_or_none()
             if parent_issue:
                 await upsert_issue_comment(db, comment_data, parent_issue)
+
+    # Sync the repo file tree for stale directory detection
+    try:
+        _tree_count, tree_truncated = await sync_repo_tree(client, db, repo)
+        repo.tree_truncated = tree_truncated
+    except Exception as e:
+        logger.warning("sync_repo_tree failed for %s: %s", repo.full_name, e)
 
     repo.last_synced_at = datetime.now(timezone.utc)
     return prs_upserted, issues_upserted

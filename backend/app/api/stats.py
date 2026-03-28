@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,23 +11,33 @@ from app.schemas.schemas import (
     AppRole,
     AuthUser,
     BenchmarksResponse,
+    CodeChurnResponse,
     CollaborationResponse,
     DeveloperStatsResponse,
     DeveloperStatsWithPercentilesResponse,
     DeveloperTrendsResponse,
+    IssueCreatorStatsResponse,
     IssueLinkageStats,
+    IssueQualityStats,
     RepoStatsResponse,
+    RiskAssessment,
+    RiskSummaryResponse,
     StalePRsResponse,
     TeamStatsResponse,
     WorkloadResponse,
 )
 from app.services.collaboration import get_collaboration
+from app.services.risk import get_pr_risk, get_risk_summary
 from app.services.stats import (
     get_benchmarks,
+    get_code_churn,
     get_developer_stats,
     get_developer_stats_with_percentiles,
     get_developer_trends,
+    get_issue_creator_stats,
+    get_issue_label_distribution,
     get_issue_linkage_stats,
+    get_issue_quality_stats,
     get_repo_stats,
     get_stale_prs,
     get_team_stats,
@@ -159,3 +170,76 @@ async def issue_linkage(
     db: AsyncSession = Depends(get_db),
 ):
     return await get_issue_linkage_stats(db, team, date_from, date_to)
+
+
+@router.get("/stats/issues/quality", response_model=IssueQualityStats)
+async def issue_quality(
+    team: str | None = Query(None),
+    date_from: datetime | None = Query(None),
+    date_to: datetime | None = Query(None),
+    _: AuthUser = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    return await get_issue_quality_stats(db, team, date_from, date_to)
+
+
+@router.get("/stats/issues/labels", response_model=dict[str, int])
+async def issue_labels(
+    team: str | None = Query(None),
+    date_from: datetime | None = Query(None),
+    date_to: datetime | None = Query(None),
+    _: AuthUser = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    return await get_issue_label_distribution(db, team, date_from, date_to)
+
+
+@router.get("/stats/issues/creators", response_model=IssueCreatorStatsResponse)
+async def issue_creator_stats(
+    team: str | None = Query(None),
+    date_from: datetime | None = Query(None),
+    date_to: datetime | None = Query(None),
+    _: AuthUser = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    return await get_issue_creator_stats(db, team, date_from, date_to)
+
+
+@router.get("/stats/pr/{pr_id}/risk", response_model=RiskAssessment)
+async def pr_risk(
+    pr_id: int,
+    _: AuthUser = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    assessment = await get_pr_risk(db, pr_id)
+    if not assessment:
+        raise HTTPException(status_code=404, detail="Pull request not found")
+    return assessment
+
+
+@router.get("/stats/risk-summary", response_model=RiskSummaryResponse)
+async def risk_summary(
+    team: str | None = Query(None),
+    date_from: datetime | None = Query(None),
+    date_to: datetime | None = Query(None),
+    min_risk_level: Literal["low", "medium", "high", "critical"] = Query("medium"),
+    scope: Literal["all", "open", "merged"] = Query("all"),
+    _: AuthUser = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    return await get_risk_summary(db, team, date_from, date_to, min_risk_level, scope)
+
+
+@router.get("/stats/repo/{repo_id}/churn", response_model=CodeChurnResponse)
+async def code_churn(
+    repo_id: int,
+    date_from: datetime | None = Query(None),
+    date_to: datetime | None = Query(None),
+    limit: int = Query(50, ge=1, le=200),
+    _: AuthUser = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    repo = await db.get(Repository, repo_id)
+    if not repo:
+        raise HTTPException(status_code=404, detail="Repository not found")
+    return await get_code_churn(db, repo_id, date_from, date_to, limit)

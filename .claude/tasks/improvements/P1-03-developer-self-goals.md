@@ -4,7 +4,7 @@
 Phase 1 — Make It Usable
 
 ## Status
-pending
+done
 
 ## Blocked By
 - P1-01-developer-self-access

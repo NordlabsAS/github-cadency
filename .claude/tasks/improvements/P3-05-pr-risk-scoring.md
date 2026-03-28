@@ -4,7 +4,7 @@
 Phase 3 — Make It Proactive
 
 ## Status
-pending
+done
 
 ## Blocked By
 - P2-05-pr-metadata-capture
@@ -18,15 +18,21 @@ Automatically score open PRs by risk level to help team leads and reviewers prio
 
 ## Deliverables
 
-### backend/app/services/risk.py (new)
-New function: `async def compute_pr_risk(session, pr_id) -> RiskAssessment`
+- [x] `backend/app/services/risk.py` — Pure `compute_pr_risk()` scoring function + async orchestrators (`get_pr_risk`, `get_risk_summary`)
+- [x] `backend/app/schemas/schemas.py` — `RiskFactor`, `RiskAssessment`, `RiskSummaryResponse` Pydantic models
+- [x] `backend/app/api/stats.py` — `GET /api/stats/pr/{id}/risk` + `GET /api/stats/risk-summary` routes with `Literal` validation
+- [x] `frontend/src/utils/types.ts` — TS interfaces + shared `riskLevelStyles`/`riskLevelLabels` constants
+- [x] `frontend/src/hooks/useStats.ts` — `useRiskSummary()` hook
+- [x] `frontend/src/components/StalePRsSection.tsx` — Optional risk badge column via `riskScores` prop
+- [x] `frontend/src/pages/Dashboard.tsx` — "High-Risk PRs" section + risk badges on stale PRs
+- [x] `backend/tests/unit/test_risk_scoring.py` — 36 unit tests covering all factors, boundaries, edge cases
 
-Risk factors computable from existing data (no new tables needed):
+### Risk factors (all 10 implemented as specified)
 
 | Factor | Condition | Weight |
 |--------|-----------|--------|
 | Large PR | additions > 500 | +0.20 |
-| Very large PR | additions > 1000 | +0.15 (additional) |
+| Very large PR | additions > 1000 | +0.35 (combined) |
 | Many files | changed_files > 15 | +0.10 |
 | New contributor | author has < 5 merged PRs in this repo | +0.15 |
 | No review | is_merged and no APPROVED review | +0.25 |
@@ -39,32 +45,32 @@ Risk factors computable from existing data (no new tables needed):
 Risk score = min(1.0, sum of applicable weights)
 Risk level: low (0-0.3), medium (0.3-0.6), high (0.6-0.8), critical (0.8-1.0)
 
-### backend/app/schemas/schemas.py (extend)
-```python
-class RiskFactor(BaseModel):
-    factor: str
-    weight: float
-    description: str
+## Deviations from Original Spec
 
-class RiskAssessment(BaseModel):
-    pr_id: int
-    risk_score: float  # 0.0-1.0
-    risk_level: str  # low/medium/high/critical
-    risk_factors: list[RiskFactor]
+- **`compute_pr_risk` is a pure function** (not async) — takes a PR ORM object and pre-computed author count. Async orchestrators (`get_pr_risk`, `get_risk_summary`) handle DB access. This makes the scoring logic fully testable without a DB.
+- **"Very large PR" weight is 0.35 (not 0.15 additional)** — spec said +0.15 additional on top of +0.20. Implementation uses a single 0.35 weight for >1000 additions (mutually exclusive with the 0.20 large_pr factor) to avoid double-counting.
+- **`RiskSummaryResponse` replaces `TeamRiskSummary`** — adds `total_scored` and `prs_by_level` fields; replaces `prs_merged_high_risk` with the more flexible `prs_by_level` dict.
+- **`RiskAssessment` includes extra fields** — `number`, `title`, `html_url`, `repo_name`, `author_name`, `author_id`, `is_open` for frontend rendering without extra lookups.
+- **`scope` query param added** — `GET /api/stats/risk-summary` accepts `scope=all|open|merged` for flexible filtering (not in original spec).
+- **`Literal` validation on API params** — `min_risk_level` and `scope` use `typing.Literal` for automatic 422 on invalid values.
+- **`is_merged` checked with `is True`** — handles nullable bool correctly (not just truthiness).
+- **Bulk queries** — author merged counts and names fetched in batch to avoid N+1.
 
-class TeamRiskSummary(BaseModel):
-    high_risk_prs: list[RiskAssessment]
-    avg_risk_score: float
-    prs_merged_high_risk: int
-```
+## Files Created
 
-### backend/app/api/stats.py (extend)
-New routes:
-- `GET /api/stats/pr/{id}/risk` — risk assessment for a single PR
-- `GET /api/stats/risk-summary` — team-level risk summary for the period
-  - Query params: `date_from`, `date_to`, `team`, `min_risk_level` (default "medium")
+| File | Purpose |
+|------|---------|
+| `backend/app/services/risk.py` | Risk scoring service |
+| `backend/tests/unit/test_risk_scoring.py` | 36 unit tests |
 
-### Frontend integration
-- Add risk badge to stale PR list items (P2-01)
-- Add "High-Risk PRs" section to Dashboard "Needs Attention" zone
-- Color-code: green (low), amber (medium), orange (high), red (critical)
+## Files Modified
+
+| File | Change |
+|------|--------|
+| `backend/app/schemas/schemas.py` | Added `RiskFactor`, `RiskAssessment`, `RiskSummaryResponse` |
+| `backend/app/api/stats.py` | Added 2 risk routes, `Literal` import, risk service import |
+| `frontend/src/utils/types.ts` | Added TS interfaces + shared risk style constants |
+| `frontend/src/hooks/useStats.ts` | Added `useRiskSummary()` hook |
+| `frontend/src/components/StalePRsSection.tsx` | Optional `riskScores` prop, risk badge column |
+| `frontend/src/pages/Dashboard.tsx` | `HighRiskPRsSection` component, risk badge integration |
+| `CLAUDE.md` | Backend layout, API table, patterns, completed tasks |

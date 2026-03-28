@@ -21,10 +21,14 @@ Authorization: Bearer {jwt_token}
 |----------------|-------|-----------|
 | **Auth** (`/api/auth/*`) | Public | Public |
 | **Developer stats** (`/api/stats/developer/{id}`) | Any ID | Own ID only |
-| **Team/benchmarks/workload/collaboration/stale-prs/issue-linkage** | Yes | No (403) |
+| **Developer trends** (`/api/stats/developer/{id}/trends`) | Any ID | Own ID only |
+| **Team/benchmarks/workload/collaboration/stale-prs/issue-linkage/issue-quality/issue-creators** | Yes | No (403) |
+| **Code churn** (`/api/stats/repo/{id}/churn`) | Yes | No (403) |
+| **PR risk** (`/api/stats/pr/{id}/risk`, `/api/stats/risk-summary`) | Yes | No (403) |
 | **Repo stats** (`/api/stats/repo/{id}`) | Yes | Yes |
 | **Developers CRUD** (`/api/developers/*`) | Full access | GET own profile only |
 | **Goals** (`/api/goals/*`) | Full access | GET own goals, POST/PATCH self-goals |
+| **Goal progress** (`/api/goals/{id}/progress`) | Any goal | Own goals only |
 | **Sync** (`/api/sync/*`) | Yes | No (403) |
 | **AI Analysis** (`/api/ai/*`) | Yes | No (403) |
 
@@ -196,7 +200,17 @@ Developer metrics for a date range. **Developers can only access their own stats
   "avg_time_to_merge_hours": 18.5,
   "issues_assigned": 5,
   "issues_closed": 3,
-  "avg_time_to_close_issue_hours": 48.0
+  "avg_time_to_close_issue_hours": 48.0,
+  "avg_time_to_approve_hours": 6.8,
+  "avg_time_after_approve_hours": 2.1,
+  "prs_merged_without_approval": 1,
+  "avg_review_rounds": 1.4,
+  "prs_merged_first_pass": 7,
+  "first_pass_rate": 70.0,
+  "prs_self_merged": 2,
+  "self_merge_rate": 20.0,
+  "prs_reverted": 0,
+  "reverts_authored": 0
 }
 ```
 
@@ -226,6 +240,8 @@ Team-wide aggregate metrics. **Admin only.**
 
 | Query Param | Type | Default | Description |
 |-------------|------|---------|-------------|
+| `date_from` | datetime | 30 days ago | Period start |
+| `date_to` | datetime | now | Period end |
 | `team` | string | - | Filter by team name (all active devs if omitted) |
 
 **Response:** `200 OK`
@@ -238,7 +254,10 @@ Team-wide aggregate metrics. **Admin only.**
   "avg_time_to_first_review_hours": 3.8,
   "avg_time_to_merge_hours": 16.2,
   "total_reviews": 210,
-  "total_issues_closed": 34
+  "total_issues_closed": 34,
+  "avg_review_rounds": 1.6,
+  "first_pass_rate": 65.0,
+  "revert_rate": 2.5
 }
 ```
 
@@ -261,12 +280,66 @@ Repository-scoped metrics with top contributors.
 }
 ```
 
+### GET /api/stats/repo/{repo_id}/churn
+
+File-level code churn analysis for a repository. Identifies hotspot files (frequently modified) and stale directories (no PR activity in period). **Admin only.**
+
+| Query Param | Type | Default | Description |
+|-------------|------|---------|-------------|
+| `date_from` | datetime | 30 days ago | Period start |
+| `date_to` | datetime | now | Period end |
+| `limit` | int (1-200) | `50` | Max hotspot files to return |
+
+**Response:** `200 OK`
+```json
+{
+  "repo_id": 1,
+  "repo_name": "my-service",
+  "hotspot_files": [
+    {
+      "path": "src/main.py",
+      "change_frequency": 8,
+      "total_additions": 342,
+      "total_deletions": 128,
+      "total_churn": 470,
+      "contributor_count": 3,
+      "last_modified_at": "2026-03-25T14:30:00Z"
+    }
+  ],
+  "stale_directories": [
+    {
+      "path": "legacy",
+      "file_count": 12,
+      "last_pr_activity": "2025-11-01T10:00:00Z"
+    },
+    {
+      "path": "vendor",
+      "file_count": 45,
+      "last_pr_activity": null
+    }
+  ],
+  "total_files_in_repo": 250,
+  "total_files_changed": 42,
+  "tree_truncated": false
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `hotspot_files` | Top N files by change frequency (distinct PRs), with churn volume and contributor count |
+| `stale_directories` | Top-level directories with zero PR activity in the date range. `last_pr_activity` is the most recent PR touching any file under that dir (all time), or `null` if never touched |
+| `total_files_in_repo` | Count of files in the repo tree snapshot (from GitHub Trees API) |
+| `total_files_changed` | Distinct files modified by PRs in the period |
+| `tree_truncated` | `true` if GitHub truncated the tree response (>100K entries) |
+
 ### GET /api/stats/benchmarks
 
 Team percentile bands (p25/p50/p75) across all active developers. **Admin only.**
 
 | Query Param | Type | Default | Description |
 |-------------|------|---------|-------------|
+| `date_from` | datetime | 30 days ago | Period start |
+| `date_to` | datetime | now | Period end |
 | `team` | string | - | Filter by team |
 
 **Response:** `200 OK`
@@ -399,7 +472,7 @@ Per-developer workload indicators and automated alerts. **Admin only.**
 }
 ```
 
-Workload scores: `low` (no activity), `balanced` (<= 5 total load), `high` (<= 12), `overloaded` (> 12). Total load = open PRs authored + reviewing + open issues + reviews given.
+Workload scores: `low` (no activity), `balanced` (<= 5 total load), `high` (<= 12), `overloaded` (> 12). Total load = open PRs authored + open PRs reviewing + open issues assigned. Completed reviews are excluded from the score calculation.
 
 ### GET /api/stats/stale-prs
 
@@ -493,6 +566,306 @@ Issue-to-PR linkage statistics via closing keywords parsed from PR bodies. Shows
 
 ---
 
+### GET /api/stats/issues/quality
+
+Issue quality scoring statistics. Identifies poorly-defined tasks by analyzing body content, checklist usage, comment activity, closure reasons, and reopen patterns. **Admin only.**
+
+| Query Param | Type | Default | Description |
+|-------------|------|---------|-------------|
+| `date_from` | datetime | 30 days ago | Start of date range (ISO 8601) |
+| `date_to` | datetime | now | End of date range (ISO 8601) |
+| `team` | string | - | Filter by team (issues by assignee team) |
+
+**Note:** Filters by `created_at` (issues created in period). Team filter uses `assignee_id` — unassigned issues are only included in unfiltered queries.
+
+**Response:** `200 OK`
+```json
+{
+  "total_issues_created": 42,
+  "avg_body_length": 312.5,
+  "pct_with_checklist": 28.6,
+  "avg_comment_count": 3.2,
+  "pct_closed_not_planned": 12.5,
+  "avg_reopen_count": 0.15,
+  "issues_without_body": 8,
+  "label_distribution": {
+    "bug": 15,
+    "feature": 12,
+    "tech-debt": 5,
+    "documentation": 3
+  }
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `total_issues_created` | Total issues created in the date range |
+| `avg_body_length` | Average character count of issue bodies |
+| `pct_with_checklist` | Percentage of issues containing `- [ ]` or `- [x]`/`- [X]` task list syntax |
+| `avg_comment_count` | Average GitHub comment count per issue (from API `comments` field) |
+| `pct_closed_not_planned` | Percentage of closed issues with `state_reason == "not_planned"` (out of all closed issues in range) |
+| `avg_reopen_count` | Average number of times issues were reopened (closed→open transitions) |
+| `issues_without_body` | Count of issues with body length < 50 characters (empty or minimal description) |
+| `label_distribution` | Map of label name → count across all issues in range |
+
+---
+
+### GET /api/stats/issues/labels
+
+Label distribution across issues created in the date range. Returns a flat map of label names to their occurrence count. **Admin only.**
+
+| Query Param | Type | Default | Description |
+|-------------|------|---------|-------------|
+| `date_from` | datetime | 30 days ago | Start of date range (ISO 8601) |
+| `date_to` | datetime | now | End of date range (ISO 8601) |
+| `team` | string | - | Filter by team (issues by assignee team) |
+
+**Response:** `200 OK`
+```json
+{
+  "bug": 15,
+  "feature": 12,
+  "tech-debt": 5,
+  "documentation": 3
+}
+```
+
+---
+
+### GET /api/stats/issues/creators
+
+Per-creator issue quality analytics. Returns metrics for every user who created issues in the date range, plus team-wide averages for comparison. Helps management identify creators whose task definitions cause friction. **Admin only.**
+
+| Query Param | Type | Default | Description |
+|-------------|------|---------|-------------|
+| `date_from` | datetime | 30 days ago | Start of date range (ISO 8601) |
+| `date_to` | datetime | now | End of date range (ISO 8601) |
+| `team` | string | - | Filter by team (creator must be a registered developer on that team) |
+
+**Note:** Filters by `Issue.created_at`. Team filter joins `creator_github_username` to `Developer.github_username` to resolve team membership. External users (not in the developer registry) appear with `null` for `display_name`, `team`, and `role`.
+
+**Response:** `200 OK`
+```json
+{
+  "creators": [
+    {
+      "github_username": "alice",
+      "display_name": "Alice Smith",
+      "team": "platform",
+      "role": "tech_lead",
+      "issues_created": 28,
+      "avg_time_to_close_hours": 72.3,
+      "avg_comment_count_before_pr": 3.2,
+      "pct_with_checklist": 64.3,
+      "pct_reopened": 7.1,
+      "pct_closed_not_planned": 3.6,
+      "avg_prs_per_issue": 1.2,
+      "issues_with_body_under_100_chars": 2,
+      "avg_time_to_first_pr_hours": 18.5
+    },
+    {
+      "github_username": "bob",
+      "display_name": "Bob Jones",
+      "team": "backend",
+      "role": "developer",
+      "issues_created": 5,
+      "avg_time_to_close_hours": 120.0,
+      "avg_comment_count_before_pr": null,
+      "pct_with_checklist": 20.0,
+      "pct_reopened": 40.0,
+      "pct_closed_not_planned": 20.0,
+      "avg_prs_per_issue": null,
+      "issues_with_body_under_100_chars": 3,
+      "avg_time_to_first_pr_hours": null
+    }
+  ],
+  "team_averages": {
+    "github_username": "__team_average__",
+    "display_name": null,
+    "team": null,
+    "role": null,
+    "issues_created": 17,
+    "avg_time_to_close_hours": 96.2,
+    "avg_comment_count_before_pr": 3.2,
+    "pct_with_checklist": 42.2,
+    "pct_reopened": 23.6,
+    "pct_closed_not_planned": 11.8,
+    "avg_prs_per_issue": 1.2,
+    "issues_with_body_under_100_chars": 3,
+    "avg_time_to_first_pr_hours": 18.5
+  }
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `creators` | List of per-creator stats, sorted by `issues_created` descending |
+| `team_averages` | Aggregated averages across all creators (for comparison/highlighting) |
+| `github_username` | GitHub login of the issue creator |
+| `display_name` | Developer display name (`null` for external users) |
+| `team` | Developer team (`null` for external users) |
+| `role` | Developer role (`null` for external users) |
+| `issues_created` | Total issues created by this user in the date range |
+| `avg_time_to_close_hours` | Average hours from issue creation to close (`null` if none closed) |
+| `avg_comment_count_before_pr` | Average issue comments posted before the first linked PR was opened (`null` if no linked PRs). Requires issue-PR linkage via closing keywords. |
+| `pct_with_checklist` | Percentage of issues containing `- [ ]` or `- [x]` checklist syntax |
+| `pct_reopened` | Percentage of issues with `reopen_count > 0` |
+| `pct_closed_not_planned` | Percentage of closed issues with `state_reason == "not_planned"` |
+| `avg_prs_per_issue` | Average PRs linked per issue via closing keywords (`null` if no linked PRs). Values >1 suggest scope too large. |
+| `issues_with_body_under_100_chars` | Count of issues with body < 100 characters (poorly described) |
+| `avg_time_to_first_pr_hours` | Average hours from issue creation to first linked PR (`null` if no linked PRs). Long waits suggest unclear requirements. |
+
+---
+
+### GET /api/stats/pr/{pr_id}/risk
+
+Risk assessment for a single PR. Computes a risk score (0.0-1.0) based on 10 weighted factors. **Admin only.**
+
+| Path Param | Type | Description |
+|------------|------|-------------|
+| `pr_id` | int | Internal DB ID of the pull request |
+
+**Response:** `200 OK`
+```json
+{
+  "pr_id": 42,
+  "number": 123,
+  "title": "Rewrite auth middleware",
+  "html_url": "https://github.com/org/repo/pull/123",
+  "repo_name": "org/repo",
+  "author_name": "Alice",
+  "author_id": 1,
+  "risk_score": 0.65,
+  "risk_level": "high",
+  "risk_factors": [
+    {
+      "factor": "large_pr",
+      "weight": 0.20,
+      "description": "Large PR with 700 additions"
+    },
+    {
+      "factor": "many_files",
+      "weight": 0.10,
+      "description": "Touches 22 files"
+    },
+    {
+      "factor": "fast_tracked",
+      "weight": 0.15,
+      "description": "Merged in 1.5h (under 2h threshold)"
+    },
+    {
+      "factor": "self_merged",
+      "weight": 0.10,
+      "description": "PR was merged by its own author"
+    },
+    {
+      "factor": "hotfix_branch",
+      "weight": 0.10,
+      "description": "Branch 'hotfix/auth-fix' indicates a hotfix"
+    }
+  ],
+  "is_open": false
+}
+```
+
+**Error:** `404 Not Found` if `pr_id` does not exist.
+
+**Risk factors (10 total):**
+
+| Factor | Condition | Weight |
+|--------|-----------|--------|
+| `large_pr` | additions > 500 | +0.20 |
+| `very_large_pr` | additions > 1000 (replaces `large_pr`) | +0.35 |
+| `many_files` | changed_files > 15 | +0.10 |
+| `new_contributor` | author has < 5 merged PRs in this repo, or not in team registry | +0.15 |
+| `no_review` | merged with no APPROVED review | +0.25 |
+| `rubber_stamp_only` | all reviews have `quality_tier = "rubber_stamp"` | +0.20 |
+| `fast_tracked` | merged with `time_to_merge_s < 7200` (2 hours) | +0.15 |
+| `self_merged` | `is_self_merged = true` | +0.10 |
+| `high_review_rounds` | `review_round_count >= 3` | +0.10 |
+| `hotfix_branch` | `head_branch` starts with `hotfix/` or `fix/` | +0.10 |
+
+**Score:** `min(1.0, sum of applicable factor weights)`
+
+**Risk levels:** `low` (0-0.3), `medium` (0.3-0.6), `high` (0.6-0.8), `critical` (0.8-1.0)
+
+---
+
+### GET /api/stats/risk-summary
+
+Team-level risk summary for PRs in the given period. Returns PRs at or above the specified risk level. **Admin only.**
+
+| Query Param | Type | Default | Description |
+|-------------|------|---------|-------------|
+| `team` | string | - | Filter by team (PRs authored by team members) |
+| `date_from` | datetime | 30 days ago | Period start |
+| `date_to` | datetime | now | Period end |
+| `min_risk_level` | `low` \| `medium` \| `high` \| `critical` | `medium` | Only include PRs at or above this risk level |
+| `scope` | `all` \| `open` \| `merged` | `all` | Filter by PR state |
+
+Draft PRs are excluded from scoring.
+
+**Response:** `200 OK`
+```json
+{
+  "high_risk_prs": [
+    {
+      "pr_id": 42,
+      "number": 123,
+      "title": "Rewrite auth middleware",
+      "html_url": "https://github.com/org/repo/pull/123",
+      "repo_name": "org/repo",
+      "author_name": "Alice",
+      "author_id": 1,
+      "risk_score": 0.65,
+      "risk_level": "high",
+      "risk_factors": [
+        {
+          "factor": "large_pr",
+          "weight": 0.20,
+          "description": "Large PR with 700 additions"
+        },
+        {
+          "factor": "fast_tracked",
+          "weight": 0.15,
+          "description": "Merged in 1.5h (under 2h threshold)"
+        },
+        {
+          "factor": "self_merged",
+          "weight": 0.10,
+          "description": "PR was merged by its own author"
+        },
+        {
+          "factor": "new_contributor",
+          "weight": 0.15,
+          "description": "Author has only 3 merged PR(s) in this repo"
+        }
+      ],
+      "is_open": false
+    }
+  ],
+  "total_scored": 47,
+  "avg_risk_score": 0.18,
+  "prs_by_level": {
+    "low": 32,
+    "medium": 10,
+    "high": 4,
+    "critical": 1
+  }
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `high_risk_prs` | PRs at or above `min_risk_level`, sorted by risk score descending |
+| `total_scored` | Total number of PRs scored in the period (all levels) |
+| `avg_risk_score` | Mean risk score across all scored PRs (0.0-1.0) |
+| `prs_by_level` | Count of PRs in each risk level bucket |
+
+Invalid `min_risk_level` or `scope` values return `422 Unprocessable Entity`.
+
+---
+
 ## Developer Goals
 
 **Access:** Admin has full CRUD. Developers can view their own goals, create self-goals via `/goals/self`, and update their own self-created goals.
@@ -518,7 +891,7 @@ Create a goal for a developer. Baseline value is auto-computed from the current 
 
 `target_direction`: `"above"` (metric should be >= target) or `"below"` (metric should be <= target)
 
-**Response:** `201 Created` — `GoalResponse`
+**Response:** `200 OK` — `GoalResponse`
 
 ### GET /api/goals?developer_id={id}
 

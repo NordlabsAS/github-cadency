@@ -4,7 +4,7 @@
 Phase 2 — Make It Smart
 
 ## Status
-pending
+done
 
 ## Blocked By
 - 04-github-sync-service

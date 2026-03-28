@@ -12,6 +12,12 @@ import DeveloperDetail from '@/pages/DeveloperDetail'
 import Repos from '@/pages/Repos'
 import SyncStatus from '@/pages/SyncStatus'
 import AIAnalysis from '@/pages/AIAnalysis'
+import Goals from '@/pages/Goals'
+import WorkloadOverview from '@/pages/insights/WorkloadOverview'
+import CollaborationMatrix from '@/pages/insights/CollaborationMatrix'
+import Benchmarks from '@/pages/insights/Benchmarks'
+import IssueQuality from '@/pages/insights/IssueQuality'
+import CodeChurn from '@/pages/insights/CodeChurn'
 import Login from '@/pages/Login'
 import AuthCallback from '@/pages/AuthCallback'
 
@@ -55,7 +61,13 @@ function AppRoutes() {
                       <Route path="/team/:id" element={<DeveloperDetail />} />
                       <Route path="/repos" element={auth.isAdmin ? <Repos /> : <Navigate to="/" replace />} />
                       <Route path="/sync" element={auth.isAdmin ? <SyncStatus /> : <Navigate to="/" replace />} />
+                      <Route path="/insights/workload" element={auth.isAdmin ? <WorkloadOverview /> : <Navigate to="/" replace />} />
+                      <Route path="/insights/collaboration" element={auth.isAdmin ? <CollaborationMatrix /> : <Navigate to="/" replace />} />
+                      <Route path="/insights/benchmarks" element={auth.isAdmin ? <Benchmarks /> : <Navigate to="/" replace />} />
+                      <Route path="/insights/issue-quality" element={auth.isAdmin ? <IssueQuality /> : <Navigate to="/" replace />} />
+                      <Route path="/insights/code-churn" element={auth.isAdmin ? <CodeChurn /> : <Navigate to="/" replace />} />
                       <Route path="/ai" element={auth.isAdmin ? <AIAnalysis /> : <Navigate to="/" replace />} />
+                      <Route path="/goals" element={<Goals />} />
                     </Routes>
                   </ErrorBoundary>
                 </Layout>

@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import and_, case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.models import Developer, Issue, PRReview, PullRequest, Repository
+from app.models.models import Developer, Issue, IssueComment, PRFile, PRReview, PullRequest, RepoTreeFile, Repository
 from app.schemas.schemas import (
     BenchmarkMetric,
     BenchmarksResponse,
@@ -12,7 +12,10 @@ from app.schemas.schemas import (
     DeveloperStatsWithPercentilesResponse,
     DeveloperTrendsResponse,
     DeveloperWorkload,
+    IssueCreatorStats,
+    IssueCreatorStatsResponse,
     IssueLinkageStats,
+    IssueQualityStats,
     PercentilePlacement,
     RepoStatsResponse,
     ReviewBreakdown,
@@ -23,6 +26,9 @@ from app.schemas.schemas import (
     TopContributor,
     TrendDirection,
     TrendPeriod,
+    CodeChurnResponse,
+    FileChurnEntry,
+    StaleDirectory,
     WorkloadAlert,
     WorkloadResponse,
 )
@@ -1622,4 +1628,626 @@ async def get_issue_linkage_stats(
         avg_prs_per_issue=avg_prs_per_issue,
         issues_with_multiple_prs=issues_with_multiple_prs,
         prs_without_linked_issues=prs_without_linked_issues,
+    )
+
+
+async def get_issue_quality_stats(
+    db: AsyncSession,
+    team: str | None = None,
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+) -> IssueQualityStats:
+    date_from, date_to = _default_range(date_from, date_to)
+
+    # Optional team filter
+    team_dev_ids: list[int] | None = None
+    if team:
+        dev_result = await db.execute(
+            select(Developer.id).where(
+                Developer.is_active.is_(True), Developer.team == team
+            )
+        )
+        team_dev_ids = [row[0] for row in dev_result.all()]
+        if not team_dev_ids:
+            return IssueQualityStats(
+                total_issues_created=0,
+                avg_body_length=0.0,
+                pct_with_checklist=0.0,
+                avg_comment_count=0.0,
+                pct_closed_not_planned=0.0,
+                avg_reopen_count=0.0,
+                issues_without_body=0,
+                label_distribution={},
+            )
+
+    # Base filters for issues created in period
+    filters = [Issue.created_at >= date_from, Issue.created_at <= date_to]
+    if team_dev_ids is not None:
+        filters.append(Issue.assignee_id.in_(team_dev_ids))
+
+    # Total issues created
+    total_issues_created = await db.scalar(
+        select(func.count()).select_from(Issue).where(*filters)
+    ) or 0
+
+    if total_issues_created == 0:
+        return IssueQualityStats(
+            total_issues_created=0,
+            avg_body_length=0.0,
+            pct_with_checklist=0.0,
+            avg_comment_count=0.0,
+            pct_closed_not_planned=0.0,
+            avg_reopen_count=0.0,
+            issues_without_body=0,
+            label_distribution={},
+        )
+
+    # Averages
+    avg_body_length = await db.scalar(
+        select(func.avg(Issue.body_length)).where(*filters)
+    ) or 0.0
+
+    avg_comment_count = await db.scalar(
+        select(func.avg(Issue.comment_count)).where(*filters)
+    ) or 0.0
+
+    avg_reopen_count = await db.scalar(
+        select(func.avg(Issue.reopen_count)).where(*filters)
+    ) or 0.0
+
+    # Checklist percentage
+    checklist_count = await db.scalar(
+        select(func.count()).select_from(Issue).where(
+            *filters, Issue.has_checklist.is_(True)
+        )
+    ) or 0
+    pct_with_checklist = round(checklist_count / total_issues_created * 100, 1)
+
+    # Issues without meaningful body (<50 chars)
+    issues_without_body = await db.scalar(
+        select(func.count()).select_from(Issue).where(*filters, Issue.body_length < 50)
+    ) or 0
+
+    # Closed as "not_planned" percentage
+    closed_filters = [Issue.created_at >= date_from, Issue.created_at <= date_to,
+                      Issue.state == "closed"]
+    if team_dev_ids is not None:
+        closed_filters.append(Issue.assignee_id.in_(team_dev_ids))
+
+    total_closed = await db.scalar(
+        select(func.count()).select_from(Issue).where(*closed_filters)
+    ) or 0
+
+    not_planned_count = await db.scalar(
+        select(func.count()).select_from(Issue).where(
+            *closed_filters, Issue.state_reason == "not_planned"
+        )
+    ) or 0
+
+    pct_closed_not_planned = (
+        round(not_planned_count / total_closed * 100, 1) if total_closed > 0 else 0.0
+    )
+
+    # Label distribution — fetch labels JSONB and aggregate in Python
+    label_result = await db.execute(
+        select(Issue.labels).where(*filters, Issue.labels.isnot(None))
+    )
+    label_distribution: dict[str, int] = {}
+    for (labels,) in label_result.all():
+        if isinstance(labels, list):
+            for label in labels:
+                if isinstance(label, str):
+                    label_distribution[label] = label_distribution.get(label, 0) + 1
+
+    return IssueQualityStats(
+        total_issues_created=total_issues_created,
+        avg_body_length=round(float(avg_body_length), 1),
+        pct_with_checklist=pct_with_checklist,
+        avg_comment_count=round(float(avg_comment_count), 1),
+        pct_closed_not_planned=pct_closed_not_planned,
+        avg_reopen_count=round(float(avg_reopen_count), 2),
+        issues_without_body=issues_without_body,
+        label_distribution=label_distribution,
+    )
+
+
+async def get_issue_label_distribution(
+    db: AsyncSession,
+    team: str | None = None,
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+) -> dict[str, int]:
+    date_from, date_to = _default_range(date_from, date_to)
+
+    filters = [Issue.created_at >= date_from, Issue.created_at <= date_to]
+    if team:
+        dev_result = await db.execute(
+            select(Developer.id).where(
+                Developer.is_active.is_(True), Developer.team == team
+            )
+        )
+        team_dev_ids = [row[0] for row in dev_result.all()]
+        if not team_dev_ids:
+            return {}
+        filters.append(Issue.assignee_id.in_(team_dev_ids))
+
+    result = await db.execute(
+        select(Issue.labels).where(*filters, Issue.labels.isnot(None))
+    )
+    distribution: dict[str, int] = {}
+    for (labels,) in result.all():
+        if isinstance(labels, list):
+            for label in labels:
+                if isinstance(label, str):
+                    distribution[label] = distribution.get(label, 0) + 1
+
+    return distribution
+
+
+async def get_issue_creator_stats(
+    db: AsyncSession,
+    team: str | None = None,
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+) -> IssueCreatorStatsResponse:
+    date_from, date_to = _default_range(date_from, date_to)
+
+    # Build a lookup of registered developers by github_username
+    dev_result = await db.execute(
+        select(
+            Developer.github_username,
+            Developer.display_name,
+            Developer.team,
+            Developer.role,
+        ).where(Developer.is_active.is_(True))
+    )
+    dev_lookup: dict[str, tuple[str | None, str | None, str | None]] = {}
+    team_usernames: set[str] | None = None
+    for row in dev_result.all():
+        dev_lookup[row[0]] = (row[1], row[2], row[3])
+        if team and row[2] == team:
+            if team_usernames is None:
+                team_usernames = set()
+            team_usernames.add(row[0])
+
+    if team and not team_usernames:
+        empty_avg = _empty_creator_stats("__team_average__")
+        return IssueCreatorStatsResponse(creators=[], team_averages=empty_avg)
+
+    # Fetch all issues in the date range
+    filters = [Issue.created_at >= date_from, Issue.created_at <= date_to]
+    if team_usernames is not None:
+        filters.append(Issue.creator_github_username.in_(team_usernames))
+
+    issue_result = await db.execute(
+        select(
+            Issue.id,
+            Issue.repo_id,
+            Issue.number,
+            Issue.creator_github_username,
+            Issue.time_to_close_s,
+            Issue.has_checklist,
+            Issue.reopen_count,
+            Issue.state,
+            Issue.state_reason,
+            Issue.body_length,
+            Issue.created_at,
+            Issue.closed_at,
+        ).where(*filters, Issue.creator_github_username.isnot(None))
+    )
+    all_issues = issue_result.all()
+
+    if not all_issues:
+        empty_avg = _empty_creator_stats("__team_average__")
+        return IssueCreatorStatsResponse(creators=[], team_averages=empty_avg)
+
+    # Group issues by creator
+    creator_issues: dict[str, list] = {}
+    # Also build (repo_id, issue_number) → (issue_id, creator, created_at)
+    issue_map: dict[tuple[int, int], tuple[int, str, datetime | None]] = {}
+    for row in all_issues:
+        username = row[3]
+        if username not in creator_issues:
+            creator_issues[username] = []
+        creator_issues[username].append(row)
+        issue_map[(row[1], row[2])] = (row[0], username, row[10])
+
+    # Fetch PRs with closing keywords to compute linkage metrics
+    pr_result = await db.execute(
+        select(
+            PullRequest.repo_id,
+            PullRequest.closes_issue_numbers,
+            PullRequest.created_at,
+        ).where(
+            PullRequest.created_at >= date_from,
+            PullRequest.created_at <= date_to,
+            PullRequest.closes_issue_numbers.isnot(None),
+        )
+    )
+
+    # Build per-issue: list of linked PR created_at timestamps
+    # key: issue_id → list of PR created_at
+    issue_pr_dates: dict[int, list[datetime]] = {}
+    # key: (repo_id, issue_number) → count of PRs
+    issue_pr_counts: dict[tuple[int, int], int] = {}
+    for repo_id, close_nums, pr_created_at in pr_result.all():
+        if not close_nums or not pr_created_at:
+            continue
+        for num in close_nums:
+            key = (repo_id, num)
+            issue_pr_counts[key] = issue_pr_counts.get(key, 0) + 1
+            if key in issue_map:
+                issue_id = issue_map[key][0]
+                if issue_id not in issue_pr_dates:
+                    issue_pr_dates[issue_id] = []
+                issue_pr_dates[issue_id].append(pr_created_at)
+
+    # Fetch issue comments for avg_comment_count_before_pr
+    issue_ids_with_prs = set(issue_pr_dates.keys())
+    comment_counts_before_pr: dict[int, int] = {}
+    if issue_ids_with_prs:
+        comment_result = await db.execute(
+            select(
+                IssueComment.issue_id,
+                IssueComment.created_at,
+            ).where(IssueComment.issue_id.in_(issue_ids_with_prs))
+        )
+        # Group comments by issue_id, count those before earliest linked PR
+        issue_comments: dict[int, list[datetime | None]] = {}
+        for issue_id, comment_created_at in comment_result.all():
+            if issue_id not in issue_comments:
+                issue_comments[issue_id] = []
+            issue_comments[issue_id].append(comment_created_at)
+
+        for issue_id, comment_dates in issue_comments.items():
+            earliest_pr = min(issue_pr_dates[issue_id])
+            count = sum(
+                1 for d in comment_dates if d is not None and d < earliest_pr
+            )
+            comment_counts_before_pr[issue_id] = count
+
+    # Compute per-creator stats
+    creators: list[IssueCreatorStats] = []
+    for username, issues in creator_issues.items():
+        stats = _compute_creator_metrics(
+            username, issues, issue_map, issue_pr_counts,
+            issue_pr_dates, comment_counts_before_pr, dev_lookup,
+        )
+        creators.append(stats)
+
+    # Sort by issues_created descending
+    creators.sort(key=lambda c: c.issues_created, reverse=True)
+
+    # Compute team averages
+    team_averages = _compute_team_averages(creators)
+
+    return IssueCreatorStatsResponse(
+        creators=creators,
+        team_averages=team_averages,
+    )
+
+
+def _compute_creator_metrics(
+    username: str,
+    issues: list,
+    issue_map: dict[tuple[int, int], tuple[int, str, datetime | None]],
+    issue_pr_counts: dict[tuple[int, int], int],
+    issue_pr_dates: dict[int, list[datetime]],
+    comment_counts_before_pr: dict[int, int],
+    dev_lookup: dict[str, tuple[str | None, str | None, str | None]],
+) -> IssueCreatorStats:
+    total = len(issues)
+
+    # Basic aggregates
+    close_times = [r[4] for r in issues if r[4] is not None]
+    avg_time_to_close_hours = (
+        round(statistics.mean(close_times) / 3600, 1) if close_times else None
+    )
+
+    checklist_count = sum(1 for r in issues if r[5])
+    pct_with_checklist = round(checklist_count / total * 100, 1)
+
+    reopened_count = sum(1 for r in issues if r[6] and r[6] > 0)
+    pct_reopened = round(reopened_count / total * 100, 1)
+
+    closed_issues = [r for r in issues if r[7] == "closed"]
+    not_planned = sum(1 for r in closed_issues if r[8] == "not_planned")
+    pct_closed_not_planned = (
+        round(not_planned / len(closed_issues) * 100, 1) if closed_issues else 0.0
+    )
+
+    body_under_100 = sum(1 for r in issues if (r[9] or 0) < 100)
+
+    # Linkage metrics
+    pr_counts: list[int] = []
+    time_to_first_pr: list[float] = []
+    comment_before_pr_counts: list[int] = []
+
+    for row in issues:
+        repo_id, issue_number = row[1], row[2]
+        issue_id = row[0]
+        issue_created_at = row[10]
+        key = (repo_id, issue_number)
+
+        if key in issue_pr_counts:
+            pr_counts.append(issue_pr_counts[key])
+
+        if issue_id in issue_pr_dates and issue_created_at:
+            earliest_pr = min(issue_pr_dates[issue_id])
+            delta_s = (earliest_pr - issue_created_at).total_seconds()
+            if delta_s >= 0:
+                time_to_first_pr.append(delta_s)
+
+        if issue_id in comment_counts_before_pr:
+            comment_before_pr_counts.append(comment_counts_before_pr[issue_id])
+
+    avg_prs_per_issue = (
+        round(statistics.mean(pr_counts), 2) if pr_counts else None
+    )
+    avg_time_to_first_pr_hours = (
+        round(statistics.mean(time_to_first_pr) / 3600, 1)
+        if time_to_first_pr else None
+    )
+    avg_comment_count_before_pr = (
+        round(statistics.mean(comment_before_pr_counts), 1)
+        if comment_before_pr_counts else None
+    )
+
+    dev_info = dev_lookup.get(username)
+    display_name = dev_info[0] if dev_info else None
+    team = dev_info[1] if dev_info else None
+    role = dev_info[2] if dev_info else None
+
+    return IssueCreatorStats(
+        github_username=username,
+        display_name=display_name,
+        team=team,
+        role=role,
+        issues_created=total,
+        avg_time_to_close_hours=avg_time_to_close_hours,
+        avg_comment_count_before_pr=avg_comment_count_before_pr,
+        pct_with_checklist=pct_with_checklist,
+        pct_reopened=pct_reopened,
+        pct_closed_not_planned=pct_closed_not_planned,
+        avg_prs_per_issue=avg_prs_per_issue,
+        issues_with_body_under_100_chars=body_under_100,
+        avg_time_to_first_pr_hours=avg_time_to_first_pr_hours,
+    )
+
+
+def _empty_creator_stats(username: str) -> IssueCreatorStats:
+    return IssueCreatorStats(
+        github_username=username,
+        display_name=None,
+        team=None,
+        role=None,
+        issues_created=0,
+        avg_time_to_close_hours=None,
+        avg_comment_count_before_pr=None,
+        pct_with_checklist=0.0,
+        pct_reopened=0.0,
+        pct_closed_not_planned=0.0,
+        avg_prs_per_issue=None,
+        issues_with_body_under_100_chars=0,
+        avg_time_to_first_pr_hours=None,
+    )
+
+
+def _compute_team_averages(creators: list[IssueCreatorStats]) -> IssueCreatorStats:
+    if not creators:
+        return _empty_creator_stats("__team_average__")
+
+    n = len(creators)
+    total_issues = sum(c.issues_created for c in creators)
+
+    close_hours = [c.avg_time_to_close_hours for c in creators if c.avg_time_to_close_hours is not None]
+    comment_before = [c.avg_comment_count_before_pr for c in creators if c.avg_comment_count_before_pr is not None]
+    prs_per = [c.avg_prs_per_issue for c in creators if c.avg_prs_per_issue is not None]
+    first_pr_hours = [c.avg_time_to_first_pr_hours for c in creators if c.avg_time_to_first_pr_hours is not None]
+
+    return IssueCreatorStats(
+        github_username="__team_average__",
+        display_name=None,
+        team=None,
+        role=None,
+        issues_created=round(total_issues / n),
+        avg_time_to_close_hours=(
+            round(statistics.mean(close_hours), 1) if close_hours else None
+        ),
+        avg_comment_count_before_pr=(
+            round(statistics.mean(comment_before), 1) if comment_before else None
+        ),
+        pct_with_checklist=round(
+            statistics.mean(c.pct_with_checklist for c in creators), 1
+        ),
+        pct_reopened=round(
+            statistics.mean(c.pct_reopened for c in creators), 1
+        ),
+        pct_closed_not_planned=round(
+            statistics.mean(c.pct_closed_not_planned for c in creators), 1
+        ),
+        avg_prs_per_issue=(
+            round(statistics.mean(prs_per), 2) if prs_per else None
+        ),
+        issues_with_body_under_100_chars=round(
+            sum(c.issues_with_body_under_100_chars for c in creators) / n
+        ),
+        avg_time_to_first_pr_hours=(
+            round(statistics.mean(first_pr_hours), 1) if first_pr_hours else None
+        ),
+    )
+
+
+# --- Code Churn (P3-06) ---
+
+
+def _extract_top_dir(filename: str) -> str | None:
+    """Extract the top-level directory from a file path, or None if top-level file."""
+    idx = filename.find("/")
+    return filename[:idx] if idx > 0 else None
+
+
+async def get_code_churn(
+    db: AsyncSession,
+    repo_id: int,
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    limit: int = 50,
+) -> CodeChurnResponse:
+    date_from, date_to = _default_range(date_from, date_to)
+
+    # Fetch repo
+    repo = await db.get(Repository, repo_id)
+    repo_name = repo.name or repo.full_name or str(repo_id) if repo else str(repo_id)
+    tree_truncated = repo.tree_truncated if repo else False
+
+    # --- Hotspot files ---
+    # Join pr_files → pull_requests, filter by repo + date range, aggregate by filename
+    hotspot_query = (
+        select(
+            PRFile.filename,
+            func.count(func.distinct(PRFile.pr_id)).label("change_frequency"),
+            func.sum(PRFile.additions).label("total_additions"),
+            func.sum(PRFile.deletions).label("total_deletions"),
+            func.count(func.distinct(PullRequest.author_id)).label(
+                "contributor_count"
+            ),
+            func.max(PullRequest.created_at).label("last_modified_at"),
+        )
+        .join(PullRequest, PRFile.pr_id == PullRequest.id)
+        .where(
+            PullRequest.repo_id == repo_id,
+            PullRequest.created_at >= date_from,
+            PullRequest.created_at <= date_to,
+        )
+        .group_by(PRFile.filename)
+        .order_by(
+            func.count(func.distinct(PRFile.pr_id)).desc(),
+            (func.sum(PRFile.additions) + func.sum(PRFile.deletions)).desc(),
+        )
+        .limit(limit)
+    )
+    result = await db.execute(hotspot_query)
+    hotspot_rows = result.all()
+
+    hotspot_files = [
+        FileChurnEntry(
+            path=row.filename,
+            change_frequency=row.change_frequency,
+            total_additions=row.total_additions or 0,
+            total_deletions=row.total_deletions or 0,
+            total_churn=(row.total_additions or 0) + (row.total_deletions or 0),
+            contributor_count=row.contributor_count,
+            last_modified_at=row.last_modified_at,
+        )
+        for row in hotspot_rows
+    ]
+
+    # --- Total files changed in period ---
+    total_files_changed = (
+        await db.scalar(
+            select(func.count(func.distinct(PRFile.filename)))
+            .join(PullRequest, PRFile.pr_id == PullRequest.id)
+            .where(
+                PullRequest.repo_id == repo_id,
+                PullRequest.created_at >= date_from,
+                PullRequest.created_at <= date_to,
+            )
+        )
+        or 0
+    )
+
+    # --- Repo tree stats ---
+    total_files_in_repo = (
+        await db.scalar(
+            select(func.count()).where(
+                RepoTreeFile.repo_id == repo_id,
+                RepoTreeFile.type == "blob",
+            )
+        )
+        or 0
+    )
+
+    # --- Stale directories (batch approach) ---
+    # Get top-level directories from repo tree
+    dir_result = await db.execute(
+        select(RepoTreeFile.path).where(
+            RepoTreeFile.repo_id == repo_id,
+            RepoTreeFile.type == "tree",
+            ~RepoTreeFile.path.contains("/"),
+        )
+    )
+    top_dirs = [row[0] for row in dir_result.all()]
+
+    stale_directories: list[StaleDirectory] = []
+    if top_dirs:
+        # Batch query: get all PR file activity in the period, extract top-level dir
+        activity_result = await db.execute(
+            select(PRFile.filename, PullRequest.created_at)
+            .join(PullRequest, PRFile.pr_id == PullRequest.id)
+            .where(
+                PullRequest.repo_id == repo_id,
+                PullRequest.created_at >= date_from,
+                PullRequest.created_at <= date_to,
+            )
+        )
+        # Build set of active top-level dirs in the period
+        active_dirs_in_period: set[str] = set()
+        for filename, _ in activity_result.all():
+            top = _extract_top_dir(filename)
+            if top:
+                active_dirs_in_period.add(top)
+
+        # Batch query: get all PR file activity ever, to find last activity per dir
+        all_activity_result = await db.execute(
+            select(PRFile.filename, func.max(PullRequest.created_at).label("last_at"))
+            .join(PullRequest, PRFile.pr_id == PullRequest.id)
+            .where(PullRequest.repo_id == repo_id)
+            .group_by(PRFile.filename)
+        )
+        # Aggregate last activity by top-level directory
+        dir_last_activity: dict[str, datetime] = {}
+        for filename, last_at in all_activity_result.all():
+            top = _extract_top_dir(filename)
+            if top and last_at:
+                if top not in dir_last_activity or last_at > dir_last_activity[top]:
+                    dir_last_activity[top] = last_at
+
+        # Batch query: count files per top-level directory from repo tree
+        tree_blobs_result = await db.execute(
+            select(RepoTreeFile.path).where(
+                RepoTreeFile.repo_id == repo_id,
+                RepoTreeFile.type == "blob",
+            )
+        )
+        dir_file_counts: dict[str, int] = {}
+        for (path,) in tree_blobs_result.all():
+            top = _extract_top_dir(path)
+            if top:
+                dir_file_counts[top] = dir_file_counts.get(top, 0) + 1
+
+        # Build stale directory list
+        for dir_path in top_dirs:
+            if dir_path not in active_dirs_in_period:
+                stale_directories.append(
+                    StaleDirectory(
+                        path=dir_path,
+                        file_count=dir_file_counts.get(dir_path, 0),
+                        last_pr_activity=dir_last_activity.get(dir_path),
+                    )
+                )
+
+        # Sort: never-touched first, then oldest activity
+        stale_directories.sort(
+            key=lambda d: (d.last_pr_activity is not None, d.last_pr_activity)
+        )
+
+    return CodeChurnResponse(
+        repo_id=repo_id,
+        repo_name=repo_name,
+        hotspot_files=hotspot_files,
+        stale_directories=stale_directories,
+        total_files_in_repo=total_files_in_repo,
+        total_files_changed=total_files_changed,
+        tree_truncated=tree_truncated,
     )

@@ -4,7 +4,7 @@
 Phase 2 — Make It Smart
 
 ## Status
-pending
+completed
 
 ## Blocked By
 - M1-review-quality-signals
@@ -38,34 +38,24 @@ Key changes:
 
 ## Deliverables
 
-### backend/app/services/github_sync.py
-Rewrite `classify_review_quality()`:
-
-```python
-def classify_review_quality(review_state: str, body_length: int, comment_count: int, body: str = "") -> str:
-    has_code_blocks = "```" in body if body else False
-
-    if body_length > 500 or comment_count >= 3:
-        return "thorough"
-    if review_state == "CHANGES_REQUESTED" and body_length > 100:
-        return "thorough"
-    if review_state == "CHANGES_REQUESTED":
-        return "standard"
-    if body_length >= 100 or has_code_blocks:
-        return "standard"
-    if review_state == "APPROVED" and body_length < 20 and comment_count == 0:
-        return "rubber_stamp"
-    return "minimal"
-```
-
-### Recompute existing data
-Add a one-time migration script or management command that recomputes `quality_tier` for all existing reviews using the new algorithm. This can be a standalone script in `backend/scripts/recompute_review_quality.py`.
-
-### Frontend label change
-In any frontend component that displays the quality tier, rename "rubber_stamp" display label to "Quick Approval" — the backend value stays `rubber_stamp` for consistency, but the UI label is less stigmatizing.
+- [x] **backend/app/services/github_sync.py** — Rewrite `classify_review_quality()` with new multi-signal algorithm (CHANGES_REQUESTED, code blocks, inline comment guard on rubber_stamp)
+- [x] **backend/scripts/recompute_review_quality.py** — One-time migration script to recompute `quality_tier` for all existing reviews (`python -m scripts.recompute_review_quality`)
+- [x] **frontend/src/components/charts/ReviewQualityDonut.tsx** — Rename "Rubber Stamp" display label to "Quick Approval"
 
 ## Testing
-- Unit test: `CHANGES_REQUESTED` with empty body → "standard" (was "minimal")
-- Unit test: `APPROVED` with 15-char body but 2 inline comments → "minimal" (not "rubber_stamp")
-- Unit test: `COMMENTED` with code block in body → "standard"
-- Unit test: backward compatibility — existing "thorough" classifications still hold
+
+- [x] Unit test: `CHANGES_REQUESTED` with empty body → "standard" (was "minimal")
+- [x] Unit test: `APPROVED` with 15-char body but 2 inline comments → "minimal" (not "rubber_stamp")
+- [x] Unit test: `COMMENTED` with code block in body → "standard"
+- [x] Unit test: backward compatibility — existing "thorough" classifications still hold
+- [x] Full test suite: 252 tests pass
+
+## Files Modified
+
+- `backend/app/services/github_sync.py` — Rewrote `classify_review_quality()`, updated call sites in `upsert_review()` and `recompute_review_quality_tiers()` to pass `body`
+- `frontend/src/components/charts/ReviewQualityDonut.tsx` — "Rubber Stamp" → "Quick Approval" label
+- `backend/tests/unit/test_review_quality.py` — 26 tests (8 new, 2 updated for changed behavior)
+
+## Files Created
+
+- `backend/scripts/recompute_review_quality.py` — One-time script to recompute quality tiers for existing data

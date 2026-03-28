@@ -4,7 +4,7 @@
 Phase 2 — Make It Smart
 
 ## Status
-pending
+done
 
 ## Blocked By
 - P2-05-pr-metadata-capture

@@ -11,7 +11,7 @@ const tiers = [
   { key: 'thorough', label: 'Thorough', color: '#22c55e' },
   { key: 'standard', label: 'Standard', color: '#3b82f6' },
   { key: 'minimal', label: 'Minimal', color: '#f59e0b' },
-  { key: 'rubber_stamp', label: 'Rubber Stamp', color: '#94a3b8' },
+  { key: 'rubber_stamp', label: 'Quick Approval', color: '#94a3b8' },
 ] as const
 
 export default function ReviewQualityDonut({

@@ -7,6 +7,7 @@ import type {
   GoalSelfCreate,
   GoalAdminCreate,
   GoalSelfUpdate,
+  GoalAdminUpdate,
 } from '@/utils/types'
 
 export function useGoals(developerId: number) {
@@ -54,6 +55,23 @@ export function useCreateAdminGoal() {
       toast.success('Goal created')
     },
     onError: () => toast.error('Failed to create goal'),
+  })
+}
+
+export function useUpdateAdminGoal() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ goalId, data }: { goalId: number; data: GoalAdminUpdate }) =>
+      apiFetch<GoalResponse>(`/goals/${goalId}`, {
+        method: 'PATCH',
+        body: JSON.stringify(data),
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['goals'] })
+      qc.invalidateQueries({ queryKey: ['goal-progress'] })
+      toast.success('Goal updated')
+    },
+    onError: () => toast.error('Failed to update goal'),
   })
 }
 

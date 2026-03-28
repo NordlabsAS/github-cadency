@@ -4,7 +4,7 @@
 Phase 3 — Make It Proactive
 
 ## Status
-pending
+completed
 
 ## Blocked By
 - P2-04-issue-pr-linkage
@@ -18,59 +18,48 @@ Add quality signals to issues so DevPulse can identify poorly-defined tasks that
 ## Deliverables
 
 ### Database migration
-Add columns to `issues`:
-- `comment_count` (Integer, default 0) — from `comments` key in GitHub API response (already returned, never stored)
-- `body_length` (Integer, default 0) — character count of issue body
-- `has_checklist` (Boolean, default False) — True if body contains `- [ ]` or `- [x]` patterns
-- `state_reason` (String(30), nullable) — `"completed"`, `"not_planned"`, or `"reopened"` from GitHub API
-- `creator_github_username` (String(255), nullable) — from `issue_data.get("user", {}).get("login")`
-- `milestone_title` (String(255), nullable) — from `issue_data.get("milestone", {}).get("title")`
-- `milestone_due_on` (Date, nullable) — from milestone data
-- `reopen_count` (Integer, default 0) — incremented when state transitions from closed to open during sync
+- [x] Add columns to `issues`:
+  - `comment_count` (Integer, default 0) — from `comments` key in GitHub API response
+  - `body_length` (Integer, default 0) — character count of issue body
+  - `has_checklist` (Boolean, default False) — True if body contains `- [ ]` or `- [x]`/`- [X]` patterns
+  - `state_reason` (String(30), nullable) — `"completed"`, `"not_planned"`, or `"reopened"` from GitHub API
+  - `creator_github_username` (String(255), nullable) — from `issue_data.get("user", {}).get("login")`
+  - `milestone_title` (String(255), nullable) — from milestone data
+  - `milestone_due_on` (Date, nullable) — from milestone data
+  - `reopen_count` (Integer, default 0) — incremented on closed→open state transition during sync
 
 ### backend/app/services/github_sync.py (extend)
-In `upsert_issue()`, extract new fields from the already-fetched API response:
-```python
-comment_count = issue_data.get("comments", 0)
-body = issue_data.get("body") or ""
-body_length = len(body)
-has_checklist = bool(re.search(r'- \[[ x]\]', body))
-state_reason = issue_data.get("state_reason")
-creator_github_username = issue_data.get("user", {}).get("login")
-milestone = issue_data.get("milestone") or {}
-milestone_title = milestone.get("title")
-milestone_due_on = milestone.get("due_on")  # parse ISO date
-```
-
-For `reopen_count`: compare incoming `state` with stored state. If stored is "closed" and incoming is "open", increment `reopen_count`.
+- [x] Extract all new fields from `issue_data` in `upsert_issue()`
+- [x] Parse `milestone_due_on` from ISO date string → `Date`
+- [x] Compute `body_length` and `has_checklist` from body
+- [x] Detect reopen: if stored `state == "closed"` and incoming `state == "open"`, increment `reopen_count`
+- [x] Clear `closed_at`/`time_to_close_s` when issue is re-opened (set to None if value absent)
 
 ### backend/app/services/stats.py (extend)
-New function: `async def get_issue_quality_stats(session, date_from, date_to, team)`
-
-Returns:
-- `total_issues_created` — in period
-- `avg_body_length` — average issue body length
-- `pct_with_checklist` — percentage of issues with acceptance criteria checklists
-- `avg_comment_count` — average comments per issue
-- `pct_closed_not_planned` — issues closed as "won't fix" / total closed
-- `avg_reopen_count` — average reopens per issue
-- `issues_without_body` — count of issues with empty or <50 char body
-- Label distribution: `{"bug": 12, "feature": 8, "tech-debt": 3, ...}`
+- [x] `get_issue_quality_stats()` — returns all quality metrics
+- [x] `get_issue_label_distribution()` — standalone label distribution endpoint
 
 ### backend/app/api/stats.py (extend)
-New routes:
-- `GET /api/stats/issues/quality` — returns `IssueQualityStats`
-- `GET /api/stats/issues/labels` — returns label distribution
+- [x] `GET /api/stats/issues/quality` — returns `IssueQualityStats` (admin only)
+- [x] `GET /api/stats/issues/labels` — returns `dict[str, int]` (admin only)
 
 ### backend/app/schemas/schemas.py (extend)
-```python
-class IssueQualityStats(BaseModel):
-    total_issues_created: int
-    avg_body_length: float
-    pct_with_checklist: float
-    avg_comment_count: float
-    pct_closed_not_planned: float
-    avg_reopen_count: float
-    issues_without_body: int
-    label_distribution: dict[str, int]
-```
+- [x] `IssueQualityStats` Pydantic model
+
+## Deviations from Original Spec
+- Checklist regex also matches uppercase `- [X]` (GitHub accepts both)
+- Label values validated as strings before aggregation (defensive against JSONB corruption)
+- `closed_at` and `time_to_close_s` are now explicitly set to `None` when absent in API response (previously only set when present, could leave stale values on reopened issues)
+
+## Files Created
+- `backend/migrations/versions/007_merge_006_heads.py` — merge migration for diverged 006 heads
+- `backend/migrations/versions/008_add_issue_quality_columns.py` — adds 8 columns to `issues`
+- `backend/tests/integration/test_issue_quality_api.py` — 12 integration tests
+- `backend/tests/unit/test_issue_quality.py` — 9 unit tests (checklist regex, body length)
+
+## Files Modified
+- `backend/app/models/models.py` — 8 new columns on `Issue` class
+- `backend/app/services/github_sync.py` — `upsert_issue()` extended with quality fields + reopen detection
+- `backend/app/services/stats.py` — `get_issue_quality_stats()` + `get_issue_label_distribution()`
+- `backend/app/api/stats.py` — 2 new admin-only endpoints
+- `backend/app/schemas/schemas.py` — `IssueQualityStats` model

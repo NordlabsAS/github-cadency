@@ -1,9 +1,14 @@
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueries } from '@tanstack/react-query'
 import { apiFetch } from '@/utils/api'
 import type {
+  BenchmarksResponse,
+  CodeChurnResponse,
+  CollaborationResponse,
   DeveloperStatsWithPercentiles,
   DeveloperTrendsResponse,
+  IssueCreatorStatsResponse,
   RepoStats,
+  RiskSummaryResponse,
   StalePRsResponse,
   TeamStats,
   WorkloadResponse,
@@ -80,5 +85,94 @@ export function useWorkload(team?: string, dateFrom?: string, dateTo?: string) {
   return useQuery<WorkloadResponse>({
     queryKey: ['workload', team, dateFrom, dateTo],
     queryFn: () => apiFetch(`/stats/workload?${params}`),
+  })
+}
+
+export function useBenchmarks(team?: string, dateFrom?: string, dateTo?: string) {
+  const params = new URLSearchParams()
+  if (team) params.set('team', team)
+  if (dateFrom) params.set('date_from', dateFrom)
+  if (dateTo) params.set('date_to', dateTo)
+  return useQuery<BenchmarksResponse>({
+    queryKey: ['benchmarks', team, dateFrom, dateTo],
+    queryFn: () => apiFetch(`/stats/benchmarks?${params}`),
+  })
+}
+
+export function useAllDeveloperStats(
+  developerIds: number[],
+  dateFrom?: string,
+  dateTo?: string,
+) {
+  return useQueries({
+    queries: developerIds.map((id) => {
+      const params = new URLSearchParams()
+      if (dateFrom) params.set('date_from', dateFrom)
+      if (dateTo) params.set('date_to', dateTo)
+      params.set('include_percentiles', 'true')
+      return {
+        queryKey: ['developer-stats', id, dateFrom, dateTo],
+        queryFn: () => apiFetch<DeveloperStatsWithPercentiles>(`/stats/developer/${id}?${params}`),
+        enabled: !!id,
+      }
+    }),
+  })
+}
+
+export function useIssueCreatorStats(team?: string, dateFrom?: string, dateTo?: string) {
+  const params = new URLSearchParams()
+  if (team) params.set('team', team)
+  if (dateFrom) params.set('date_from', dateFrom)
+  if (dateTo) params.set('date_to', dateTo)
+  return useQuery<IssueCreatorStatsResponse>({
+    queryKey: ['issue-creator-stats', team, dateFrom, dateTo],
+    queryFn: () => apiFetch(`/stats/issues/creators?${params}`),
+  })
+}
+
+export function useCollaboration(team?: string, dateFrom?: string, dateTo?: string) {
+  const params = new URLSearchParams()
+  if (team) params.set('team', team)
+  if (dateFrom) params.set('date_from', dateFrom)
+  if (dateTo) params.set('date_to', dateTo)
+  return useQuery<CollaborationResponse>({
+    queryKey: ['collaboration', team, dateFrom, dateTo],
+    queryFn: () => apiFetch(`/stats/collaboration?${params}`),
+  })
+}
+
+export function useRiskSummary(
+  team?: string,
+  dateFrom?: string,
+  dateTo?: string,
+  minRiskLevel: string = 'medium',
+  scope: string = 'all',
+) {
+  const params = new URLSearchParams()
+  if (team) params.set('team', team)
+  if (dateFrom) params.set('date_from', dateFrom)
+  if (dateTo) params.set('date_to', dateTo)
+  params.set('min_risk_level', minRiskLevel)
+  params.set('scope', scope)
+  return useQuery<RiskSummaryResponse>({
+    queryKey: ['risk-summary', team, dateFrom, dateTo, minRiskLevel, scope],
+    queryFn: () => apiFetch(`/stats/risk-summary?${params}`),
+  })
+}
+
+export function useCodeChurn(
+  repoId: number | null,
+  dateFrom?: string,
+  dateTo?: string,
+  limit: number = 50,
+) {
+  const params = new URLSearchParams()
+  if (dateFrom) params.set('date_from', dateFrom)
+  if (dateTo) params.set('date_to', dateTo)
+  params.set('limit', String(limit))
+  return useQuery<CodeChurnResponse>({
+    queryKey: ['code-churn', repoId, dateFrom, dateTo, limit],
+    queryFn: () => apiFetch(`/stats/repo/${repoId}/churn?${params}`),
+    enabled: !!repoId,
   })
 }

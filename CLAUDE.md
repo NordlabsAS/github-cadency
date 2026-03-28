@@ -55,7 +55,7 @@ backend/app/
 │   └── ai_analysis.py # AI analysis + 1:1 prep + team health endpoints
 ├── models/
 │   ├── database.py   # Async engine, session factory, Base, get_db() dependency
-│   └── models.py     # All 10 SQLAlchemy ORM models
+│   └── models.py     # All 12 SQLAlchemy ORM models
 ├── schemas/
 │   └── schemas.py    # All Pydantic request/response models and enums
 ├── services/
@@ -63,6 +63,7 @@ backend/app/
 │   ├── stats.py          # All metrics: developer, team, repo, benchmarks, trends, workload
 │   ├── collaboration.py  # Collaboration matrix + insights (silos, bus factors, isolation)
 │   ├── goals.py          # Goal CRUD, metric computation, auto-achievement
+│   ├── risk.py           # PR risk scoring: per-PR assessment, team risk summary
 │   └── ai_analysis.py    # Claude API integration, 1:1 prep briefs, team health checks
 ├── config.py         # pydantic-settings: all env vars
 └── main.py           # FastAPI app factory, CORS, router registration, APScheduler
@@ -72,14 +73,17 @@ backend/app/
 
 ```
 frontend/src/
-├── pages/            # Route components (Dashboard, TeamRegistry, DeveloperDetail, Repos, SyncStatus, AIAnalysis)
+├── pages/            # Route components (Dashboard, TeamRegistry, DeveloperDetail, Repos, SyncStatus, AIAnalysis, Goals, Login, AuthCallback)
+│   └── insights/     # Insights sub-pages (WorkloadOverview, CollaborationMatrix, Benchmarks, IssueQuality, CodeChurn)
 ├── components/
-│   ├── Layout.tsx    # Sticky header, nav, global date range picker, quick-select date presets (7d/14d/30d/90d/quarter)
+│   ├── Layout.tsx    # Sticky header, nav (with Insights dropdown group), global date range picker, quick-select date presets (7d/14d/30d/90d/quarter)
+│   ├── StalePRsSection.tsx  # Shared stale PR table (used by Dashboard + WorkloadOverview)
 │   ├── StatCard.tsx  # Reusable stat display card with optional trend delta and methodology tooltip
 │   ├── StatCardSkeleton.tsx  # Skeleton loading variant for StatCard
 │   ├── TableSkeleton.tsx     # Skeleton loading variant for table rows
 │   ├── ErrorCard.tsx         # Reusable error state: icon, message, retry button
 │   ├── ErrorBoundary.tsx     # React error boundary with "Try Again" and "Go to Dashboard" fallback
+│   ├── GoalCreateDialog.tsx  # Shared goal creation dialog (used by Goals page + DeveloperDetail), exports metricKeyLabels
 │   ├── DateRangePicker.tsx   # Calendar popover + quick-select presets (7d/14d/30d/90d/quarter)
 │   ├── ai/           # AI analysis result renderers
 │   │   ├── AnalysisResultRenderer.tsx  # Router: switches on analysis_type to select view
@@ -92,7 +96,7 @@ frontend/src/
 │   │   ├── ReviewQualityDonut.tsx # PieChart with quality tier segments and center score
 │   │   └── GoalSparkline.tsx     # Compact LineChart with target ReferenceLine for goal progress
 │   └── ui/           # shadcn/ui primitives (button, card, table, dialog, skeleton, calendar, popover, tooltip, accordion, etc.)
-├── hooks/            # TanStack Query hooks (useDevelopers, useStats [incl. useDeveloperTrends, useWorkload], useSync, useAI, useGoals, useDateRange)
+├── hooks/            # TanStack Query hooks (useAuth, useDevelopers, useStats [incl. useDeveloperStats, useTeamStats, useRepoStats, useDeveloperTrends, useWorkload, useBenchmarks, useCollaboration, useAllDeveloperStats, useStalePRs, useIssueCreatorStats, useRiskSummary, useCodeChurn], useSync, useAI, useGoals, useDateRange)
 ├── utils/
 │   ├── api.ts        # apiFetch<T>() wrapper with Bearer auth from localStorage
 │   └── types.ts      # TypeScript interfaces mirroring backend schemas
@@ -101,16 +105,18 @@ frontend/src/
 
 **Import alias:** `@/` maps to `src/` (configured in vite.config.ts and tsconfig).
 
-## Database Schema (10 tables)
+## Database Schema (12 tables)
 
 | Table | Purpose | Key Relationships |
 |-------|---------|-------------------|
 | `developers` | Team registry with GitHub username, role, team, skills, app_role | Has many: pull_requests, reviews, issues, goals |
-| `repositories` | GitHub repos with tracking toggle | Has many: pull_requests, issues |
-| `pull_requests` | PRs with pre-computed cycle times, approval tracking, and issue linkage | Belongs to: repo, author. Has many: reviews, review_comments |
+| `repositories` | GitHub repos with tracking toggle, default branch, tree truncation flag | Has many: pull_requests, issues, tree_files |
+| `pull_requests` | PRs with pre-computed cycle times, approval tracking, and issue linkage | Belongs to: repo, author. Has many: reviews, review_comments, files |
 | `pr_reviews` | Reviews with quality tier classification | Belongs to: pr, reviewer. Has many: comments |
 | `pr_review_comments` | Inline code review comments | Belongs to: pr, review |
-| `issues` | Issues with close-time computation | Belongs to: repo, assignee. Has many: comments |
+| `pr_files` | File-level changes per PR (filename, additions, deletions, status) | Belongs to: pull_request |
+| `repo_tree_files` | Full repo file tree snapshot for stale directory detection | Belongs to: repository |
+| `issues` | Issues with close-time computation and quality scoring | Belongs to: repo, assignee. Has many: comments |
 | `issue_comments` | Issue comment bodies | Belongs to: issue |
 | `sync_events` | Sync run audit log | Standalone |
 | `ai_analyses` | AI analysis results (JSONB) | Standalone (scope_type + scope_id reference other tables) |
@@ -118,12 +124,14 @@ frontend/src/
 
 **Key design decisions:**
 - Author/reviewer FKs are **nullable** — external contributors not in the team registry get `NULL`
-- Cycle-time fields (`time_to_first_review_s`, `time_to_merge_s`, `time_to_close_s`, `time_to_approve_s`, `time_after_approve_s`) are pre-computed at sync time
+- PR cycle-time fields (`time_to_first_review_s`, `time_to_merge_s`, `time_to_approve_s`, `time_after_approve_s`) are pre-computed at sync time. Issue cycle-time field: `time_to_close_s`
 - Approval tracking: `approved_at` (last APPROVED review), `approval_count` (>1 = re-review cycle), `merged_without_approval` (merged with zero approvals)
 - Revert tracking: `is_revert` (boolean), `reverted_pr_number` (nullable int) — detected at sync time via title/body parsing + DB fallback
-- `pr_reviews.quality_tier` is computed deterministically: `thorough` (>500 chars or 3+ inline comments), `standard` (100-500 chars), `rubber_stamp` (APPROVED + <20 chars), `minimal` (default)
+- `pr_reviews.quality_tier` is computed deterministically: `thorough` (>500 chars, or 3+ inline comments, or CHANGES_REQUESTED + >100 chars), `standard` (100-500 chars, or CHANGES_REQUESTED any length, or body contains code blocks), `rubber_stamp` (APPROVED + <20 chars + 0 inline comments), `minimal` (default)
 - JSONB columns: `skills`, `labels`, `errors`, `result` (AI analysis output), `closes_issue_numbers` (PR → issue linkage via closing keywords)
 - `developer_goals.created_by` — `"self"` or `"admin"` (server_default `"admin"`); developers can only modify their own self-created goals
+- Issue quality scoring: `comment_count`, `body_length`, `has_checklist`, `state_reason`, `creator_github_username`, `milestone_title`, `milestone_due_on`, `reopen_count` — extracted from GitHub API at sync time. `reopen_count` incremented on closed→open state transition.
+- Code churn tracking: `pr_files` populated from GitHub PR files API (1 call per PR during sync). `repo_tree_files` is a full snapshot via Trees API (1 call per repo, delete + re-insert). `default_branch` on `repositories` used for tree fetch. `tree_truncated` tracks if GitHub truncated the tree (>100K entries).
 - No commit-level data — stats are PR-level only to stay within GitHub rate limits
 
 ## GitHub Integration
@@ -162,7 +170,7 @@ frontend/src/
 | **Incremental sync** | Every `SYNC_INTERVAL_MINUTES` (default 15) | Changed since `last_synced_at` | `run_sync("incremental")` with `stop_before` pagination |
 | **Webhook** | Real-time | Single event | `POST /api/webhooks/github` |
 
-**Sync flow per repo:** fetch PRs → for each PR: upsert PR + fetch reviews + fetch review comments + recompute quality tiers → fetch issues → fetch issue comments → update `repo.last_synced_at`
+**Sync flow per repo:** fetch PRs → for each PR: upsert PR + fetch reviews + fetch review comments + recompute quality tiers + fetch PR files → fetch issues → fetch issue comments → sync repo tree → update `repo.last_synced_at`
 
 **Rate limit handling:** checks `X-RateLimit-Remaining` header; sleeps until reset when < 100 remaining.
 
@@ -201,11 +209,17 @@ Endpoints `/api/health`, `/api/webhooks/github`, and `/api/auth/*` are public. A
 | **M4: Workload** | `GET /api/stats/workload` | Per-developer load indicators + automated alerts |
 | **P2-01: Stale PRs** | `GET /api/stats/stale-prs` | Open PRs needing attention, sorted by staleness (no_review, changes_requested, approved_not_merged) |
 | **P2-04: Issue Linkage** | `GET /api/stats/issue-linkage` | Issue-to-PR linkage stats via closing keywords (linked/unlinked counts, avg PRs per issue) |
+| **P3-03: Issue Quality** | `GET /api/stats/issues/quality` | Issue quality scoring (body length, checklists, comment counts, reopen rate, not-planned %) |
+| **P3-03: Issue Labels** | `GET /api/stats/issues/labels` | Label distribution across issues in period |
+| **P3-04: Issue Creators** | `GET /api/stats/issues/creators` | Per-creator issue quality analytics with team averages, linkage metrics, and comment-before-PR counts |
+| **P3-06: Code Churn** | `GET /api/stats/repo/{id}/churn` | File-level churn hotspots + stale directories per repo |
 | **M5: Collaboration** | `GET /api/stats/collaboration` | Reviewer-author matrix + insights (silos, bus factors) |
 | **M6: Goals** | `POST/GET /api/goals`, `PATCH /api/goals/{id}`, `GET /api/goals/{id}/progress` | Developer goal CRUD with auto-achievement |
 | **P1-03: Self Goals** | `POST /api/goals/self`, `PATCH /api/goals/self/{id}` | Developer self-goal creation + update (own self-created goals only) |
 | **M7: 1:1 Prep** | `POST /api/ai/one-on-one-prep` | AI-generated structured 1:1 meeting brief |
 | **M8: Team Health** | `POST /api/ai/team-health` | AI-generated comprehensive team health assessment |
+| **P3-05: PR Risk** | `GET /api/stats/pr/{id}/risk` | Single PR risk assessment (score, level, factors) |
+| **P3-05: Risk Summary** | `GET /api/stats/risk-summary` | Team-level risk summary with scope/level filters |
 
 See `docs/API.md` for full request/response contracts.
 
@@ -290,11 +304,13 @@ Tests use SQLite in-memory via aiosqlite (no PostgreSQL needed for testing).
 - **Review quality tiers:** Computed at sync time by `classify_review_quality()` (pure function), then recomputed after review comments are synced via `recompute_review_quality_tiers()`
 - **Percentile band inversion:** For lower-is-better metrics (time_to_merge, time_to_first_review, review_turnaround), `_percentile_band()` inverts labels so `above_p75` always means "best"
 - **Trend regression:** Simple OLS `_linear_regression()` with polarity-aware direction classification; <5% change = "stable"
-- **Goal auto-achievement:** Checked on progress fetch — if metric crosses target for 2 consecutive weekly periods, auto-marks as achieved
+- **Goal auto-achievement:** Checked on progress fetch — if metric meets target for 2 consecutive weekly periods, auto-marks as achieved
 - **Issue-PR linkage:** `extract_closing_issue_numbers(body)` parses closing keywords (`close/closes/closed/fix/fixes/fixed/resolve/resolves/resolved #N`) from PR body at sync time, stores as `closes_issue_numbers` JSONB array. Linkage stats cross-reference by `(repo_id, issue_number)`.
+- **Issue creator analytics:** `get_issue_creator_stats()` groups issues by `creator_github_username`, resolves identity via string join to `Developer.github_username` (no FK). For `avg_comment_count_before_pr`, cross-references `IssueComment.created_at` against earliest linked PR's `created_at` per issue. Returns `IssueCreatorStatsResponse` with per-creator list + team averages.
 - **Draft PR filtering:** Open PR counts and workload metrics use `PullRequest.is_draft.isnot(True)` to exclude drafts (handles `NULL` safely). Drafts are counted separately via `prs_draft` / `drafts_open`. Stale PR alerts also exclude drafts.
-- **Workload score:** Heuristic based on pending work only: `total_load = open_authored + open_reviewing + open_issues`. Completed reviews are output, not load — they are excluded from the score formula.
+- **Workload score:** Heuristic based on pending work only: `total_load = open_authored + open_reviewing + open_issues`. Completed reviews are output, not load — they are excluded from the score formula. Thresholds: `low` (0), `balanced` (1-5), `high` (6-12), `overloaded` (>12).
 - **Revert detection:** `detect_revert()` parses title (`Revert "..."`) and body (`Reverts #NNN` / `Reverts owner/repo#NNN`). Falls back to DB title lookup via `_resolve_revert_pr_number()`. `prs_reverted` counts via self-join on `reverted_pr_number` + `repo_id`. Alert threshold: 5% revert rate.
+- **PR risk scoring:** Pure function `compute_pr_risk()` in `services/risk.py` scores PRs across 10 weighted factors (size, author experience, review quality, merge patterns, branch naming). Score = min(1.0, sum of weights). Levels: low (0-0.3), medium (0.3-0.6), high (0.6-0.8), critical (0.8-1.0). `get_risk_summary()` bulk-fetches author merged counts and names to avoid N+1 queries. Drafts excluded. `is_merged` checked with `is True` (nullable bool).
 - **AI analysis:** Data gathering → structured system prompt → Claude API call → JSON parse → store in `ai_analyses`. PR data for 1:1 briefs includes `html_url` for GitHub links.
 
 ### Frontend patterns
@@ -312,6 +328,9 @@ Tests use SQLite in-memory via aiosqlite (no PostgreSQL needed for testing).
 - **Date range picker:** `DateRangePicker` component with quick-select presets (7d/14d/30d/90d/quarter) + dual Calendar popover for custom range selection. Uses `react-day-picker` + `date-fns`.
 - **Methodology tooltips:** `StatCard` accepts an optional `tooltip` prop — renders a `HelpCircle` icon (Lucide) next to the title with a hover tooltip (`@base-ui/react/tooltip`). Every stat card on Dashboard and DeveloperDetail explains how the metric is computed. Section headers (Trends, Team Context) also have tooltips.
 - **AI result rendering:** `AnalysisResultRenderer` switches on `analysis_type` to select a structured view component (`OneOnOnePrepView`, `TeamHealthView`, `GenericAnalysisView`). Falls back to formatted JSON for unknown types. Color convention: green (positive/on-track), amber (needs attention), red (concern/blocker).
+- **Nav dropdown groups:** `Layout.tsx` supports `NavGroup` entries with `children` array — renders a click-to-open dropdown. Active state uses exact match or prefix match with `/` separator. Currently used for "Insights" group (Workload, Collaboration, Benchmarks, Issue Quality, Code Churn).
+- **Insights pages:** Five admin-only pages under `/insights/*`. WorkloadOverview uses `useWorkload` + `useStalePRs` + shared `StalePRsSection`. CollaborationMatrix uses `useCollaboration` with a custom CSS grid heatmap. Benchmarks uses `useBenchmarks` + `useAllDeveloperStats` (batch `useQueries`) for the developer ranking. IssueQuality uses `useIssueCreatorStats` with per-creator table, min-issue-count filter, and red-badge highlighting for metrics >1.5x worse than team average. CodeChurn uses `useCodeChurn` with repo selector, hotspot table, and stale directory detection.
+- **Batch developer stats:** `useAllDeveloperStats(ids, dateFrom, dateTo)` uses TanStack `useQueries` to fetch all developer stats in parallel with a single hook call, avoiding N+1 per-row hooks. Query keys match `useDeveloperStats` for cache sharing.
 
 ## Specification
 
@@ -334,9 +353,18 @@ Task files live in `.claude/tasks/` (core spec), `.claude/tasks/management-impro
 - P1-02: Actionable Dashboard (alert strip, team status grid, stat cards with trend deltas, date presets)
 - P1-04: Structured AI Result Rendering (OneOnOnePrepView, TeamHealthView, GenericAnalysisView, tabbed AIAnalysis page, 1:1 prep button on DeveloperDetail)
 - P1-07: Draft PR Filtering (draft PRs excluded from `prs_open`, workload counts, and stale alerts; workload score formula fixed)
+- P1-03: Developer Self-Goal Creation (`POST /api/goals/self`, `PATCH /api/goals/self/{id}` endpoints; `GoalSelfCreate`/`GoalSelfUpdate` schemas; `created_by` column on `developer_goals`; developer-only access to own self-created goals)
 - P1-08: Methodology Tooltips (HelpCircle + hover tooltip on every StatCard and section header explaining how each metric is computed)
 - P2-03: Approved-At Timestamp & Post-Approval Merge Latency (approved_at, time_to_approve_s, time_after_approve_s, approval_count, merged_without_approval on PRs; approval metrics in stats, benchmarks, and workload alerts)
 - P2-01: Stale PR List Endpoint (dedicated endpoint + Dashboard "Needs Attention" table with 3 staleness categories)
 - P2-04: Approval Metrics Frontend (approval StatCards + percentile bars on DeveloperDetail, `merged_without_approval` alerts on Dashboard)
 - P2-04: Issue-to-PR Linkage via Closing Keywords (`closes_issue_numbers` JSONB on PRs, `extract_closing_issue_numbers()` parser, `GET /api/stats/issue-linkage` endpoint)
+- P2-05: PR Metadata Capture (`labels` JSONB, `merged_by_username`, `head_branch`, `base_branch`, `is_self_merged`, `html_url` on PRs; extracted from GitHub API during sync)
 - P2-06: Revert PR Detection (`is_revert`, `reverted_pr_number` on PRs; `detect_revert()` with DB fallback; `prs_reverted`/`reverts_authored` in developer stats; `revert_rate` in team stats; `revert_spike` workload alert; frontend stat cards on DeveloperDetail + Dashboard)
+- P2-09: Goals Management Page (dedicated `/goals` route with flat table view, developer filter dropdown for admins, shared `GoalCreateDialog` component, progress bars + sparklines per goal, status quick-actions, `useUpdateAdminGoal` hook)
+- P2-07: Review Quality Algorithm Fix (multi-signal `classify_review_quality()`: CHANGES_REQUESTED promotes to standard/thorough, code blocks promote to standard, rubber_stamp requires 0 inline comments; recompute script; "Quick Approval" UI label)
+- P2-08: Workload, Collaboration & Benchmarks Pages (3 new Insights pages under `/insights/*` with nav dropdown; WorkloadOverview with alerts + team grid + stale PRs; CollaborationMatrix with CSS heatmap + insights panel; Benchmarks with percentile table + developer ranking bars; shared `StalePRsSection` extracted from Dashboard; `useAllDeveloperStats` batch hook)
+- P3-03: Issue Quality Scoring (8 new columns on `issues`: `comment_count`, `body_length`, `has_checklist`, `state_reason`, `creator_github_username`, `milestone_title`, `milestone_due_on`, `reopen_count`; sync extraction from GitHub API; reopen detection on closed→open transition; `GET /api/stats/issues/quality` + `GET /api/stats/issues/labels` endpoints)
+- P3-04: Issue Creator Analytics (`GET /api/stats/issues/creators` batch endpoint; per-creator metrics: checklist %, reopened %, not-planned %, avg close time, avg PRs per issue, avg time to first PR, avg comments before PR; team averages for comparison; volume-based creator filtering; `/insights/issue-quality` page with red-badge highlighting for metrics >1.5x worse than average)
+- P3-05: PR Risk Scoring (`backend/app/services/risk.py` with pure `compute_pr_risk()` function scoring 10 factors; `GET /api/stats/pr/{id}/risk` + `GET /api/stats/risk-summary` with scope/level filters; risk badges on stale PR table; "High-Risk PRs" Dashboard section; shared `riskLevelStyles`/`riskLevelLabels` in types.ts; 36 unit tests)
+- P3-06: Code Churn Analysis (`pr_files` + `repo_tree_files` tables; `default_branch` + `tree_truncated` on `repositories`; sync of PR files from GitHub API + repo tree snapshot via Trees API; `PRFile` and `RepoTreeFile` models; `GET /api/stats/repo/{id}/churn` endpoint with hotspot files + stale directories; `/insights/code-churn` page with repo selector, hotspot table, stale dirs; `useCodeChurn` hook; 14 tests)

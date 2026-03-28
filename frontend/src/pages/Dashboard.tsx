@@ -1,12 +1,13 @@
 import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useDateRange } from '@/hooks/useDateRange'
-import { useStalePRs, useTeamStats, useWorkload } from '@/hooks/useStats'
+import { useRiskSummary, useStalePRs, useTeamStats, useWorkload } from '@/hooks/useStats'
 import { useDevelopers } from '@/hooks/useDevelopers'
 import StatCard from '@/components/StatCard'
 import StatCardSkeleton from '@/components/StatCardSkeleton'
 import TableSkeleton from '@/components/TableSkeleton'
 import ErrorCard from '@/components/ErrorCard'
+import StalePRsSection from '@/components/StalePRsSection'
 import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
@@ -18,7 +19,8 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import type { WorkloadAlert, DeveloperWorkload, TeamStats, StalePR } from '@/utils/types'
+import type { RiskAssessment, WorkloadAlert, DeveloperWorkload, TeamStats } from '@/utils/types'
+import { riskLevelLabels, riskLevelStyles } from '@/utils/types'
 
 // --- Alert severity mapping ---
 
@@ -102,6 +104,8 @@ export default function Dashboard() {
   const { data: prevStats } = useTeamStats(undefined, prevFrom, prevTo)
   const { data: workload, isLoading: workloadLoading, isError: workloadError, refetch: refetchWorkload } = useWorkload(undefined, dateFrom, dateTo)
   const { data: stalePRs, isLoading: stalePRsLoading, isError: stalePRsError, refetch: refetchStalePRs } = useStalePRs()
+  const { data: riskSummary } = useRiskSummary(undefined, dateFrom, dateTo, 'low', 'all')
+  const { data: riskOpen } = useRiskSummary(undefined, dateFrom, dateTo, 'high', 'open')
   const { data: developers } = useDevelopers()
 
   // Team grid state
@@ -115,6 +119,19 @@ export default function Dashboard() {
     const set = new Set(developers.map((d) => d.team).filter(Boolean) as string[])
     return Array.from(set).sort()
   }, [developers])
+
+  // Build risk score lookup for stale PRs
+  const riskScoresMap = useMemo(() => {
+    if (!riskSummary) return undefined
+    const map: Record<number, RiskAssessment> = {}
+    for (const a of riskSummary.high_risk_prs) {
+      map[a.pr_id] = a
+    }
+    return map
+  }, [riskSummary])
+
+  // Open high-risk PRs for the dashboard section (pre-filtered by API: scope=open, min_risk_level=high)
+  const openHighRiskPRs = riskOpen?.high_risk_prs ?? []
 
   // Filter and sort workload developers
   const sortedDevs = useMemo(() => {
@@ -200,7 +217,12 @@ export default function Dashboard() {
 
       {/* Zone 1b: Stale PRs — Needs Attention */}
       {stalePRs && stalePRs.stale_prs.length > 0 && (
-        <StalePRsSection prs={stalePRs.stale_prs} />
+        <StalePRsSection prs={stalePRs.stale_prs} riskScores={riskScoresMap} />
+      )}
+
+      {/* Zone 1c: High-Risk PRs */}
+      {openHighRiskPRs.length > 0 && (
+        <HighRiskPRsSection prs={openHighRiskPRs} />
       )}
 
       {/* Zone 2: Team Status Grid */}
@@ -393,43 +415,53 @@ function AlertStrip({ alerts }: { alerts: WorkloadAlert[] }) {
   )
 }
 
-const staleReasonLabels: Record<StalePR['stale_reason'], string> = {
-  no_review: 'No Review',
-  changes_requested_no_response: 'Changes Requested',
-  approved_not_merged: 'Approved, Not Merged',
+function SortableHead({
+  field,
+  current,
+  asc,
+  onToggle,
+  children,
+}: {
+  field: SortField
+  current: SortField
+  asc: boolean
+  onToggle: (f: SortField) => void
+  children: React.ReactNode
+}) {
+  const active = field === current
+  return (
+    <TableHead>
+      <button
+        type="button"
+        className="inline-flex items-center gap-1 hover:text-foreground"
+        onClick={() => onToggle(field)}
+      >
+        {children}
+        {active && (
+          <span className="text-xs">{asc ? '\u2191' : '\u2193'}</span>
+        )}
+      </button>
+    </TableHead>
+  )
 }
 
-const staleReasonStyles: Record<StalePR['stale_reason'], string> = {
-  no_review: 'bg-amber-500/10 text-amber-600',
-  changes_requested_no_response: 'bg-red-500/10 text-red-600',
-  approved_not_merged: 'bg-blue-500/10 text-blue-600',
-}
-
-function ageColor(hours: number): string {
-  if (hours > 72) return 'bg-red-500/10 text-red-600'
-  if (hours > 48) return 'bg-amber-500/10 text-amber-600'
-  return 'bg-yellow-500/10 text-yellow-600'
-}
-
-function formatAge(hours: number): string {
-  if (hours >= 24) return `${(hours / 24).toFixed(1)}d`
-  return `${hours.toFixed(0)}h`
-}
-
-function StalePRsSection({ prs }: { prs: StalePR[] }) {
+function HighRiskPRsSection({ prs }: { prs: RiskAssessment[] }) {
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold">Needs Attention</h2>
-        <span className="text-sm text-muted-foreground">{prs.length} stale PR{prs.length !== 1 ? 's' : ''}</span>
+        <h2 className="text-lg font-semibold">High-Risk PRs</h2>
+        <span className="text-sm text-muted-foreground">
+          {prs.length} open PR{prs.length !== 1 ? 's' : ''} at high or critical risk
+        </span>
       </div>
       <Table>
         <TableHeader>
           <TableRow>
             <TableHead>Pull Request</TableHead>
             <TableHead>Author</TableHead>
-            <TableHead>Age</TableHead>
-            <TableHead>Reason</TableHead>
+            <TableHead>Risk</TableHead>
+            <TableHead>Score</TableHead>
+            <TableHead>Factors</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -461,49 +493,33 @@ function StalePRsSection({ prs }: { prs: StalePR[] }) {
                 )}
               </TableCell>
               <TableCell>
-                <Badge variant="secondary" className={ageColor(pr.age_hours)}>
-                  {formatAge(pr.age_hours)}
+                <Badge
+                  variant="secondary"
+                  className={riskLevelStyles[pr.risk_level]}
+                >
+                  {riskLevelLabels[pr.risk_level]}
                 </Badge>
               </TableCell>
               <TableCell>
-                <Badge variant="secondary" className={staleReasonStyles[pr.stale_reason]}>
-                  {staleReasonLabels[pr.stale_reason]}
-                </Badge>
+                <span className="text-sm font-medium">{(pr.risk_score * 100).toFixed(0)}%</span>
+              </TableCell>
+              <TableCell>
+                <div className="flex flex-wrap gap-1">
+                  {pr.risk_factors.map((f) => (
+                    <span
+                      key={f.factor}
+                      className="rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground"
+                      title={f.description}
+                    >
+                      {f.description}
+                    </span>
+                  ))}
+                </div>
               </TableCell>
             </TableRow>
           ))}
         </TableBody>
       </Table>
     </div>
-  )
-}
-
-function SortableHead({
-  field,
-  current,
-  asc,
-  onToggle,
-  children,
-}: {
-  field: SortField
-  current: SortField
-  asc: boolean
-  onToggle: (f: SortField) => void
-  children: React.ReactNode
-}) {
-  const active = field === current
-  return (
-    <TableHead>
-      <button
-        type="button"
-        className="inline-flex items-center gap-1 hover:text-foreground"
-        onClick={() => onToggle(field)}
-      >
-        {children}
-        {active && (
-          <span className="text-xs">{asc ? '\u2191' : '\u2193'}</span>
-        )}
-      </button>
-    </TableHead>
   )
 }

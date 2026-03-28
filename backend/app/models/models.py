@@ -60,6 +60,10 @@ class Repository(Base):
     description: Mapped[str | None] = mapped_column(Text)
     language: Mapped[str | None] = mapped_column(String(100))
     is_tracked: Mapped[bool] = mapped_column(Boolean, default=True)
+    default_branch: Mapped[str | None] = mapped_column(String(255))
+    tree_truncated: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false"
+    )
     last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=datetime.utcnow
@@ -67,6 +71,7 @@ class Repository(Base):
 
     pull_requests: Mapped[list["PullRequest"]] = relationship(back_populates="repo")
     issues: Mapped[list["Issue"]] = relationship(back_populates="repo")
+    tree_files: Mapped[list["RepoTreeFile"]] = relationship(back_populates="repo")
 
 
 class PullRequest(Base):
@@ -124,6 +129,7 @@ class PullRequest(Base):
     author: Mapped["Developer | None"] = relationship(back_populates="pull_requests")
     reviews: Mapped[list["PRReview"]] = relationship(back_populates="pr")
     review_comments: Mapped[list["PRReviewComment"]] = relationship(back_populates="pr")
+    files: Mapped[list["PRFile"]] = relationship(back_populates="pr")
 
 
 class PRReview(Base):
@@ -168,6 +174,41 @@ class PRReviewComment(Base):
     review: Mapped["PRReview | None"] = relationship(back_populates="comments")
 
 
+class PRFile(Base):
+    __tablename__ = "pr_files"
+    __table_args__ = (
+        UniqueConstraint("pr_id", "filename", name="uq_pr_file_pr_filename"),
+        Index("ix_pr_file_filename", "filename"),
+        Index("ix_pr_file_pr_id", "pr_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    pr_id: Mapped[int] = mapped_column(ForeignKey("pull_requests.id"), nullable=False)
+    filename: Mapped[str] = mapped_column(Text, nullable=False)
+    additions: Mapped[int] = mapped_column(Integer, server_default="0")
+    deletions: Mapped[int] = mapped_column(Integer, server_default="0")
+    status: Mapped[str | None] = mapped_column(String(20))
+    previous_filename: Mapped[str | None] = mapped_column(Text)
+
+    pr: Mapped["PullRequest"] = relationship(back_populates="files")
+
+
+class RepoTreeFile(Base):
+    __tablename__ = "repo_tree_files"
+    __table_args__ = (
+        UniqueConstraint("repo_id", "path", name="uq_repo_tree_file_repo_path"),
+        Index("ix_repo_tree_file_repo_id", "repo_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    repo_id: Mapped[int] = mapped_column(ForeignKey("repositories.id"), nullable=False)
+    path: Mapped[str] = mapped_column(Text, nullable=False)
+    type: Mapped[str] = mapped_column(String(10), nullable=False)
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    repo: Mapped["Repository"] = relationship(back_populates="tree_files")
+
+
 class Issue(Base):
     __tablename__ = "issues"
     __table_args__ = (
@@ -188,6 +229,14 @@ class Issue(Base):
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     time_to_close_s: Mapped[int | None] = mapped_column(Integer)
     html_url: Mapped[str | None] = mapped_column(Text)
+    comment_count: Mapped[int] = mapped_column(Integer, server_default="0")
+    body_length: Mapped[int] = mapped_column(Integer, server_default="0")
+    has_checklist: Mapped[bool] = mapped_column(Boolean, server_default="false")
+    state_reason: Mapped[str | None] = mapped_column(String(30))
+    creator_github_username: Mapped[str | None] = mapped_column(String(255))
+    milestone_title: Mapped[str | None] = mapped_column(String(255))
+    milestone_due_on: Mapped[datetime | None] = mapped_column(Date)
+    reopen_count: Mapped[int] = mapped_column(Integer, server_default="0")
 
     repo: Mapped["Repository"] = relationship(back_populates="issues")
     assignee: Mapped["Developer | None"] = relationship(back_populates="assigned_issues")
