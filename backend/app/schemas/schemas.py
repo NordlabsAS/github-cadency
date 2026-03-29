@@ -65,6 +65,7 @@ class DeveloperCreate(BaseModel):
     location: str | None = None
     timezone: str | None = None
     team: str | None = None
+    office: str | None = None
     notes: str | None = None
 
 
@@ -77,11 +78,13 @@ class DeveloperUpdate(BaseModel):
     location: str | None = None
     timezone: str | None = None
     team: str | None = None
+    office: str | None = None
     notes: str | None = None
 
 
 class DeveloperUpdateAdmin(DeveloperUpdate):
     app_role: AppRole | None = None
+    is_active: bool | None = None
 
 
 class DeveloperResponse(BaseModel):
@@ -97,12 +100,19 @@ class DeveloperResponse(BaseModel):
     location: str | None
     timezone: str | None
     team: str | None
+    office: str | None
     app_role: str
     is_active: bool
     avatar_url: str | None
     notes: str | None
     created_at: datetime
     updated_at: datetime
+
+
+class DeactivationImpactResponse(BaseModel):
+    open_prs: int
+    open_issues: int
+    open_branches: list[str]
 
 
 # --- Stats schemas ---
@@ -531,6 +541,17 @@ class SyncTriggerRequest(BaseModel):
     since: datetime | None = None
 
 
+class PreflightCheck(BaseModel):
+    field: str
+    status: Literal["ok", "error", "warn"]
+    message: str
+
+
+class PreflightResponse(BaseModel):
+    checks: list[PreflightCheck]
+    ready: bool
+
+
 class SyncEventResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -824,3 +845,117 @@ class AICostEstimate(BaseModel):
     estimated_cost_usd: float = 0.0
     data_items: int = 0
     note: str = ""
+
+
+# --- Developer Relationships schemas ---
+
+
+class RelationshipType(str, Enum):
+    reports_to = "reports_to"
+    tech_lead_of = "tech_lead_of"
+    team_lead_of = "team_lead_of"
+
+
+class DeveloperRelationshipCreate(BaseModel):
+    target_id: int
+    relationship_type: RelationshipType
+
+
+class DeveloperRelationshipDelete(BaseModel):
+    target_id: int
+    relationship_type: RelationshipType
+
+
+class DeveloperRelationshipResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    source_id: int
+    target_id: int
+    relationship_type: str
+    source_name: str
+    target_name: str
+    source_avatar_url: str | None = None
+    target_avatar_url: str | None = None
+    created_at: datetime
+
+
+class DeveloperRelationshipsResponse(BaseModel):
+    reports_to: DeveloperRelationshipResponse | None = None
+    tech_lead: DeveloperRelationshipResponse | None = None
+    team_lead: DeveloperRelationshipResponse | None = None
+    direct_reports: list[DeveloperRelationshipResponse] = []
+    tech_leads_for: list[DeveloperRelationshipResponse] = []
+    team_leads_for: list[DeveloperRelationshipResponse] = []
+
+
+class OrgTreeNode(BaseModel):
+    developer_id: int
+    display_name: str
+    github_username: str
+    avatar_url: str | None = None
+    role: str | None = None
+    team: str | None = None
+    office: str | None = None
+    children: list["OrgTreeNode"] = []
+
+
+class OrgTreeResponse(BaseModel):
+    roots: list[OrgTreeNode]
+    unassigned: list[OrgTreeNode]
+
+
+# --- Enhanced Collaboration schemas ---
+
+
+class WorksWithEntry(BaseModel):
+    developer_id: int
+    display_name: str
+    github_username: str
+    avatar_url: str | None = None
+    team: str | None = None
+    total_score: float
+    interaction_count: int
+    review_score: float
+    coauthor_score: float
+    issue_comment_score: float
+    mention_score: float
+    co_assigned_score: float
+
+
+class WorksWithResponse(BaseModel):
+    developer_id: int
+    collaborators: list[WorksWithEntry]
+
+
+class OverTaggedDeveloper(BaseModel):
+    developer_id: int
+    display_name: str
+    github_username: str
+    team: str | None = None
+    combined_tag_rate: float
+    pr_tag_rate: float
+    issue_tag_rate: float
+    team_average: float
+    severity: str  # mild, moderate, severe
+
+
+class OverTaggedResponse(BaseModel):
+    developers: list[OverTaggedDeveloper]
+
+
+class CommunicationScoreEntry(BaseModel):
+    developer_id: int
+    display_name: str
+    github_username: str
+    avatar_url: str | None = None
+    team: str | None = None
+    communication_score: float
+    review_engagement: float
+    comment_depth: float
+    reach: float
+    responsiveness: float
+
+
+class CommunicationScoresResponse(BaseModel):
+    developers: list[CommunicationScoreEntry]

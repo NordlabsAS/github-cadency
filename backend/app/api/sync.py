@@ -7,14 +7,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.auth import require_admin
 from app.models.database import get_db
 from app.models.models import Issue, PullRequest, Repository, SyncEvent
+from app.config import validate_github_config
 from app.schemas.schemas import (
+    PreflightCheck,
+    PreflightResponse,
     RepoResponse,
     RepoTrackUpdate,
     SyncEventResponse,
     SyncStatusResponse,
     SyncTriggerRequest,
 )
-from app.services.github_sync import discover_org_repos, run_contributor_sync, run_sync
+from app.services.github_sync import (
+    GitHubAuthError,
+    discover_org_repos,
+    run_contributor_sync,
+    run_sync,
+)
 
 router = APIRouter(dependencies=[Depends(require_admin)])
 
@@ -204,6 +212,17 @@ async def sync_status(db: AsyncSession = Depends(get_db)):
 # --- Repo Management ---
 
 
+@router.get("/sync/preflight", response_model=PreflightResponse)
+async def preflight():
+    """Check GitHub App configuration before attempting a sync."""
+    checks = validate_github_config()
+    ready = all(c["status"] != "error" for c in checks)
+    return PreflightResponse(
+        checks=[PreflightCheck(**c) for c in checks],
+        ready=ready,
+    )
+
+
 @router.post("/sync/discover-repos", response_model=list[RepoResponse])
 async def discover_repos(db: AsyncSession = Depends(get_db)):
     """Fetch repos from the GitHub org and upsert them into the database.
@@ -211,7 +230,20 @@ async def discover_repos(db: AsyncSession = Depends(get_db)):
     This does NOT run a full sync — it only discovers repos so users can
     select which ones to track/sync.
     """
-    await discover_org_repos(db)
+    try:
+        await discover_org_repos(db)
+    except GitHubAuthError as e:
+        raise HTTPException(status_code=422, detail=f"{e} — Hint: {e.hint}")
+    except httpx.HTTPStatusError as e:
+        github_msg = ""
+        try:
+            github_msg = e.response.json().get("message", "")
+        except Exception:
+            pass
+        detail = f"GitHub API error (HTTP {e.response.status_code})"
+        if github_msg:
+            detail += f": {github_msg}"
+        raise HTTPException(status_code=502, detail=detail)
 
     # Return the full repo list (same as GET /sync/repos)
     return await _list_repos_query(db)

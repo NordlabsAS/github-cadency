@@ -1,5 +1,16 @@
 const BASE_URL = '/api'
 
+export class ApiError extends Error {
+  status: number
+  detail: any
+
+  constructor(status: number, detail: any) {
+    super(typeof detail === 'string' ? detail : detail?.message ?? `HTTP ${status}`)
+    this.status = status
+    this.detail = detail
+  }
+}
+
 export async function apiFetch<T>(
   path: string,
   options?: RequestInit,
@@ -21,8 +32,14 @@ export async function apiFetch<T>(
       window.location.href = '/login'
       throw new Error('Session expired')
     }
-    const body = await res.text()
-    throw new Error(`${res.status}: ${body}`)
+    let detail: any
+    try {
+      const body = await res.json()
+      detail = body.detail ?? body
+    } catch {
+      detail = await res.text()
+    }
+    throw new ApiError(res.status, detail)
   }
 
   return res.json()

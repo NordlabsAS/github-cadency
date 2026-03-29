@@ -218,7 +218,10 @@ async def get_risk_summary(
 
     if team:
         dev_ids = (
-            select(Developer.id).where(Developer.team == team)
+            select(Developer.id).where(
+                Developer.team == team,
+                Developer.is_active.is_(True),
+            )
         )
         stmt = stmt.where(PullRequest.author_id.in_(dev_ids))
 

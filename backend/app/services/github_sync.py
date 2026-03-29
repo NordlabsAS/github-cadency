@@ -36,6 +36,14 @@ GITHUB_API = "https://api.github.com"
 # --- GitHub App Authentication ---
 
 
+class GitHubAuthError(Exception):
+    """Raised when GitHub App authentication fails with an actionable hint."""
+
+    def __init__(self, message: str, hint: str):
+        self.hint = hint
+        super().__init__(message)
+
+
 class GitHubAuth:
     def __init__(self):
         self._token: str | None = None
@@ -44,17 +52,58 @@ class GitHubAuth:
     def _generate_jwt(self) -> str:
         now = int(time.time())
         key_path = Path(settings.github_app_private_key_path)
-        private_key = key_path.read_bytes()
+
+        if settings.github_app_id == 0:
+            raise GitHubAuthError(
+                "GITHUB_APP_ID is not set (defaults to 0)",
+                "Set GITHUB_APP_ID in your .env file to your GitHub App's numeric ID.",
+            )
+
+        try:
+            private_key = key_path.read_bytes()
+        except FileNotFoundError:
+            raise GitHubAuthError(
+                f"Private key file not found: {key_path.resolve()}",
+                f"Download the .pem file from your GitHub App settings and place it at "
+                f"'{settings.github_app_private_key_path}', or set GITHUB_APP_PRIVATE_KEY_PATH "
+                f"in your .env file.",
+            )
+        except PermissionError:
+            raise GitHubAuthError(
+                f"Cannot read private key file: {key_path.resolve()} (permission denied)",
+                "Check file permissions on the .pem file.",
+            )
+
+        if not private_key.strip():
+            raise GitHubAuthError(
+                f"Private key file is empty: {key_path.resolve()}",
+                "The .pem file exists but has no content. Re-download it from your GitHub App settings.",
+            )
+
         payload = {
             "iat": now - 60,
-            "exp": now + (10 * 60),
-            "iss": settings.github_app_id,
+            "exp": now + (9 * 60),
+            "iss": str(settings.github_app_id),
         }
-        return jwt.encode(payload, private_key, algorithm="RS256")
+        try:
+            return jwt.encode(payload, private_key, algorithm="RS256")
+        except (jwt.InvalidKeyError, ValueError, TypeError) as e:
+            raise GitHubAuthError(
+                f"Invalid private key: {e}",
+                "The .pem file does not contain a valid RSA private key. "
+                "Re-download it from your GitHub App settings > Private keys.",
+            )
 
     async def get_installation_token(self) -> str:
         if self._token and time.time() < self._token_expires_at - 60:
             return self._token
+
+        if settings.github_app_installation_id == 0:
+            raise GitHubAuthError(
+                "GITHUB_APP_INSTALLATION_ID is not set (defaults to 0)",
+                "Find it at https://github.com/settings/installations — click your app, "
+                "the ID is the number in the URL.",
+            )
 
         app_jwt = self._generate_jwt()
         async with httpx.AsyncClient() as client:
@@ -65,7 +114,17 @@ class GitHubAuth:
                     "Accept": "application/vnd.github+json",
                 },
             )
-            resp.raise_for_status()
+            if resp.status_code >= 400:
+                github_msg = ""
+                try:
+                    github_msg = resp.json().get("message", "")
+                except Exception:
+                    pass
+                raise GitHubAuthError(
+                    f"GitHub API returned HTTP {resp.status_code} when requesting installation token"
+                    + (f": {github_msg}" if github_msg else ""),
+                    _installation_token_hint(resp.status_code, github_msg),
+                )
             data = resp.json()
 
         self._token = data["token"]
@@ -74,6 +133,32 @@ class GitHubAuth:
             expires_at.replace("Z", "+00:00")
         ).timestamp()
         return self._token
+
+
+def _installation_token_hint(status_code: int, github_msg: str) -> str:
+    """Return an actionable hint based on the GitHub API error."""
+    msg_lower = github_msg.lower()
+    if status_code == 401:
+        if "bad credentials" in msg_lower or "could not be decoded" in msg_lower:
+            return (
+                "The JWT was rejected — your .pem key may not match the GitHub App. "
+                "Re-download the private key from your App settings."
+            )
+        return (
+            "Authentication failed. Check that GITHUB_APP_ID and the .pem file "
+            "match your GitHub App."
+        )
+    if status_code == 404:
+        return (
+            "Installation not found. Check that GITHUB_APP_INSTALLATION_ID is correct "
+            "and the app is installed on your organization."
+        )
+    if status_code == 403:
+        return (
+            "The GitHub App lacks required permissions. Check your App's permission "
+            "settings on GitHub."
+        )
+    return f"Unexpected error from GitHub (HTTP {status_code}). Check your GitHub App configuration."
 
 
 github_auth = GitHubAuth()
@@ -121,6 +206,19 @@ STATUS_CODE_CLASSIFICATION: dict[int, tuple[str, bool]] = {
 }
 
 
+def _extract_github_message(exception: httpx.HTTPStatusError) -> str:
+    """Try to extract the human-readable message from a GitHub API error response."""
+    try:
+        body = exception.response.json()
+        msg = body.get("message", "")
+        doc_url = body.get("documentation_url", "")
+        if msg and doc_url:
+            return f"{msg} (see {doc_url})"
+        return msg
+    except Exception:
+        return ""
+
+
 def make_sync_error(
     *,
     repo: str | None = None,
@@ -133,8 +231,13 @@ def make_sync_error(
     error_type = "unknown"
     retryable = False
     status_code = None
+    hint = None
 
-    if isinstance(exception, httpx.HTTPStatusError):
+    if isinstance(exception, GitHubAuthError):
+        error_type = "config"
+        retryable = False
+        hint = exception.hint
+    elif isinstance(exception, httpx.HTTPStatusError):
         status_code = exception.response.status_code
         error_type, retryable = STATUS_CODE_CLASSIFICATION.get(
             status_code, ("github_api", False)
@@ -143,18 +246,31 @@ def make_sync_error(
         error_type, retryable = "timeout", True
     elif isinstance(exception, httpx.ConnectError):
         error_type, retryable = "timeout", True
+    elif isinstance(exception, (FileNotFoundError, PermissionError)):
+        error_type = "config"
+        retryable = False
 
-    return {
+    # Build message — include GitHub API error body for HTTP errors
+    message = str(exception)[:500]
+    if isinstance(exception, httpx.HTTPStatusError):
+        github_msg = _extract_github_message(exception)
+        if github_msg:
+            message = f"{message} — GitHub: {github_msg}"[:500]
+
+    result = {
         "repo": repo,
         "repo_id": repo_id,
         "step": step,
         "error_type": error_type,
         "status_code": status_code,
-        "message": str(exception)[:500],
+        "message": message,
         "retryable": retryable,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "attempt": attempt,
     }
+    if hint:
+        result["hint"] = hint[:500]
+    return result
 
 
 def _add_log(
@@ -359,28 +475,81 @@ async def github_get_paginated(
 # --- Author Resolution ---
 
 
+async def _fetch_user_profile(
+    client: httpx.AsyncClient, login: str, ctx: SyncContext | None = None,
+) -> dict | None:
+    """Fetch a full user profile from ``GET /users/{login}``.
+
+    Returns the JSON dict on success, or ``None`` if the request fails.
+    The full profile includes ``name``, ``email``, ``location``, ``bio``,
+    ``company`` — fields absent from the "simple user" objects embedded in
+    PR / review / org-members responses.
+    """
+    try:
+        resp = await github_get(client, f"/users/{login}", ctx=ctx)
+        return resp.json()
+    except Exception:
+        logger.warning("Failed to fetch profile for %s", login)
+        return None
+
+
+def _apply_profile_to_developer(dev: Developer, profile: dict) -> None:
+    """Set Developer fields from a full GitHub user profile dict."""
+    name = profile.get("name")
+    if name:
+        dev.display_name = name
+    if not dev.email:
+        dev.email = profile.get("email")
+    if not dev.location:
+        dev.location = profile.get("location")
+    if not dev.avatar_url:
+        dev.avatar_url = profile.get("avatar_url")
+
+
 async def resolve_author(
-    db: AsyncSession, github_username: str | None, *, user_data: dict | None = None
+    db: AsyncSession,
+    github_username: str | None,
+    *,
+    user_data: dict | None = None,
+    client: httpx.AsyncClient | None = None,
+    ctx: SyncContext | None = None,
 ) -> int | None:
     """Resolve a GitHub username to a developer ID, optionally auto-creating.
 
     If ``user_data`` is provided and the username is not found, a new Developer
-    row is created from the GitHub API user object (login, avatar_url, name).
+    row is created.  When ``client`` is also provided the full user profile is
+    fetched from ``GET /users/{login}`` so that ``display_name``, ``email``,
+    and ``location`` are populated correctly.
     """
     if not github_username:
         return None
     result = await db.execute(
-        select(Developer.id).where(Developer.github_username == github_username)
+        select(Developer).where(Developer.github_username == github_username)
     )
-    dev_id = result.scalar_one_or_none()
-    if dev_id is not None:
-        return dev_id
+    dev = result.scalar_one_or_none()
+    if dev is not None:
+        if not dev.is_active:
+            dev.is_active = True
+            await db.flush()
+            logger.warning("Auto-reactivated inactive developer: %s (id=%d)", github_username, dev.id)
+            if ctx:
+                _add_log(ctx, "warn", f"Auto-reactivated inactive developer '{github_username}' — appeared in GitHub activity")
+        return dev.id
 
     if user_data is None:
         return None
 
-    # Auto-create developer from GitHub user data
-    display_name = user_data.get("name") or user_data.get("login") or github_username
+    # Fetch the full profile so we get name/email/location
+    profile = None
+    if client is not None:
+        profile = await _fetch_user_profile(client, github_username, ctx=ctx)
+
+    display_name = (
+        (profile or {}).get("name")
+        or user_data.get("name")
+        or user_data.get("login")
+        or github_username
+    )
     dev = Developer(
         github_username=github_username,
         display_name=display_name,
@@ -388,6 +557,8 @@ async def resolve_author(
         app_role="developer",
         is_active=True,
     )
+    if profile:
+        _apply_profile_to_developer(dev, profile)
     db.add(dev)
     await db.flush()
     logger.info("Auto-created developer: %s (id=%d)", github_username, dev.id)
@@ -421,12 +592,21 @@ async def sync_org_contributors(
             continue
 
         existing = await db.execute(
-            select(Developer.id).where(Developer.github_username == login)
+            select(Developer).where(Developer.github_username == login)
         )
-        if existing.scalar_one_or_none() is not None:
+        existing_dev = existing.scalar_one_or_none()
+        if existing_dev is not None:
+            if not existing_dev.is_active:
+                existing_dev.is_active = True
+                logger.warning("Auto-reactivated inactive developer: %s (id=%d)", login, existing_dev.id)
+                if ctx:
+                    _add_log(ctx, "warn", f"Auto-reactivated inactive developer '{login}' — found in org members")
             continue
 
-        display_name = member.get("name") or login
+        # Fetch full profile to get name, email, location
+        profile = await _fetch_user_profile(client, login, ctx=ctx)
+
+        display_name = (profile or {}).get("name") or login
         dev = Developer(
             github_username=login,
             display_name=display_name,
@@ -434,6 +614,8 @@ async def sync_org_contributors(
             app_role="developer",
             is_active=True,
         )
+        if profile:
+            _apply_profile_to_developer(dev, profile)
         db.add(dev)
         created += 1
 
@@ -563,11 +745,14 @@ async def run_contributor_sync() -> SyncEvent:
         )
         _add_log(ctx, "info", "Contributor sync started")
 
+        cancelled = False
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 ctx.client = client
                 created = await sync_org_contributors(db, client, ctx=ctx)
                 await db.commit()
+
+            await _check_cancel(ctx)
 
             _add_log(ctx, "info", "Backfilling author links...")
             backfill = await backfill_author_links(db)
@@ -581,13 +766,19 @@ async def run_contributor_sync() -> SyncEvent:
             sync_event.repos_synced = created
             _add_log(ctx, "info", f"Contributor sync complete: {created} new developers")
 
+        except SyncCancelled:
+            cancelled = True
+            sync_event.status = "cancelled"
+            sync_event.is_resumable = False
+
         except Exception as e:
             sync_log.error("Contributor sync failed: %s", e)
             saved_logs = list(sync_event.log_summary or [])
+            saved_errors = list(sync_event.errors or [])
             await db.rollback()
-            sync_event = await db.merge(sync_event)
-            ctx.sync_event = sync_event
+            await db.refresh(sync_event)
             sync_event.log_summary = saved_logs
+            sync_event.errors = saved_errors
             sync_event.status = "failed"
             _append_jsonb(
                 sync_event, "errors",
@@ -727,7 +918,7 @@ async def upsert_pull_request(
     user = pr_data.get("user") or {}
     author_login = user.get("login")
     pr.author_github_username = author_login
-    pr.author_id = await resolve_author(db, author_login, user_data=user)
+    pr.author_id = await resolve_author(db, author_login, user_data=user, client=client)
 
     for field in ("created_at", "updated_at", "merged_at", "closed_at"):
         val = pr_data.get(field)
@@ -783,6 +974,19 @@ async def upsert_pull_request(
     pr.reverted_pr_number = reverted_pr_number
 
     return pr
+
+
+_MENTION_RE = re.compile(
+    r"(?<!\w)@([a-zA-Z0-9](?:[a-zA-Z0-9]|-(?=[a-zA-Z0-9])){0,38})"
+)
+
+
+def extract_mentions(body: str | None) -> list[str] | None:
+    """Extract @mentions from a comment body. Returns unique usernames or None."""
+    if not body:
+        return None
+    mentions = list(set(_MENTION_RE.findall(body)))
+    return mentions if mentions else None
 
 
 def classify_comment_type(body: str) -> str:
@@ -873,7 +1077,10 @@ def classify_review_quality(
 
 
 async def upsert_review(
-    db: AsyncSession, review_data: dict, pr: PullRequest
+    db: AsyncSession,
+    review_data: dict,
+    pr: PullRequest,
+    client: httpx.AsyncClient | None = None,
 ) -> PRReview:
     result = await db.execute(
         select(PRReview).where(PRReview.github_id == review_data["id"])
@@ -892,7 +1099,7 @@ async def upsert_review(
     user = review_data.get("user") or {}
     reviewer_login = user.get("login")
     review.reviewer_github_username = reviewer_login
-    review.reviewer_id = await resolve_author(db, reviewer_login, user_data=user)
+    review.reviewer_id = await resolve_author(db, reviewer_login, user_data=user, client=client)
 
     submitted = review_data.get("submitted_at")
     if submitted:
@@ -933,6 +1140,7 @@ async def upsert_review_comment(
 
     comment.body = comment_data.get("body")
     comment.comment_type = classify_comment_type(comment.body or "")
+    comment.mentions = extract_mentions(comment.body)
     comment.path = comment_data.get("path")
     comment.line = comment_data.get("line")
 
@@ -1012,7 +1220,10 @@ async def recompute_review_quality_tiers(
 
 
 async def upsert_issue(
-    db: AsyncSession, issue_data: dict, repo: Repository
+    db: AsyncSession,
+    issue_data: dict,
+    repo: Repository,
+    client: httpx.AsyncClient | None = None,
 ) -> Issue:
     result = await db.execute(
         select(Issue).where(
@@ -1039,7 +1250,7 @@ async def upsert_issue(
     assignee = issue_data.get("assignee") or {}
     assignee_login = assignee.get("login")
     issue.assignee_github_username = assignee_login
-    issue.assignee_id = await resolve_author(db, assignee_login, user_data=assignee if assignee_login else None)
+    issue.assignee_id = await resolve_author(db, assignee_login, user_data=assignee if assignee_login else None, client=client)
 
     # Quality scoring fields
     body = issue_data.get("body") or ""
@@ -1088,6 +1299,7 @@ async def upsert_issue_comment(
         db.add(comment)
 
     comment.body = comment_data.get("body")
+    comment.mentions = extract_mentions(comment.body)
     user = comment_data.get("user") or {}
     comment.author_github_username = user.get("login")
 
@@ -1383,18 +1595,42 @@ async def sync_repo(
     ctx: SyncContext,
     repo: Repository,
     since: datetime | None = None,
-) -> tuple[int, int, list[str]]:
-    """Sync a single repo. Returns (prs_upserted, issues_upserted, warnings).
+) -> tuple[int, int, list[str], int, int]:
+    """Sync a single repo. Returns (prs_upserted, issues_upserted, warnings, prs_skipped, issues_skipped).
 
     Commits every BATCH_SIZE PRs for crash resilience within large repos.
     Updates granular progress fields for frontend visibility.
+    Uses smart-skip: PRs/issues whose updated_at hasn't changed are skipped
+    to avoid redundant API calls (detail, reviews, files, check runs).
     """
     db = ctx.db
     client = ctx.client
     sync_event = ctx.sync_event
     prs_upserted = 0
+    prs_skipped = 0
     issues_upserted = 0
+    issues_skipped = 0
     warnings: list[str] = []
+
+    # Pre-load existing PR updated_at timestamps for smart-skip
+    existing_prs_result = await db.execute(
+        select(PullRequest.number, PullRequest.updated_at).where(
+            PullRequest.repo_id == repo.id
+        )
+    )
+    existing_pr_timestamps: dict[int, datetime | None] = {
+        row[0]: row[1] for row in existing_prs_result.all()
+    }
+
+    # Pre-load existing issue updated_at timestamps for smart-skip
+    existing_issues_result = await db.execute(
+        select(Issue.number, Issue.updated_at).where(
+            Issue.repo_id == repo.id
+        )
+    )
+    existing_issue_timestamps: dict[int, datetime | None] = {
+        row[0]: row[1] for row in existing_issues_result.all()
+    }
 
     # --- PRs ---
     sync_event.current_step = "fetching_prs"
@@ -1426,15 +1662,32 @@ async def sync_repo(
     )
 
     for pr_data in pr_items:
+        pr_number = pr_data["number"]
+        processed_count = prs_upserted + prs_skipped
+
+        # Smart-skip: if PR exists in DB with matching updated_at, skip
+        # expensive per-PR API calls (detail, reviews, comments, files, checks)
+        gh_updated = pr_data.get("updated_at")
+        if gh_updated and pr_number in existing_pr_timestamps:
+            gh_dt = datetime.fromisoformat(gh_updated.replace("Z", "+00:00"))
+            db_dt = existing_pr_timestamps[pr_number]
+            if db_dt and db_dt == gh_dt:
+                prs_skipped += 1
+                sync_event.current_repo_prs_done = processed_count
+                if processed_count % PROGRESS_COMMIT_INTERVAL == 0:
+                    await db.commit()
+                continue
+
         pr = await upsert_pull_request(db, client, pr_data, repo)
         prs_upserted += 1
+        processed_count = prs_upserted + prs_skipped
 
         # Fetch reviews for this PR
         reviews_data = await github_get_paginated(
             client, f"/repos/{repo.full_name}/pulls/{pr.number}/reviews", ctx=ctx
         )
         for review_data in reviews_data:
-            await upsert_review(db, review_data, pr)
+            await upsert_review(db, review_data, pr, client=client)
 
         # Fetch review comments (inline code comments) for this PR
         review_comments_data = await github_get_paginated(
@@ -1486,14 +1739,15 @@ async def sync_repo(
                 )
 
         # Update progress counter
-        sync_event.current_repo_prs_done = prs_upserted
+        sync_event.current_repo_prs_done = processed_count
 
         # Batch commit every BATCH_SIZE PRs (data durability)
         if prs_upserted % BATCH_SIZE == 0:
             await db.commit()
             _add_log(
                 ctx, "info",
-                f"Batch committed {prs_upserted}/{len(pr_items)} PRs",
+                f"Batch committed {prs_upserted}/{len(pr_items)} PRs"
+                + (f" ({prs_skipped} skipped)" if prs_skipped else ""),
                 repo=repo.full_name,
             )
             # Check for cancellation at batch boundaries
@@ -1508,8 +1762,15 @@ async def sync_repo(
             )
 
     # --- Issues ---
+    if prs_skipped:
+        _add_log(
+            ctx, "info",
+            f"PRs: {prs_upserted} synced, {prs_skipped} unchanged (skipped)",
+            repo=repo.full_name,
+        )
+
     sync_event.current_step = "fetching_issues"
-    sync_event.current_repo_prs_done = prs_upserted
+    sync_event.current_repo_prs_done = prs_upserted + prs_skipped
     await db.commit()
     _add_log(ctx, "info", "Fetching issues...", repo=repo.full_name)
 
@@ -1534,11 +1795,31 @@ async def sync_repo(
     )
 
     for issue_data in pure_issues:
-        await upsert_issue(db, issue_data, repo)
+        issue_number = issue_data["number"]
+        issue_processed = issues_upserted + issues_skipped
+
+        # Smart-skip: if issue exists in DB with matching updated_at, skip
+        gh_issue_updated = issue_data.get("updated_at")
+        if gh_issue_updated and issue_number in existing_issue_timestamps:
+            gh_dt = datetime.fromisoformat(gh_issue_updated.replace("Z", "+00:00"))
+            db_dt = existing_issue_timestamps[issue_number]
+            if db_dt and db_dt == gh_dt:
+                issues_skipped += 1
+                sync_event.current_repo_issues_done = issues_upserted + issues_skipped
+                continue
+
+        await upsert_issue(db, issue_data, repo, client=client)
         issues_upserted += 1
-        sync_event.current_repo_issues_done = issues_upserted
+        sync_event.current_repo_issues_done = issues_upserted + issues_skipped
         if issues_upserted % PROGRESS_COMMIT_INTERVAL == 0:
             await db.commit()
+
+    if issues_skipped:
+        _add_log(
+            ctx, "info",
+            f"Issues: {issues_upserted} synced, {issues_skipped} unchanged (skipped)",
+            repo=repo.full_name,
+        )
 
     # --- Issue Comments ---
     sync_event.current_step = "processing_issue_comments"
@@ -1592,7 +1873,7 @@ async def sync_repo(
         ctx.sync_logger.warning("sync_deployments failed for %s: %s", repo.full_name, e)
 
     repo.last_synced_at = datetime.now(timezone.utc)
-    return prs_upserted, issues_upserted, warnings
+    return prs_upserted, issues_upserted, warnings, prs_skipped, issues_skipped
 
 
 async def discover_org_repos(db: AsyncSession) -> list[Repository]:
@@ -1703,6 +1984,10 @@ async def run_sync(
                 except Exception as e:
                     ctx.sync_logger.warning("sync_org_contributors failed: %s", e)
                     _add_log(ctx, "warn", f"Contributor sync failed: {e}")
+                    _append_jsonb(
+                        sync_event, "errors",
+                        make_sync_error(step="sync_contributors", exception=e),
+                    )
 
                 sync_event.total_repos = len(tracked_repos)
                 await db.commit()
@@ -1728,7 +2013,7 @@ async def run_sync(
                         since = since_override or (
                             repo.last_synced_at if sync_type == "incremental" else None
                         )
-                        prs, issues, warnings = await sync_repo(ctx, repo, since=since)
+                        prs, issues, warnings, pr_skip, issue_skip = await sync_repo(ctx, repo, since=since)
 
                         # Per-repo commit — data is now durable
                         sync_event.repos_synced = (sync_event.repos_synced or 0) + 1
@@ -1742,14 +2027,19 @@ async def run_sync(
                             "status": "partial" if warnings else "ok",
                             "prs": prs,
                             "issues": issues,
+                            "prs_skipped": pr_skip,
+                            "issues_skipped": issue_skip,
                             "warnings": warnings,
                         })
                         await db.commit()
 
                         status_label = "partial" if warnings else "ok"
+                        skip_info = ""
+                        if pr_skip or issue_skip:
+                            skip_info = f", {pr_skip + issue_skip} skipped"
                         _add_log(
                             ctx, "info",
-                            f"Complete ({status_label}): {prs} PRs, {issues} issues",
+                            f"Complete ({status_label}): {prs} PRs, {issues} issues{skip_info}",
                             repo=repo.full_name,
                         )
                         sync_log.info(
@@ -1765,15 +2055,18 @@ async def run_sync(
                     except Exception as e:
                         sync_log.error("Error syncing %s: %s", repo.full_name, e)
 
-                        # Preserve in-memory log before rollback discards it
+                        # Preserve in-memory state before rollback expires attributes
                         saved_logs = list(sync_event.log_summary or [])
+                        saved_errors = list(sync_event.errors or [])
+                        saved_repos_failed = list(sync_event.repos_failed or [])
 
                         await db.rollback()
 
-                        # Re-merge sync_event after rollback, restore logs
-                        sync_event = await db.merge(sync_event)
-                        ctx.sync_event = sync_event
+                        # Refresh after rollback to reload all attributes
+                        await db.refresh(sync_event)
                         sync_event.log_summary = saved_logs
+                        sync_event.errors = saved_errors
+                        sync_event.repos_failed = saved_repos_failed
 
                         _append_jsonb(sync_event, "repos_failed", {
                             "repo_id": repo.id,
@@ -1800,6 +2093,27 @@ async def run_sync(
                 except Exception as e:
                     ctx.sync_logger.warning("backfill_author_links failed: %s", e)
 
+                # Recompute collaboration scores
+                try:
+                    from app.services.enhanced_collaboration import (
+                        recompute_collaboration_scores,
+                    )
+
+                    _add_log(ctx, "info", "Recomputing collaboration scores")
+                    pair_count = await recompute_collaboration_scores(
+                        db,
+                        sync_event.since_override,
+                        datetime.now(timezone.utc),
+                    )
+                    _add_log(
+                        ctx, "info",
+                        f"Collaboration scores recomputed: {pair_count} pairs",
+                    )
+                except Exception as e:
+                    ctx.sync_logger.warning(
+                        "Collaboration score recomputation failed: %s", e
+                    )
+
                 # Determine final status
                 if cancelled:
                     sync_event.status = "cancelled"
@@ -1825,10 +2139,11 @@ async def run_sync(
         except Exception as e:
             sync_log.error("Sync failed: %s", e)
             saved_logs = list(sync_event.log_summary or [])
+            saved_errors = list(sync_event.errors or [])
             await db.rollback()
-            sync_event = await db.merge(sync_event)
-            ctx.sync_event = sync_event
+            await db.refresh(sync_event)
             sync_event.log_summary = saved_logs
+            sync_event.errors = saved_errors
             sync_event.status = "failed"
             sync_event.is_resumable = True
             _append_jsonb(

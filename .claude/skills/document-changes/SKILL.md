@@ -20,6 +20,7 @@ These are the files and locations that may need updating. **Check every one** â€
 | **API reference** | `docs/API.md` | Full request/response contracts for any new or changed endpoints |
 | **Spec docs** | `DEVPULSE_SPEC.md`, `DEVPULSE_MANAGEMENT_FEATURES.md` | Only if the implementation diverged from spec or spec needs correction |
 | **README** | `README.md` | Only if setup steps, env vars, or user-facing features changed |
+| **Architecture docs** | `docs/architecture/*.md` | Update if structural changes affect system design, data model, API patterns, service layer, frontend architecture, or data flows. Run `/architect <area>` for targeted updates. |
 | **Env example** | `.env.example` | Any new environment variables |
 
 ## Process

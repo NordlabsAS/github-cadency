@@ -14,6 +14,12 @@ All commands are invoked as `/command-name [arguments]` in Claude Code.
 | `/fix-error` | Diagnose an error, find root cause, apply verified fix | `/fix-error paste the traceback here` |
 | `/branch-push` | Create branch, commit, push — optionally merge to main | `/branch-push` or `/branch-push merge` |
 
+### Architecture
+
+| Command | What it does | Example |
+|---------|-------------|---------|
+| `/architect` | Deep-dive architecture audit, focused updates, or impact review | `/architect`, `/architect database`, `/architect review add caching` |
+
 ### Code Quality & Review
 
 | Command | What it does | Example |
@@ -81,6 +87,20 @@ Reviews a task plan's frontend specification before implementation. Catches desi
 
 Scans the DevPulse codebase for tech debt: dependency health, security concerns, code quality, infrastructure gaps, and test coverage.
 
+### `/architect [mode]`
+
+Architecture documentation system with three modes:
+
+| Mode | Invocation | What it does |
+|------|-----------|--------------|
+| Full audit | `/architect` or `/architect full` | Explores entire codebase, generates/updates all architecture docs |
+| Focus area | `/architect database` | Scoped audit — updates only relevant doc(s) |
+| Review | `/architect review add a caching layer` | Architectural impact assessment of a proposed change |
+
+Focus areas: `database`, `api`, `services`, `frontend`, `sync`, `data-flows`, `infrastructure`
+
+Documents generated in `docs/architecture/`: OVERVIEW, DATA-MODEL, API-DESIGN, SERVICE-LAYER, FRONTEND, DATA-FLOWS, INDEX.
+
 ---
 
 ## Typical Workflows
@@ -105,4 +125,16 @@ Scans the DevPulse codebase for tech debt: dependency health, security concerns,
 ### "Health check"
 ```
 /tech-debt                     # Scan for issues
+```
+
+### "I'm about to change the database schema"
+```
+/architect review add a new table for X    # Impact assessment first
+# ... make changes ...
+/architect database                        # Update architecture docs after
+```
+
+### "Architecture docs are stale"
+```
+/architect                     # Full audit — regenerates all docs
 ```

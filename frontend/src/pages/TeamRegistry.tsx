@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
-import { useDevelopers, useCreateDeveloper, useUpdateDeveloper } from '@/hooks/useDevelopers'
-import { useSyncContributors, useSyncStatus } from '@/hooks/useSync'
+import { useDevelopers, useCreateDeveloper, useUpdateDeveloper, useToggleDeveloperActive } from '@/hooks/useDevelopers'
+import { useSyncContributors, useSyncStatus, useForceStopSync } from '@/hooks/useSync'
+import { ApiError } from '@/utils/api'
+import DeactivateDialog from '@/components/DeactivateDialog'
 import ErrorCard from '@/components/ErrorCard'
 import TableSkeleton from '@/components/TableSkeleton'
 import { Button } from '@/components/ui/button'
@@ -25,7 +27,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import { CheckCircle2, RefreshCw, XCircle, Users } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, RefreshCw, XCircle, Users, UserX } from 'lucide-react'
 import type { Developer, DeveloperCreate } from '@/utils/types'
 
 const ROLES = ['developer', 'senior_developer', 'lead', 'architect', 'devops', 'qa', 'intern']
@@ -49,6 +51,7 @@ function DeveloperForm({
     specialty: initial?.specialty ?? '',
     location: initial?.location ?? '',
     timezone: initial?.timezone ?? '',
+    office: initial?.office ?? '',
   })
 
   return (
@@ -111,6 +114,14 @@ function DeveloperForm({
           />
         </div>
         <div className="space-y-1.5">
+          <Label htmlFor="office">Office</Label>
+          <Input
+            id="office"
+            value={form.office ?? ''}
+            onChange={(e) => setForm({ ...form, office: e.target.value || null })}
+          />
+        </div>
+        <div className="space-y-1.5">
           <Label htmlFor="skills">Skills (comma-separated)</Label>
           <Input
             id="skills"
@@ -158,19 +169,32 @@ export default function TeamRegistry() {
   const navigate = useNavigate()
   const qc = useQueryClient()
   const [teamFilter, setTeamFilter] = useState('')
-  const { data: developers, isLoading, isError, refetch } = useDevelopers(teamFilter || undefined)
+  const [showInactive, setShowInactive] = useState(false)
+  const { data: developers, isLoading, isError, refetch } = useDevelopers(teamFilter || undefined, !showInactive)
   const createDev = useCreateDeveloper()
   const syncContributors = useSyncContributors()
+  const forceStop = useForceStopSync()
   const { data: syncStatus } = useSyncStatus()
   const [editDev, setEditDev] = useState<Developer | null>(null)
   const updateDev = useUpdateDeveloper(editDev?.id ?? 0)
   const [addOpen, setAddOpen] = useState(false)
   const [editOpen, setEditOpen] = useState(false)
   const [showResult, setShowResult] = useState(false)
+  const [deactivateDev, setDeactivateDev] = useState<Developer | null>(null)
+  const [inactiveConflict, setInactiveConflict] = useState<{ developer_id: number; display_name: string } | null>(null)
+  const reactivateFromConflict = useToggleDeveloperActive(inactiveConflict?.developer_id ?? 0)
 
   const activeContributorSync =
     syncStatus?.active_sync?.sync_type === 'contributors' ? syncStatus.active_sync : null
   const anySyncActive = !!syncStatus?.active_sync
+
+  // Detect stale contributor sync (stuck in "started" for > 2 minutes)
+  const STALE_THRESHOLD_MS = 2 * 60 * 1000
+  const isStaleSync = (() => {
+    if (!activeContributorSync?.started_at) return false
+    const elapsed = Date.now() - new Date(activeContributorSync.started_at).getTime()
+    return elapsed > STALE_THRESHOLD_MS
+  })()
 
   // Refresh developer list and show completion banner when contributor sync finishes
   const wasActiveRef = useRef(false)
@@ -194,6 +218,30 @@ export default function TeamRegistry() {
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold">Team Registry</h1>
         <div className="flex items-center gap-3">
+          {/* Active / Inactive toggle */}
+          <div className="flex rounded-md border">
+            <button
+              className={`px-3 py-1.5 text-sm font-medium transition-colors ${
+                !showInactive
+                  ? 'bg-primary text-primary-foreground'
+                  : 'text-muted-foreground hover:text-foreground'
+              }`}
+              onClick={() => setShowInactive(false)}
+            >
+              Active
+            </button>
+            <button
+              className={`px-3 py-1.5 text-sm font-medium transition-colors ${
+                showInactive
+                  ? 'bg-primary text-primary-foreground'
+                  : 'text-muted-foreground hover:text-foreground'
+              }`}
+              onClick={() => setShowInactive(true)}
+            >
+              Inactive
+            </button>
+          </div>
+
           <select
             className="rounded-md border bg-background px-3 py-1.5 text-sm"
             value={teamFilter}
@@ -214,7 +262,7 @@ export default function TeamRegistry() {
             Sync Contributors
           </Button>
 
-          <Dialog open={addOpen} onOpenChange={setAddOpen}>
+          <Dialog open={addOpen} onOpenChange={(open) => { setAddOpen(open); if (!open) setInactiveConflict(null) }}>
             <DialogTrigger asChild>
               <Button>Add Developer</Button>
             </DialogTrigger>
@@ -222,19 +270,60 @@ export default function TeamRegistry() {
               <DialogHeader>
                 <DialogTitle>Add Developer</DialogTitle>
               </DialogHeader>
-              <DeveloperForm
-                submitLabel="Create"
-                onSubmit={(data) => {
-                  createDev.mutate(data, { onSuccess: () => setAddOpen(false) })
-                }}
-              />
+              {inactiveConflict ? (
+                <div className="space-y-4">
+                  <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 p-4">
+                    <div className="flex items-center gap-2 text-sm font-medium text-amber-700 dark:text-amber-400">
+                      <UserX className="h-4 w-4" />
+                      Developer already exists but is inactive
+                    </div>
+                    <p className="mt-2 text-sm text-muted-foreground">
+                      <span className="font-medium text-foreground">{inactiveConflict.display_name}</span> was
+                      previously deactivated. Would you like to reactivate them?
+                    </p>
+                  </div>
+                  <div className="flex justify-end gap-2">
+                    <Button variant="outline" onClick={() => setInactiveConflict(null)}>
+                      Back
+                    </Button>
+                    <Button
+                      disabled={reactivateFromConflict.isPending || !inactiveConflict?.developer_id}
+                      onClick={() => {
+                        if (!inactiveConflict?.developer_id) return
+                        reactivateFromConflict.mutate(true, {
+                          onSuccess: () => {
+                            setInactiveConflict(null)
+                            setAddOpen(false)
+                          },
+                        })
+                      }}
+                    >
+                      {reactivateFromConflict.isPending ? 'Reactivating...' : 'Reactivate'}
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <DeveloperForm
+                  submitLabel="Create"
+                  onSubmit={(data) => {
+                    createDev.mutate(data, {
+                      onSuccess: () => setAddOpen(false),
+                      onError: (err) => {
+                        if (err instanceof ApiError && err.detail?.code === 'inactive_exists') {
+                          setInactiveConflict(err.detail)
+                        }
+                      },
+                    })
+                  }}
+                />
+              )}
             </DialogContent>
           </Dialog>
         </div>
       </div>
 
       {/* Active contributor sync banner */}
-      {activeContributorSync && (
+      {activeContributorSync && !isStaleSync && (
         <div className="flex items-center gap-3 rounded-lg border border-primary/20 bg-primary/5 px-4 py-3">
           <span className="relative flex h-2.5 w-2.5">
             <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-primary opacity-75" />
@@ -253,6 +342,27 @@ export default function TeamRegistry() {
         </div>
       )}
 
+      {/* Stale/stuck contributor sync banner */}
+      {activeContributorSync && isStaleSync && (
+        <div className="flex items-center gap-3 rounded-lg border border-amber-500/20 bg-amber-500/5 px-4 py-3">
+          <AlertTriangle className="h-4 w-4 text-amber-600" />
+          <span className="text-sm font-medium">Contributor sync appears stuck</span>
+          <span className="text-xs text-muted-foreground">
+            Started {new Date(activeContributorSync.started_at!).toLocaleTimeString()} — no progress detected
+          </span>
+          <Button
+            variant="outline"
+            size="sm"
+            className="ml-auto"
+            onClick={() => forceStop.mutate()}
+            disabled={forceStop.isPending}
+          >
+            <XCircle className="mr-1.5 h-3.5 w-3.5" />
+            Force Stop
+          </Button>
+        </div>
+      )}
+
       {/* Completion result banner (fades after 10s) */}
       {!activeContributorSync && showResult && lastCompleted?.sync_type === 'contributors' && (
         <div className={`flex items-center gap-3 rounded-lg border px-4 py-3 ${
@@ -268,7 +378,11 @@ export default function TeamRegistry() {
           <span className="text-sm">
             {lastCompleted.status === 'completed'
               ? `Contributor sync complete${lastCompleted.repos_synced ? ` — ${lastCompleted.repos_synced} new developers added` : ''}`
-              : 'Contributor sync failed'}
+              : `Contributor sync ${lastCompleted.status === 'cancelled' ? 'cancelled' : 'failed'}${
+                  (lastCompleted.errors?.length ?? 0) > 0
+                    ? ` — ${lastCompleted.errors![0].message ?? lastCompleted.errors![0].step}`
+                    : ''
+                }`}
           </span>
         </div>
       )}
@@ -276,7 +390,7 @@ export default function TeamRegistry() {
       {isError ? (
         <ErrorCard message="Could not load developers." onRetry={() => refetch()} />
       ) : isLoading ? (
-        <TableSkeleton columns={8} rows={5} headers={['Name', 'GitHub', 'Role', 'Team', 'Skills', 'Location', 'Timezone', '']} />
+        <TableSkeleton columns={9} rows={5} headers={['Name', 'GitHub', 'Role', 'Team', 'Office', 'Skills', 'Location', 'Timezone', '']} />
       ) : (
         <div className="rounded-md border">
           <Table>
@@ -286,6 +400,7 @@ export default function TeamRegistry() {
                 <TableHead>GitHub</TableHead>
                 <TableHead>Role</TableHead>
                 <TableHead>Team</TableHead>
+                <TableHead>Office</TableHead>
                 <TableHead>Skills</TableHead>
                 <TableHead>Location</TableHead>
                 <TableHead>Timezone</TableHead>
@@ -296,10 +411,17 @@ export default function TeamRegistry() {
               {(developers ?? []).map((dev) => (
                 <TableRow
                   key={dev.id}
-                  className="cursor-pointer"
+                  className={`cursor-pointer ${showInactive ? 'opacity-60' : ''}`}
                   onClick={() => navigate(`/team/${dev.id}`)}
                 >
-                  <TableCell className="font-medium">{dev.display_name}</TableCell>
+                  <TableCell className="font-medium">
+                    {dev.display_name}
+                    {showInactive && (
+                      <Badge variant="outline" className="ml-2 text-xs text-muted-foreground">
+                        Inactive
+                      </Badge>
+                    )}
+                  </TableCell>
                   <TableCell className="text-muted-foreground">{dev.github_username}</TableCell>
                   <TableCell>
                     {dev.role && (
@@ -307,6 +429,7 @@ export default function TeamRegistry() {
                     )}
                   </TableCell>
                   <TableCell>{dev.team}</TableCell>
+                  <TableCell className="text-muted-foreground">{dev.office}</TableCell>
                   <TableCell>
                     <div className="flex flex-wrap gap-1">
                       {(dev.skills ?? []).slice(0, 3).map((s) => (
@@ -317,24 +440,41 @@ export default function TeamRegistry() {
                   <TableCell className="text-muted-foreground">{dev.location}</TableCell>
                   <TableCell className="text-muted-foreground">{dev.timezone}</TableCell>
                   <TableCell>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        setEditDev(dev)
-                        setEditOpen(true)
-                      }}
-                    >
-                      Edit
-                    </Button>
+                    <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+                      {showInactive ? (
+                        <ReactivateButton developerId={dev.id} />
+                      ) : (
+                        <>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => {
+                              setEditDev(dev)
+                              setEditOpen(true)
+                            }}
+                          >
+                            Edit
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="text-muted-foreground hover:text-destructive"
+                            onClick={() => setDeactivateDev(dev)}
+                          >
+                            Deactivate
+                          </Button>
+                        </>
+                      )}
+                    </div>
                   </TableCell>
                 </TableRow>
               ))}
               {(developers ?? []).length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={8} className="text-center text-muted-foreground">
-                    No developers found. Add one to get started.
+                  <TableCell colSpan={9} className="text-center text-muted-foreground">
+                    {showInactive
+                      ? 'No inactive developers.'
+                      : 'No developers found. Add one to get started.'}
                   </TableCell>
                 </TableRow>
               )}
@@ -360,6 +500,28 @@ export default function TeamRegistry() {
           )}
         </DialogContent>
       </Dialog>
+
+      {deactivateDev && (
+        <DeactivateDialog
+          developer={deactivateDev}
+          open={!!deactivateDev}
+          onOpenChange={(open) => { if (!open) setDeactivateDev(null) }}
+        />
+      )}
     </div>
+  )
+}
+
+function ReactivateButton({ developerId }: { developerId: number }) {
+  const toggle = useToggleDeveloperActive(developerId)
+  return (
+    <Button
+      variant="ghost"
+      size="sm"
+      disabled={toggle.isPending}
+      onClick={() => toggle.mutate(true)}
+    >
+      {toggle.isPending ? 'Reactivating...' : 'Reactivate'}
+    </Button>
   )
 }

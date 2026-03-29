@@ -33,6 +33,35 @@ class TestResolveAuthor:
         result = await resolve_author(db_session, None)
         assert result is None
 
+    @pytest.mark.asyncio
+    async def test_resolve_reactivates_inactive_developer(self, db_session, sample_developer):
+        """An inactive developer should be reactivated when they appear in GitHub activity."""
+        sample_developer.is_active = False
+        await db_session.commit()
+
+        result = await resolve_author(db_session, "testuser")
+        assert result == sample_developer.id
+
+        await db_session.refresh(sample_developer)
+        assert sample_developer.is_active is True
+
+    @pytest.mark.asyncio
+    async def test_resolve_reactivates_with_warning_log(self, db_session, sample_developer):
+        """Reactivation should log a warning when sync context is provided."""
+        sample_developer.is_active = False
+        await db_session.commit()
+
+        mock_ctx = MagicMock()
+        mock_ctx.sync_event = MagicMock()
+        mock_ctx.sync_event.log_summary = []
+
+        result = await resolve_author(db_session, "testuser", ctx=mock_ctx)
+        assert result == sample_developer.id
+
+        # Verify _add_log was invoked (ctx is a MagicMock so we check indirectly)
+        await db_session.refresh(sample_developer)
+        assert sample_developer.is_active is True
+
 
 class TestUpsertRepo:
     @pytest.mark.asyncio

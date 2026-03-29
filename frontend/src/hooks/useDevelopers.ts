@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { apiFetch } from '@/utils/api'
-import type { Developer, DeveloperCreate, DeveloperUpdate } from '@/utils/types'
+import type { DeactivationImpact, Developer, DeveloperCreate, DeveloperUpdate } from '@/utils/types'
 
 export function useDevelopers(team?: string, isActive = true) {
   const params = new URLSearchParams()
@@ -64,5 +64,31 @@ export function useDeleteDeveloper() {
       toast.success('Developer removed')
     },
     onError: () => toast.error('Failed to remove developer'),
+  })
+}
+
+export function useDeactivationImpact(id: number, enabled: boolean) {
+  return useQuery<DeactivationImpact>({
+    queryKey: ['developer', id, 'deactivation-impact'],
+    queryFn: () => apiFetch(`/developers/${id}/deactivation-impact`),
+    enabled: enabled && !!id,
+  })
+}
+
+export function useToggleDeveloperActive(id: number) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (isActive: boolean) =>
+      apiFetch<Developer>(`/developers/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ is_active: isActive }),
+      }),
+    onSuccess: (_, isActive) => {
+      qc.invalidateQueries({ queryKey: ['developers'] })
+      qc.invalidateQueries({ queryKey: ['developer', id] })
+      toast.success(isActive ? 'Developer reactivated' : 'Developer deactivated')
+    },
+    onError: (_, isActive) =>
+      toast.error(isActive ? 'Failed to reactivate developer' : 'Failed to deactivate developer'),
   })
 }

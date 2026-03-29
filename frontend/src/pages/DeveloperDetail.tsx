@@ -11,6 +11,8 @@ import {
 } from '@/hooks/useGoals'
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
 import { HelpCircle } from 'lucide-react'
+import RelationshipsCard from '@/components/RelationshipsCard'
+import WorksWithSection from '@/components/WorksWithSection'
 import ErrorCard from '@/components/ErrorCard'
 import StatCardSkeleton from '@/components/StatCardSkeleton'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -160,39 +162,48 @@ export default function DeveloperDetail() {
 
   return (
     <div className="space-y-6">
-      {/* Profile card */}
-      <Card>
-        <CardContent className="flex items-center gap-6 pt-6">
-          {dev.avatar_url ? (
-            <img src={dev.avatar_url} alt={dev.display_name} className="h-16 w-16 rounded-full" />
-          ) : (
-            <div className="flex h-16 w-16 items-center justify-center rounded-full bg-muted text-xl font-bold">
-              {dev.display_name[0]}
-            </div>
-          )}
-          <div className="space-y-1">
-            <h1 className="text-2xl font-bold">{dev.display_name}</h1>
-            <p className="text-muted-foreground">@{dev.github_username}</p>
-            <div className="flex flex-wrap gap-2">
-              {dev.role && <Badge variant="secondary">{dev.role.replace('_', ' ')}</Badge>}
-              {dev.team && <Badge variant="outline">{dev.team}</Badge>}
-              {dev.location && (
-                <span className="text-sm text-muted-foreground">{dev.location}</span>
-              )}
-              {dev.timezone && (
-                <span className="text-sm text-muted-foreground">({dev.timezone})</span>
-              )}
-            </div>
-            {dev.skills && dev.skills.length > 0 && (
-              <div className="flex flex-wrap gap-1 pt-1">
-                {dev.skills.map((s) => (
-                  <Badge key={s} variant="outline" className="text-xs">{s}</Badge>
-                ))}
+      {/* Profile card + Relationships */}
+      <div className="grid gap-4 lg:grid-cols-[1fr_300px]">
+        <Card>
+          <CardContent className="flex items-center gap-6 pt-6">
+            {dev.avatar_url ? (
+              <img src={dev.avatar_url} alt={dev.display_name} className="h-16 w-16 rounded-full" />
+            ) : (
+              <div className="flex h-16 w-16 items-center justify-center rounded-full bg-muted text-xl font-bold">
+                {dev.display_name[0]}
               </div>
             )}
-          </div>
-        </CardContent>
-      </Card>
+            <div className="space-y-1">
+              <div className="flex items-center gap-2">
+                <h1 className="text-2xl font-bold">{dev.display_name}</h1>
+                {!dev.is_active && (
+                  <Badge variant="destructive" className="text-xs">Inactive</Badge>
+                )}
+              </div>
+              <p className="text-muted-foreground">@{dev.github_username}</p>
+              <div className="flex flex-wrap gap-2">
+                {dev.role && <Badge variant="secondary">{dev.role.replace('_', ' ')}</Badge>}
+                {dev.team && <Badge variant="outline">{dev.team}</Badge>}
+                {dev.office && <Badge variant="outline">{dev.office}</Badge>}
+                {dev.location && (
+                  <span className="text-sm text-muted-foreground">{dev.location}</span>
+                )}
+                {dev.timezone && (
+                  <span className="text-sm text-muted-foreground">({dev.timezone})</span>
+                )}
+              </div>
+              {dev.skills && dev.skills.length > 0 && (
+                <div className="flex flex-wrap gap-1 pt-1">
+                  {dev.skills.map((s) => (
+                    <Badge key={s} variant="outline" className="text-xs">{s}</Badge>
+                  ))}
+                </div>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+        <RelationshipsCard developerId={devId} />
+      </div>
 
       {/* Stats */}
       {stats && (
@@ -342,6 +353,9 @@ export default function DeveloperDetail() {
           </div>
         </div>
       )}
+
+      {/* Works With */}
+      <WorksWithSection developerId={devId} />
 
       {/* Goals */}
       <div className="space-y-4">

@@ -27,6 +27,10 @@ Authorization: Bearer {jwt_token}
 | **PR risk** (`/api/stats/pr/{id}/risk`, `/api/stats/risk-summary`) | Yes | No (403) |
 | **CI/CD stats** (`/api/stats/ci`) | Yes | No (403) |
 | **Repo stats** (`/api/stats/repo/{id}`) | Yes | Yes |
+| **Developer relationships** (`/api/developers/{id}/relationships`) | Full CRUD | GET own only |
+| **Developer works-with** (`/api/developers/{id}/works-with`) | Any ID | Own ID only |
+| **Org tree** (`/api/org-tree`) | Yes | No (403) |
+| **Over-tagged / communication scores** (`/api/stats/over-tagged`, `/api/stats/communication-scores`) | Yes | No (403) |
 | **Developers CRUD** (`/api/developers/*`) | Full access | GET own profile only |
 | **Goals** (`/api/goals/*`) | Full access | GET own goals, POST/PATCH self-goals |
 | **Goal progress** (`/api/goals/{id}/progress`) | Any goal | Own goals only |
@@ -133,7 +137,19 @@ Create a developer. **Admin only.**
 `role` values: `developer`, `senior_developer`, `lead`, `architect`, `devops`, `qa`, `intern`
 
 **Response:** `201 Created` — `DeveloperResponse`
-**Errors:** `409 Conflict` if `github_username` already exists
+
+**Errors:**
+- `409 Conflict` if `github_username` exists and is active (plain string detail)
+- `409 Conflict` if `github_username` exists but is inactive (structured detail for reactivation prompt):
+```json
+{
+  "detail": {
+    "code": "inactive_exists",
+    "developer_id": 42,
+    "display_name": "Octo Cat"
+  }
+}
+```
 
 ### GET /api/developers/{developer_id}
 
@@ -148,12 +164,32 @@ Partial update. Only provided fields are changed. **Admin only.**
 
 **Request Body:** Any subset of `DeveloperCreate` fields (except `github_username`), plus:
 - `app_role`: `"admin"` or `"developer"` — promotes or demotes a user
+- `is_active`: `true` or `false` — activates or deactivates a developer
 
 **Response:** `200 OK` — `DeveloperResponse`
+
+### GET /api/developers/{developer_id}/deactivation-impact
+
+Returns a summary of open work assigned to a developer, useful before deactivation to identify items that may need reassignment. **Admin only.**
+
+**Response:** `200 OK`
+```json
+{
+  "open_prs": 3,
+  "open_issues": 1,
+  "open_branches": ["feature/auth-v2", "fix/rate-limit", "refactor/sync"]
+}
+```
+
+Draft PRs are excluded from `open_prs` and `open_branches`. Branches are derived from `head_branch` of open non-draft PRs. Works on both active and inactive developers — calling it on an already-inactive developer returns any open work still associated with their ID.
+
+**Errors:** `404 Not Found`
 
 ### DELETE /api/developers/{developer_id}
 
 Soft-delete: sets `is_active = false`. **Admin only.** Deactivated developers cannot log in via OAuth.
+
+Mechanically identical to `PATCH { is_active: false }` — both set `is_active = false`. The convention is to use `PATCH` for standard deactivation (goes through `DeactivateDialog` with the impact check) and `DELETE` for removing junk/system accounts.
 
 **Response:** `204 No Content`
 
@@ -1213,7 +1249,7 @@ Sync GitHub org members and backfill author/reviewer/assignee links on existing 
 Creates a `SyncEvent` with `sync_type = "contributors"` for progress tracking. The event is visible via `GET /api/sync/status` (as `active_sync` while running) and in sync history. Uses `repos_synced` to report the number of newly created developers.
 
 Two-step process:
-1. Fetches all members from `GET /orgs/{org}/members` and creates `developers` rows for any that don't exist yet (with `app_role = "developer"`, `is_active = true`, `display_name = login`).
+1. Fetches all members from `GET /orgs/{org}/members` and creates `developers` rows for any that don't exist yet (with `app_role = "developer"`, `is_active = true`, `display_name = login`). If a previously deactivated developer is found in the org member list, they are auto-reactivated with a warning log entry.
 2. Bulk-updates `pull_requests.author_id`, `pr_reviews.reviewer_id`, and `issues.assignee_id` where the FK is NULL but the stored `*_github_username` column matches a known developer.
 
 **Response:** `202 Accepted`
@@ -1722,3 +1758,234 @@ Estimation methods vary by feature:
 - `one_on_one_prep`: Fixed estimate (~5K input, ~3K output) based on typical context size
 - `team_health`: Scales by active developer count (~200 tokens per dev + 3K base)
 - `work_categorization`: Max batch estimate (200 items)
+
+---
+
+## Developer Relationships & Org Structure
+
+Manage reporting hierarchies and view organizational structure. Three relationship types: `reports_to`, `tech_lead_of`, `team_lead_of`. A developer can have one of each (e.g., reports to a manager AND has a separate tech lead).
+
+### GET /api/developers/{developer_id}/relationships
+
+Get all relationships for a developer. **Access:** Admin can view any developer. Developers can view their own relationships only.
+
+**Response:** `200 OK`
+```json
+{
+  "reports_to": {
+    "id": 1,
+    "source_id": 5,
+    "target_id": 2,
+    "relationship_type": "reports_to",
+    "source_name": "Alice",
+    "target_name": "Bob",
+    "source_avatar_url": "https://...",
+    "target_avatar_url": "https://...",
+    "created_at": "2026-03-29T10:00:00Z"
+  },
+  "tech_lead": null,
+  "team_lead": null,
+  "direct_reports": [],
+  "tech_leads_for": [],
+  "team_leads_for": []
+}
+```
+
+`reports_to` / `tech_lead` / `team_lead` are relationships where this developer is the source (they report to / are led by someone). `direct_reports` / `tech_leads_for` / `team_leads_for` are relationships where this developer is the target (others report to / are led by them).
+
+**Errors:** `404 Not Found`, `403 Forbidden`
+
+### POST /api/developers/{developer_id}/relationships
+
+Create a relationship. **Admin only.**
+
+**Request Body:**
+```json
+{
+  "target_id": 2,
+  "relationship_type": "reports_to"
+}
+```
+
+`relationship_type` values: `reports_to`, `tech_lead_of`, `team_lead_of`
+
+**Response:** `200 OK` — `DeveloperRelationshipResponse` (same shape as entries in the GET response)
+
+**Errors:**
+- `400 Bad Request` — self-referencing (source_id == target_id)
+- `404 Not Found` — source or target developer does not exist
+
+### DELETE /api/developers/{developer_id}/relationships
+
+Remove a relationship. **Admin only.**
+
+**Request Body:**
+```json
+{
+  "target_id": 2,
+  "relationship_type": "reports_to"
+}
+```
+
+**Response:** `204 No Content`
+
+**Errors:** `404 Not Found` — relationship does not exist
+
+### GET /api/org-tree
+
+Build full organizational hierarchy from `reports_to` relationships. **Admin only.**
+
+| Query Param | Type | Default | Description |
+|-------------|------|---------|-------------|
+| `team` | string | - | Filter to developers in a specific team |
+
+**Response:** `200 OK`
+```json
+{
+  "roots": [
+    {
+      "developer_id": 1,
+      "display_name": "CTO",
+      "github_username": "cto",
+      "avatar_url": "https://...",
+      "role": "lead",
+      "team": "Engineering",
+      "office": "HQ",
+      "children": [
+        {
+          "developer_id": 2,
+          "display_name": "Alice",
+          "github_username": "alice",
+          "avatar_url": null,
+          "role": "senior_developer",
+          "team": "Platform",
+          "office": "Remote",
+          "children": []
+        }
+      ]
+    }
+  ],
+  "unassigned": [
+    {
+      "developer_id": 5,
+      "display_name": "New Dev",
+      "github_username": "newdev",
+      "avatar_url": null,
+      "role": "developer",
+      "team": null,
+      "office": null,
+      "children": []
+    }
+  ]
+}
+```
+
+`roots` — developers who have direct reports but do not report to anyone themselves. `unassigned` — developers not in any reporting hierarchy (no parent and no children).
+
+---
+
+## Enhanced Collaboration
+
+Multi-signal collaboration scoring, over-tagged detection, and communication scores. Collaboration scores are materialized after each sync from 5 signals: PR reviews (35%), issue co-comments (20%), co-repo authoring (15%), @mentions (15%), co-assignment (15%).
+
+### GET /api/developers/{developer_id}/works-with
+
+Get top collaborators for a developer, ranked by multi-signal collaboration score. **Access:** Admin can view any developer. Developers can view their own only.
+
+| Query Param | Type | Default | Description |
+|-------------|------|---------|-------------|
+| `date_from` | datetime | 30 days ago | Period start |
+| `date_to` | datetime | now | Period end |
+| `limit` | int | 10 | Max collaborators to return (1-50) |
+
+**Response:** `200 OK`
+```json
+{
+  "developer_id": 5,
+  "collaborators": [
+    {
+      "developer_id": 2,
+      "display_name": "Alice",
+      "github_username": "alice",
+      "avatar_url": "https://...",
+      "team": "Platform",
+      "total_score": 0.72,
+      "interaction_count": 34,
+      "review_score": 0.85,
+      "coauthor_score": 0.60,
+      "issue_comment_score": 0.50,
+      "mention_score": 0.30,
+      "co_assigned_score": 0.40
+    }
+  ]
+}
+```
+
+Each signal score is normalized to [0, 1]. `total_score` is the weighted sum (also [0, 1]). `interaction_count` is the raw un-normalized sum across all signals.
+
+### GET /api/stats/over-tagged
+
+Detect developers who appear on an unusually high percentage of PRs and issues relative to their team. **Admin only.**
+
+| Query Param | Type | Default | Description |
+|-------------|------|---------|-------------|
+| `team` | string | - | Filter to a specific team |
+| `date_from` | datetime | 30 days ago | Period start |
+| `date_to` | datetime | now | Period end |
+
+**Response:** `200 OK`
+```json
+{
+  "developers": [
+    {
+      "developer_id": 3,
+      "display_name": "Bob",
+      "github_username": "bob",
+      "team": "Platform",
+      "combined_tag_rate": 0.45,
+      "pr_tag_rate": 0.50,
+      "issue_tag_rate": 0.35,
+      "team_average": 0.15,
+      "severity": "moderate"
+    }
+  ]
+}
+```
+
+Flagged when `combined_tag_rate > team_avg + 1.5 * stddev` or `combined_tag_rate > 0.5`. `severity`: `mild` (1.5-2σ), `moderate` (2-3σ or >50%), `severe` (>3σ or >70%).
+
+### GET /api/stats/communication-scores
+
+Compute a communication score [0-100] per active developer measuring collaboration breadth and depth. **Admin only.**
+
+| Query Param | Type | Default | Description |
+|-------------|------|---------|-------------|
+| `team` | string | - | Filter to a specific team |
+| `date_from` | datetime | 30 days ago | Period start |
+| `date_to` | datetime | now | Period end |
+
+**Response:** `200 OK`
+```json
+{
+  "developers": [
+    {
+      "developer_id": 2,
+      "display_name": "Alice",
+      "github_username": "alice",
+      "avatar_url": "https://...",
+      "team": "Platform",
+      "communication_score": 78.5,
+      "review_engagement": 22.0,
+      "comment_depth": 18.5,
+      "reach": 20.0,
+      "responsiveness": 18.0
+    }
+  ]
+}
+```
+
+Four components (25 points each):
+- `review_engagement` — reviews given vs team median
+- `comment_depth` — average comment length (200 chars = full marks)
+- `reach` — unique developers interacted with / team size
+- `responsiveness` — average time to first review (< 24h = full marks)

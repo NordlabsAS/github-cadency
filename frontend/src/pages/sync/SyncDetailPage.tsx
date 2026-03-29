@@ -95,6 +95,13 @@ export default function SyncDetailPage() {
         <h1 className="text-2xl font-bold">Sync #{event.id}</h1>
         <Badge variant="outline">{event.sync_type}</Badge>
         <Badge variant={statusVariant(event.status)}>{statusLabel(event.status)}</Badge>
+        {event.resumed_from_id && (
+          <Link to={`/admin/sync/${event.resumed_from_id}`}>
+            <Badge variant="outline" className="border-blue-500/50 text-blue-600 cursor-pointer hover:bg-blue-50 dark:hover:bg-blue-950/30">
+              Resumed from #{event.resumed_from_id}
+            </Badge>
+          </Link>
+        )}
         {event.is_resumable && !isActive && (
           <Button
             size="sm"
@@ -111,42 +118,56 @@ export default function SyncDetailPage() {
       {isActive && <SyncProgressView sync={event} />}
 
       {/* Summary stats (for completed syncs) */}
-      {!isActive && (
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
-          <Card>
-            <CardContent className="pt-4 pb-4">
-              <div className="text-xs text-muted-foreground">Repos</div>
-              <div className="text-lg font-bold">
-                {completedRepos.length}/{event.total_repos ?? '-'}
-              </div>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardContent className="pt-4 pb-4">
-              <div className="text-xs text-muted-foreground">PRs Synced</div>
-              <div className="text-lg font-bold">{event.prs_upserted ?? 0}</div>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardContent className="pt-4 pb-4">
-              <div className="text-xs text-muted-foreground">Issues Synced</div>
-              <div className="text-lg font-bold">{event.issues_upserted ?? 0}</div>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardContent className="pt-4 pb-4">
-              <div className="text-xs text-muted-foreground">Duration</div>
-              <div className="text-lg font-bold">{formatDuration(event.duration_s)}</div>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardContent className="pt-4 pb-4">
-              <div className="text-xs text-muted-foreground">Started</div>
-              <div className="text-sm font-medium">{formatDate(event.started_at)}</div>
-            </CardContent>
-          </Card>
-        </div>
-      )}
+      {!isActive && (() => {
+        const totalSkipped = completedRepos.reduce(
+          (sum, r) => sum + (r.prs_skipped ?? 0) + (r.issues_skipped ?? 0), 0
+        )
+        return (
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
+            <Card>
+              <CardContent className="pt-4 pb-4">
+                <div className="text-xs text-muted-foreground">Repos</div>
+                <div className="text-lg font-bold">
+                  {completedRepos.length}/{event.total_repos ?? '-'}
+                </div>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardContent className="pt-4 pb-4">
+                <div className="text-xs text-muted-foreground">PRs Synced</div>
+                <div className="text-lg font-bold">{event.prs_upserted ?? 0}</div>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardContent className="pt-4 pb-4">
+                <div className="text-xs text-muted-foreground">Issues Synced</div>
+                <div className="text-lg font-bold">{event.issues_upserted ?? 0}</div>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardContent className="pt-4 pb-4">
+                <div className="text-xs text-muted-foreground">Duration</div>
+                <div className="text-lg font-bold">{formatDuration(event.duration_s)}</div>
+              </CardContent>
+            </Card>
+            {totalSkipped > 0 ? (
+              <Card>
+                <CardContent className="pt-4 pb-4">
+                  <div className="text-xs text-muted-foreground">Unchanged (Skipped)</div>
+                  <div className="text-lg font-bold text-blue-600">{totalSkipped}</div>
+                </CardContent>
+              </Card>
+            ) : (
+              <Card>
+                <CardContent className="pt-4 pb-4">
+                  <div className="text-xs text-muted-foreground">Started</div>
+                  <div className="text-sm font-medium">{formatDate(event.started_at)}</div>
+                </CardContent>
+              </Card>
+            )}
+          </div>
+        )
+      })()}
 
       {/* Per-repo results */}
       {(completedRepos.length > 0 || failedRepos.length > 0) && (
@@ -205,7 +226,8 @@ export default function SyncDetailPage() {
   )
 }
 
-function RepoResultRow({ repo }: { repo: { repo_id: number; repo_name: string; status: string; prs: number; issues: number; warnings: string[] } }) {
+function RepoResultRow({ repo }: { repo: { repo_id: number; repo_name: string; status: string; prs: number; issues: number; prs_skipped?: number; issues_skipped?: number; warnings: string[] } }) {
+  const totalSkipped = (repo.prs_skipped ?? 0) + (repo.issues_skipped ?? 0)
   return (
     <div className="flex items-center gap-3 rounded-md border px-4 py-3">
       <RepoStatusIcon status={repo.status} />
@@ -214,6 +236,11 @@ function RepoResultRow({ repo }: { repo: { repo_id: number; repo_name: string; s
       <div className="flex gap-4 text-xs text-muted-foreground ml-auto shrink-0">
         <span>{repo.prs} PRs</span>
         <span>{repo.issues} issues</span>
+        {totalSkipped > 0 && (
+          <span className="text-blue-600" title={`${repo.prs_skipped ?? 0} PRs + ${repo.issues_skipped ?? 0} issues unchanged`}>
+            {totalSkipped} skipped
+          </span>
+        )}
       </div>
       {repo.warnings.length > 0 && (
         <span className="text-xs text-amber-600" title={repo.warnings.join('\n')}>

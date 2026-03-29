@@ -25,12 +25,12 @@ function isGroup(entry: NavEntry): entry is NavGroup {
 const adminNavItems: NavEntry[] = [
   { to: '/', label: 'Dashboard' },
   { to: '/executive', label: 'Executive' },
-  { to: '/team', label: 'Team' },
   { to: '/insights/workload', label: 'Insights' },
   { to: '/goals', label: 'Goals' },
   {
     label: 'Admin',
     children: [
+      { to: '/admin/team', label: 'Team' },
       { to: '/admin/repos', label: 'Repos' },
       { to: '/admin/sync', label: 'Sync' },
       { to: '/admin/ai', label: 'AI Analysis' },

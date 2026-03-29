@@ -1,0 +1,113 @@
+# P1-01: Complete DORA Metrics (4/4)
+
+> Priority: 1 (Table Stakes) | Effort: Medium | Impact: High
+> Competitive gap: All major competitors offer all 4 DORA metrics. DevPulse only has 2/4.
+
+## Context
+
+DevPulse currently implements **Deployment Frequency** and **Lead Time for Changes** via the `deployments` table and `get_dora_metrics()` in `backend/app/services/stats.py`. Missing: **Change Failure Rate (CFR)** and **Mean Time to Recovery (MTTR)**.
+
+Gartner considers DORA 4/4 table stakes for engineering intelligence platforms. Every competitor (LinearB, Jellyfish, Swarmia, DX, Sleuth) offers all four.
+
+## What to Build
+
+### Change Failure Rate (CFR)
+
+**Definition:** Percentage of deployments that cause a production failure (rollback, hotfix, or incident).
+
+**Implementation approach — GitHub-native signals (no external incident tracker):**
+
+1. **Detect failure deployments** by correlating:
+   - Revert PRs merged shortly after a deployment (revert detection already exists in `pull_requests.is_revert`)
+   - Failed deployment workflow runs following a successful one (status = "failure" after "success" on same environment)
+   - Hotfix PRs: PRs merged to default branch with labels like `hotfix`, `urgent`, `incident`, or branch names matching `hotfix/*`
+
+2. **New fields on `deployments` table:**
+   - `is_failure: bool = False` — flagged if followed by revert/hotfix/failed deploy
+   - `failure_detected_via: str | None` — "revert_pr", "failed_deploy", "hotfix_pr"
+   - `recovered_at: datetime | None` — timestamp of the recovery deployment
+   - `recovery_deployment_id: int | None` — FK to the deployment that fixed this one
+
+3. **Computation:**
+   ```
+   CFR = count(deployments where is_failure=True) / count(all deployments) * 100
+   ```
+
+4. **DORA bands for CFR:**
+   - Elite: 0-5%
+   - High: 5-10%
+   - Medium: 10-15%
+   - Low: >15%
+
+### Mean Time to Recovery (MTTR)
+
+**Definition:** Average time between a failure deployment and its recovery deployment.
+
+**Implementation approach:**
+
+1. **Link failure → recovery:** When a revert PR merges or a new successful deployment follows a failed one, compute `recovery_time_s = recovered_at - deployed_at`
+2. **New field on `deployments`:** `recovery_time_s: int | None`
+3. **Computation:**
+   ```
+   MTTR = avg(recovery_time_s) for all failure deployments with recovery in period
+   ```
+
+4. **DORA bands for MTTR:**
+   - Elite: <1 hour
+   - High: 1-24 hours
+   - Medium: 24-168 hours (1 week)
+   - Low: >168 hours
+
+## Backend Changes
+
+### Models (`backend/app/models/models.py`)
+- Add to `Deployment`: `is_failure`, `failure_detected_via`, `recovered_at`, `recovery_deployment_id`, `recovery_time_s`
+
+### Schemas (`backend/app/schemas/schemas.py`)
+- Extend `DORAMetricsResponse` with:
+  - `change_failure_rate: float | None`
+  - `cfr_band: str`
+  - `avg_mttr_hours: float | None`
+  - `mttr_band: str`
+  - `failure_deployments: int`
+- Extend `DeploymentDetail` with failure fields
+
+### Service (`backend/app/services/stats.py`)
+- Add `_cfr_band()` and `_mttr_band()` classification functions
+- Extend `get_dora_metrics()` to compute CFR and MTTR
+- Add DORA overall rating (composite of all 4 metrics)
+
+### Sync (`backend/app/services/github_sync.py`)
+- After `sync_deployments()`, add `detect_deployment_failures()`:
+  1. For each successful deployment, check if a revert PR was merged within 48h pointing at the deployed SHA
+  2. Check if the next deployment on the same repo failed
+  3. For each failure, find the next successful deployment as recovery
+  4. Compute `recovery_time_s`
+
+### Migration
+- Alembic migration adding new columns to `deployments`
+
+## Frontend Changes
+
+### DORA Metrics Page (`frontend/src/pages/insights/DoraMetrics.tsx`)
+- Add CFR and MTTR cards alongside existing Deployment Frequency and Lead Time
+- Add DORA summary card showing overall DORA performance level
+- Add failure timeline visualization (mark failures on deployment timeline)
+- Show CFR trend over time
+
+### Types (`frontend/src/utils/types.ts`)
+- Extend `DORAMetricsResponse` interface with new fields
+
+## Testing
+- Unit test `detect_deployment_failures()` with mock deployment + revert PR scenarios
+- Unit test CFR/MTTR band classification
+- Unit test the composite DORA rating logic
+- Test edge cases: no deployments, no failures, recovery without matching failure
+
+## Acceptance Criteria
+- [ ] CFR computed from revert PRs + failed deploys + hotfix PRs
+- [ ] MTTR computed from failure→recovery deployment pairs
+- [ ] DORA bands for both new metrics match industry standard thresholds
+- [ ] Overall DORA performance level (Elite/High/Medium/Low) shown
+- [ ] Frontend shows all 4 DORA metrics with trends
+- [ ] Works without external incident tracker (pure GitHub signals)

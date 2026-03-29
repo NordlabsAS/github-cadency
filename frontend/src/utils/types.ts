@@ -21,6 +21,7 @@ export interface Developer {
   location: string | null
   timezone: string | null
   team: string | null
+  office: string | null
   app_role: string
   is_active: boolean
   avatar_url: string | null
@@ -39,10 +40,19 @@ export interface DeveloperCreate {
   location?: string | null
   timezone?: string | null
   team?: string | null
+  office?: string | null
   notes?: string | null
 }
 
-export type DeveloperUpdate = Partial<Omit<DeveloperCreate, 'github_username'>>
+export type DeveloperUpdate = Partial<Omit<DeveloperCreate, 'github_username'>> & {
+  is_active?: boolean
+}
+
+export interface DeactivationImpact {
+  open_prs: number
+  open_issues: number
+  open_branches: string[]
+}
 
 // --- Stats ---
 
@@ -128,6 +138,8 @@ export interface SyncRepoResult {
   status: 'ok' | 'partial'
   prs: number
   issues: number
+  prs_skipped?: number
+  issues_skipped?: number
   warnings: string[]
 }
 
@@ -147,6 +159,18 @@ export interface SyncError {
   retryable: boolean
   timestamp: string
   attempt: number
+  hint?: string
+}
+
+export interface PreflightCheck {
+  field: string
+  status: 'ok' | 'error' | 'warn'
+  message: string
+}
+
+export interface PreflightResponse {
+  checks: PreflightCheck[]
+  ready: boolean
 }
 
 export interface SyncLogEntry {
@@ -751,4 +775,100 @@ export interface AICostEstimate {
   estimated_cost_usd: number
   data_items: number
   note: string
+}
+
+// --- Developer Relationships ---
+
+export type RelationshipType = 'reports_to' | 'tech_lead_of' | 'team_lead_of'
+
+export interface DeveloperRelationshipResponse {
+  id: number
+  source_id: number
+  target_id: number
+  relationship_type: string
+  source_name: string
+  target_name: string
+  source_avatar_url: string | null
+  target_avatar_url: string | null
+  created_at: string
+}
+
+export interface DeveloperRelationshipsResponse {
+  reports_to: DeveloperRelationshipResponse | null
+  tech_lead: DeveloperRelationshipResponse | null
+  team_lead: DeveloperRelationshipResponse | null
+  direct_reports: DeveloperRelationshipResponse[]
+  tech_leads_for: DeveloperRelationshipResponse[]
+  team_leads_for: DeveloperRelationshipResponse[]
+}
+
+export interface OrgTreeNode {
+  developer_id: number
+  display_name: string
+  github_username: string
+  avatar_url: string | null
+  role: string | null
+  team: string | null
+  office: string | null
+  children: OrgTreeNode[]
+}
+
+export interface OrgTreeResponse {
+  roots: OrgTreeNode[]
+  unassigned: OrgTreeNode[]
+}
+
+// --- Enhanced Collaboration ---
+
+export interface WorksWithEntry {
+  developer_id: number
+  display_name: string
+  github_username: string
+  avatar_url: string | null
+  team: string | null
+  total_score: number
+  interaction_count: number
+  review_score: number
+  coauthor_score: number
+  issue_comment_score: number
+  mention_score: number
+  co_assigned_score: number
+}
+
+export interface WorksWithResponse {
+  developer_id: number
+  collaborators: WorksWithEntry[]
+}
+
+export interface OverTaggedDeveloper {
+  developer_id: number
+  display_name: string
+  github_username: string
+  team: string | null
+  combined_tag_rate: number
+  pr_tag_rate: number
+  issue_tag_rate: number
+  team_average: number
+  severity: 'mild' | 'moderate' | 'severe'
+}
+
+export interface OverTaggedResponse {
+  developers: OverTaggedDeveloper[]
+}
+
+export interface CommunicationScoreEntry {
+  developer_id: number
+  display_name: string
+  github_username: string
+  avatar_url: string | null
+  team: string | null
+  communication_score: number
+  review_engagement: number
+  comment_depth: number
+  reach: number
+  responsiveness: number
+}
+
+export interface CommunicationScoresResponse {
+  developers: CommunicationScoreEntry[]
 }

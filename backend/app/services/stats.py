@@ -613,6 +613,7 @@ async def get_repo_stats(
             )
             .join(PullRequest, PullRequest.author_id == Developer.id)
             .where(
+                Developer.is_active.is_(True),
                 PullRequest.repo_id == repo_id,
                 PullRequest.created_at >= date_from,
                 PullRequest.created_at <= date_to,

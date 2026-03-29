@@ -175,8 +175,8 @@ export default function SyncProgressView({ sync, compact }: SyncProgressViewProp
           </>
         )}
 
-        {/* Cancel / Force Stop (not available for contributor syncs) */}
-        {sync.sync_type !== 'contributors' && <div className="flex items-center gap-2">
+        {/* Cancel / Force Stop */}
+        <div className="flex items-center gap-2">
           {!sync.cancel_requested ? (
             <Button
               variant="outline"
@@ -211,7 +211,7 @@ export default function SyncProgressView({ sync, compact }: SyncProgressViewProp
               Force Stop
             </Button>
           )}
-        </div>}
+        </div>
 
         {/* Error count */}
         {failedCount > 0 && (

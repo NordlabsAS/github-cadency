@@ -3,6 +3,7 @@ from datetime import datetime
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     Float,
@@ -38,6 +39,7 @@ class Developer(Base):
     app_role: Mapped[str] = mapped_column(String(20), nullable=False, default="developer")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     avatar_url: Mapped[str | None] = mapped_column(Text)
+    office: Mapped[str | None] = mapped_column(String(255))
     notes: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=datetime.utcnow
@@ -50,6 +52,12 @@ class Developer(Base):
     reviews: Mapped[list["PRReview"]] = relationship(back_populates="reviewer")
     assigned_issues: Mapped[list["Issue"]] = relationship(back_populates="assignee")
     goals: Mapped[list["DeveloperGoal"]] = relationship(back_populates="developer")
+    relationships_as_source: Mapped[list["DeveloperRelationship"]] = relationship(
+        back_populates="source", foreign_keys="DeveloperRelationship.source_id"
+    )
+    relationships_as_target: Mapped[list["DeveloperRelationship"]] = relationship(
+        back_populates="target", foreign_keys="DeveloperRelationship.target_id"
+    )
 
 
 class Repository(Base):
@@ -176,6 +184,7 @@ class PRReviewComment(Base):
     path: Mapped[str | None] = mapped_column(Text)
     line: Mapped[int | None] = mapped_column(Integer)
     comment_type: Mapped[str | None] = mapped_column(String(30), server_default="general")
+    mentions: Mapped[list | None] = mapped_column(JSONB)
     created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
@@ -285,6 +294,7 @@ class IssueComment(Base):
     issue_id: Mapped[int] = mapped_column(ForeignKey("issues.id"), nullable=False)
     author_github_username: Mapped[str | None] = mapped_column(String(255))
     body: Mapped[str | None] = mapped_column(Text)
+    mentions: Mapped[list | None] = mapped_column(JSONB)
     created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     issue: Mapped["Issue"] = relationship(back_populates="comments")
@@ -463,4 +473,81 @@ class AIUsageLog(Base):
     items_classified: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=datetime.utcnow
+    )
+
+
+class DeveloperRelationship(Base):
+    __tablename__ = "developer_relationships"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_id", "target_id", "relationship_type",
+            name="uq_dev_rel_source_target_type",
+        ),
+        CheckConstraint("source_id != target_id", name="ck_dev_rel_no_self"),
+        Index("ix_dev_rel_source", "source_id"),
+        Index("ix_dev_rel_target", "target_id"),
+        Index("ix_dev_rel_type", "relationship_type"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    source_id: Mapped[int] = mapped_column(
+        ForeignKey("developers.id"), nullable=False
+    )
+    target_id: Mapped[int] = mapped_column(
+        ForeignKey("developers.id"), nullable=False
+    )
+    relationship_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    created_by: Mapped[str | None] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+    source: Mapped["Developer"] = relationship(
+        back_populates="relationships_as_source", foreign_keys=[source_id]
+    )
+    target: Mapped["Developer"] = relationship(
+        back_populates="relationships_as_target", foreign_keys=[target_id]
+    )
+
+
+class DeveloperCollaborationScore(Base):
+    __tablename__ = "developer_collaboration_scores"
+    __table_args__ = (
+        UniqueConstraint(
+            "developer_a_id", "developer_b_id", "period_start", "period_end",
+            name="uq_collab_score_pair_period",
+        ),
+        CheckConstraint(
+            "developer_a_id < developer_b_id", name="ck_collab_score_canonical"
+        ),
+        Index("ix_collab_score_a", "developer_a_id"),
+        Index("ix_collab_score_b", "developer_b_id"),
+        Index("ix_collab_score_total", "total_score"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    developer_a_id: Mapped[int] = mapped_column(
+        ForeignKey("developers.id"), nullable=False
+    )
+    developer_b_id: Mapped[int] = mapped_column(
+        ForeignKey("developers.id"), nullable=False
+    )
+    period_start: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    period_end: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    review_score: Mapped[float] = mapped_column(Float, default=0.0)
+    coauthor_score: Mapped[float] = mapped_column(Float, default=0.0)
+    issue_comment_score: Mapped[float] = mapped_column(Float, default=0.0)
+    mention_score: Mapped[float] = mapped_column(Float, default=0.0)
+    co_assigned_score: Mapped[float] = mapped_column(Float, default=0.0)
+    total_score: Mapped[float] = mapped_column(Float, default=0.0)
+    interaction_count: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow
     )

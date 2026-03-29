@@ -1,7 +1,36 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { apiFetch } from '@/utils/api'
-import type { Repo, SyncEvent, SyncStartRequest, SyncStatusResponse } from '@/utils/types'
+import type { PreflightResponse, Repo, SyncEvent, SyncStartRequest, SyncStatusResponse } from '@/utils/types'
+
+/**
+ * Extract a human-readable detail from an apiFetch error.
+ * apiFetch throws `new Error("STATUS: BODY")`, so we try to parse the JSON detail.
+ */
+function extractErrorDetail(error: Error): string {
+  const msg = error.message
+  // Try to extract JSON detail from "STATUS: {\"detail\": \"...\"}"
+  const colonIdx = msg.indexOf(': ')
+  if (colonIdx > 0) {
+    const body = msg.slice(colonIdx + 2)
+    try {
+      const parsed = JSON.parse(body)
+      if (parsed.detail) return parsed.detail
+    } catch {
+      // Not JSON, return the raw body
+      if (body.length > 0 && body.length < 300) return body
+    }
+  }
+  return msg
+}
+
+export function usePreflight() {
+  return useQuery<PreflightResponse>({
+    queryKey: ['sync-preflight'],
+    queryFn: () => apiFetch('/sync/preflight'),
+    staleTime: 60_000,
+  })
+}
 
 export function useRepos() {
   return useQuery<Repo[]>({
@@ -19,7 +48,9 @@ export function useDiscoverRepos() {
       qc.setQueryData(['repos'], repos)
       toast.success(`Discovered ${repos.length} repositories`)
     },
-    onError: () => toast.error('Failed to discover repositories from GitHub'),
+    onError: (error: Error) => {
+      toast.error(extractErrorDetail(error))
+    },
   })
 }
 
@@ -75,7 +106,7 @@ export function useStartSync() {
       if (error.message.includes('409')) {
         toast.error('A sync is already in progress')
       } else {
-        toast.error('Failed to start sync')
+        toast.error(`Failed to start sync: ${extractErrorDetail(error)}`)
       }
     },
   })
@@ -91,7 +122,7 @@ export function useResumeSync() {
       qc.invalidateQueries({ queryKey: ['sync-events'] })
       toast.success('Sync resumed')
     },
-    onError: () => toast.error('Failed to resume sync'),
+    onError: (error: Error) => toast.error(`Failed to resume sync: ${extractErrorDetail(error)}`),
   })
 }
 
@@ -105,7 +136,7 @@ export function useCancelSync() {
       qc.invalidateQueries({ queryKey: ['sync-events'] })
       toast.success('Cancel requested — sync will stop after current step')
     },
-    onError: () => toast.error('Failed to cancel sync'),
+    onError: (error: Error) => toast.error(`Failed to cancel sync: ${extractErrorDetail(error)}`),
   })
 }
 
@@ -119,7 +150,7 @@ export function useForceStopSync() {
       qc.invalidateQueries({ queryKey: ['sync-events'] })
       toast.success('Sync force-stopped')
     },
-    onError: () => toast.error('Failed to force-stop sync'),
+    onError: (error: Error) => toast.error(`Failed to force-stop sync: ${extractErrorDetail(error)}`),
   })
 }
 
@@ -137,7 +168,7 @@ export function useSyncContributors() {
       if (error.message.includes('409')) {
         toast.error('A sync is already in progress')
       } else {
-        toast.error('Failed to sync contributors')
+        toast.error(`Failed to sync contributors: ${extractErrorDetail(error)}`)
       }
     },
   })

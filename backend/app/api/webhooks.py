@@ -93,7 +93,7 @@ async def handle_pull_request(db, client: httpx.AsyncClient, payload: dict):
         client, f"/repos/{repo.full_name}/pulls/{pr.number}/reviews"
     )
     for review_data in reviews_data:
-        await upsert_review(db, review_data, pr)
+        await upsert_review(db, review_data, pr, client=client)
 
     # Re-fetch review comments and recompute quality tiers
     review_comments_data = await github_get_paginated(
@@ -122,7 +122,7 @@ async def handle_pull_request_review(db, client: httpx.AsyncClient, payload: dic
         pr = await upsert_pull_request(db, client, pr_data, repo)
         await db.flush()
 
-    await upsert_review(db, payload["review"], pr)
+    await upsert_review(db, payload["review"], pr, client=client)
 
     # Fetch review comments and recompute quality tiers for accuracy
     review_comments_data = await github_get_paginated(

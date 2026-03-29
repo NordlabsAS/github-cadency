@@ -23,6 +23,7 @@ import CodeChurn from '@/pages/insights/CodeChurn'
 import CIInsights from '@/pages/insights/CIInsights'
 import DoraMetrics from '@/pages/insights/DoraMetrics'
 import Investment from '@/pages/insights/Investment'
+import OrgChart from '@/pages/insights/OrgChart'
 import ExecutiveDashboard from '@/pages/ExecutiveDashboard'
 import AISettingsPage from '@/pages/settings/AISettings'
 import Login from '@/pages/Login'
@@ -38,9 +39,11 @@ const insightsSidebarItems: SidebarItem[] = [
   { to: '/insights/cicd', label: 'CI/CD' },
   { to: '/insights/dora', label: 'DORA Metrics' },
   { to: '/insights/investment', label: 'Investment' },
+  { to: '/insights/org-chart', label: 'Org Chart' },
 ]
 
 const adminSidebarItems: SidebarItem[] = [
+  { to: '/admin/team', label: 'Team' },
   { to: '/admin/repos', label: 'Repos' },
   { to: '/admin/sync', label: 'Sync' },
   { to: '/admin/ai', label: 'AI Analysis' },
@@ -88,7 +91,7 @@ function AppRoutes() {
                     <Routes>
                       <Route path="/" element={auth.isAdmin ? <Dashboard /> : <Navigate to={`/team/${auth.user?.developer_id}`} replace />} />
                       <Route path="/executive" element={auth.isAdmin ? <ExecutiveDashboard /> : <Navigate to="/" replace />} />
-                      <Route path="/team" element={auth.isAdmin ? <TeamRegistry /> : <Navigate to="/" replace />} />
+                      <Route path="/team" element={<Navigate to="/admin/team" replace />} />
                       <Route path="/team/:id" element={<DeveloperDetail />} />
                       <Route path="/goals" element={<Goals />} />
 
@@ -105,6 +108,7 @@ function AppRoutes() {
                               <Route path="/cicd" element={<CIInsights />} />
                               <Route path="/dora" element={<DoraMetrics />} />
                               <Route path="/investment" element={<Investment />} />
+                              <Route path="/org-chart" element={<OrgChart />} />
                               <Route path="*" element={<Navigate to="/insights/workload" replace />} />
                             </Routes>
                           </SidebarLayout>
@@ -116,12 +120,13 @@ function AppRoutes() {
                         auth.isAdmin ? (
                           <SidebarLayout items={adminSidebarItems} title="Admin">
                             <Routes>
+                              <Route path="/team" element={<TeamRegistry />} />
                               <Route path="/repos" element={<Repos />} />
                               <Route path="/sync" element={<SyncPage />} />
                               <Route path="/sync/:id" element={<SyncDetailPage />} />
                               <Route path="/ai" element={<AIAnalysis />} />
                               <Route path="/ai/settings" element={<AISettingsPage />} />
-                              <Route path="*" element={<Navigate to="/admin/repos" replace />} />
+                              <Route path="*" element={<Navigate to="/admin/team" replace />} />
                             </Routes>
                           </SidebarLayout>
                         ) : <Navigate to="/" replace />

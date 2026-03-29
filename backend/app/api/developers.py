@@ -8,9 +8,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.auth import get_current_user, require_admin
 from app.models.database import get_db
 from app.models.models import Developer
+from app.models.models import Issue, PullRequest
 from app.schemas.schemas import (
     AppRole,
     AuthUser,
+    DeactivationImpactResponse,
     DeveloperCreate,
     DeveloperResponse,
     DeveloperUpdateAdmin,
@@ -47,7 +49,17 @@ async def create_developer(
     existing = await db.execute(
         select(Developer).where(Developer.github_username == data.github_username)
     )
-    if existing.scalar_one_or_none():
+    existing_dev = existing.scalar_one_or_none()
+    if existing_dev:
+        if not existing_dev.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "inactive_exists",
+                    "developer_id": existing_dev.id,
+                    "display_name": existing_dev.display_name,
+                },
+            )
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Developer with github_username '{data.github_username}' already exists",
@@ -94,6 +106,55 @@ async def update_developer(
     await db.commit()
     await db.refresh(dev)
     return dev
+
+
+@router.get(
+    "/developers/{developer_id}/deactivation-impact",
+    response_model=DeactivationImpactResponse,
+)
+async def get_deactivation_impact(
+    developer_id: int,
+    _: AuthUser = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    dev = await db.get(Developer, developer_id)
+    if not dev:
+        raise HTTPException(status_code=404, detail="Developer not found")
+
+    from sqlalchemy import func, distinct
+
+    open_prs_result = await db.execute(
+        select(func.count()).where(
+            PullRequest.author_id == developer_id,
+            PullRequest.state == "open",
+            PullRequest.is_draft.isnot(True),
+        )
+    )
+    open_prs = open_prs_result.scalar() or 0
+
+    branches_result = await db.execute(
+        select(distinct(PullRequest.head_branch)).where(
+            PullRequest.author_id == developer_id,
+            PullRequest.state == "open",
+            PullRequest.is_draft.isnot(True),
+            PullRequest.head_branch.isnot(None),
+        )
+    )
+    open_branches = [row[0] for row in branches_result.all()]
+
+    open_issues_result = await db.execute(
+        select(func.count()).where(
+            Issue.assignee_id == developer_id,
+            Issue.state == "open",
+        )
+    )
+    open_issues = open_issues_result.scalar() or 0
+
+    return DeactivationImpactResponse(
+        open_prs=open_prs,
+        open_issues=open_issues,
+        open_branches=open_branches,
+    )
 
 
 @router.delete(

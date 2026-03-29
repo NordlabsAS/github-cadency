@@ -288,11 +288,22 @@ Cache the values — once a PR is merged/closed, its stats don't change.
 
 ```
 GET    /api/developers                  List all developers (filterable by team, active status)
-POST   /api/developers                  Create developer (github_username, display_name, role, etc.)
+POST   /api/developers                  Create developer (409 with reactivation info if inactive duplicate)
 GET    /api/developers/{id}             Get single developer
-PATCH  /api/developers/{id}             Update developer fields
+PATCH  /api/developers/{id}             Update developer fields (including is_active toggle for deactivation/reactivation)
+GET    /api/developers/{id}/deactivation-impact  Open PRs, issues, and branches before deactivation
 DELETE /api/developers/{id}             Soft-delete (sets is_active=false)
 ```
+
+#### Developer Deactivation
+
+Deactivation soft-disables a developer by setting `is_active = false`. The developer is hidden from team views, workload, benchmarks, collaboration, and risk scoring. Their historical data (PRs, reviews, issues, goals) is preserved and viewable by ID. They cannot log in via OAuth while inactive.
+
+Before deactivating, admins should check `GET /developers/{id}/deactivation-impact` which returns `open_prs`, `open_issues`, and `open_branches` (draft PRs excluded). This helps identify work that may need reassignment.
+
+Reactivation is done via `PATCH /developers/{id}` with `{ is_active: true }`. Auto-reactivation also occurs during sync if the developer appears as a PR author, reviewer, issue assignee, or org member — a warning is logged for admin visibility.
+
+Creating a developer whose `github_username` matches an inactive record returns a structured 409 (`{ code: "inactive_exists", developer_id, display_name }`) so the frontend can prompt for reactivation instead of showing a generic conflict error.
 
 ### 5.2 Stats (no AI)
 
