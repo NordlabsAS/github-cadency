@@ -24,27 +24,30 @@ function isGroup(entry: NavEntry): entry is NavGroup {
 
 const adminNavItems: NavEntry[] = [
   { to: '/', label: 'Dashboard' },
+  { to: '/executive', label: 'Executive' },
   { to: '/team', label: 'Team' },
+  { to: '/insights/workload', label: 'Insights' },
+  { to: '/goals', label: 'Goals' },
   {
-    label: 'Insights',
+    label: 'Admin',
     children: [
-      { to: '/insights/workload', label: 'Workload' },
-      { to: '/insights/collaboration', label: 'Collaboration' },
-      { to: '/insights/benchmarks', label: 'Benchmarks' },
-      { to: '/insights/issue-quality', label: 'Issue Quality' },
-      { to: '/insights/code-churn', label: 'Code Churn' },
-      { to: '/insights/cicd', label: 'CI/CD' },
-      { to: '/insights/dora', label: 'DORA Metrics' },
-      { to: '/insights/investment', label: 'Investment' },
+      { to: '/admin/repos', label: 'Repos' },
+      { to: '/admin/sync', label: 'Sync' },
+      { to: '/admin/ai', label: 'AI Analysis' },
+      { to: '/admin/ai/settings', label: 'AI Settings' },
     ],
   },
-  { to: '/repos', label: 'Repos' },
-  { to: '/sync', label: 'Sync' },
-  { to: '/ai', label: 'AI Analysis' },
-  { to: '/settings/ai', label: 'AI Settings' },
-  { to: '/goals', label: 'Goals' },
-  { to: '/executive', label: 'Executive' },
 ]
+
+/** Prefix-based sections where the nav link should stay active on all sub-pages */
+const SECTION_PREFIXES = ['/insights', '/admin']
+
+function isNavActive(to: string, pathname: string): boolean {
+  if (to === '/') return pathname === '/'
+  const prefix = SECTION_PREFIXES.find((p) => to.startsWith(p))
+  if (prefix) return pathname.startsWith(prefix)
+  return pathname === to || pathname.startsWith(to + '/')
+}
 
 function NavDropdown({ group, pathname }: { group: NavGroup; pathname: string }) {
   const [open, setOpen] = useState(false)
@@ -136,7 +139,7 @@ export default function Layout({ children }: { children: ReactNode }) {
                   to={entry.to}
                   className={cn(
                     'rounded-md px-3 py-1.5 text-sm font-medium transition-colors',
-                    location.pathname === entry.to
+                    isNavActive(entry.to, location.pathname)
                       ? 'bg-muted text-foreground'
                       : 'text-muted-foreground hover:text-foreground'
                   )}

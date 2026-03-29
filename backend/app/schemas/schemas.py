@@ -548,10 +548,16 @@ class SyncEventResponse(BaseModel):
     since_override: datetime | None = None
     total_repos: int | None = None
     current_repo_name: str | None = None
+    current_step: str | None = None
+    current_repo_prs_total: int | None = None
+    current_repo_prs_done: int | None = None
+    current_repo_issues_total: int | None = None
+    current_repo_issues_done: int | None = None
     repos_completed: list[dict] | None = None
     repos_failed: list[dict] | None = None
     is_resumable: bool = False
     resumed_from_id: int | None = None
+    cancel_requested: bool = False
     log_summary: list[dict] | None = None
     rate_limit_wait_s: int = 0
 

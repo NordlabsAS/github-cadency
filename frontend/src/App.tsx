@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useContext } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Toaster } from 'sonner'
@@ -6,11 +6,13 @@ import { DateRangeContext, defaultFrom, defaultTo } from '@/hooks/useDateRange'
 import { AuthContext, useAuthProvider } from '@/hooks/useAuth'
 import ErrorBoundary from '@/components/ErrorBoundary'
 import Layout from '@/components/Layout'
+import SidebarLayout from '@/components/SidebarLayout'
 import Dashboard from '@/pages/Dashboard'
 import TeamRegistry from '@/pages/TeamRegistry'
 import DeveloperDetail from '@/pages/DeveloperDetail'
 import Repos from '@/pages/Repos'
 import SyncPage from '@/pages/sync/SyncPage'
+import SyncDetailPage from '@/pages/sync/SyncDetailPage'
 import AIAnalysis from '@/pages/AIAnalysis'
 import Goals from '@/pages/Goals'
 import WorkloadOverview from '@/pages/insights/WorkloadOverview'
@@ -25,6 +27,25 @@ import ExecutiveDashboard from '@/pages/ExecutiveDashboard'
 import AISettingsPage from '@/pages/settings/AISettings'
 import Login from '@/pages/Login'
 import AuthCallback from '@/pages/AuthCallback'
+import type { SidebarItem } from '@/components/SidebarLayout'
+
+const insightsSidebarItems: SidebarItem[] = [
+  { to: '/insights/workload', label: 'Workload' },
+  { to: '/insights/collaboration', label: 'Collaboration' },
+  { to: '/insights/benchmarks', label: 'Benchmarks' },
+  { to: '/insights/issue-quality', label: 'Issue Quality' },
+  { to: '/insights/code-churn', label: 'Code Churn' },
+  { to: '/insights/cicd', label: 'CI/CD' },
+  { to: '/insights/dora', label: 'DORA Metrics' },
+  { to: '/insights/investment', label: 'Investment' },
+]
+
+const adminSidebarItems: SidebarItem[] = [
+  { to: '/admin/repos', label: 'Repos' },
+  { to: '/admin/sync', label: 'Sync' },
+  { to: '/admin/ai', label: 'AI Analysis' },
+  { to: '/admin/ai/settings', label: 'AI Settings' },
+]
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -37,8 +58,12 @@ const queryClient = new QueryClient({
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const token = localStorage.getItem('devpulse_token')
+  const auth = useContext(AuthContext)
   if (!token) {
     return <Navigate to="/login" replace />
+  }
+  if (auth?.isLoading) {
+    return null
   }
   return <>{children}</>
 }
@@ -62,22 +87,45 @@ function AppRoutes() {
                   <ErrorBoundary>
                     <Routes>
                       <Route path="/" element={auth.isAdmin ? <Dashboard /> : <Navigate to={`/team/${auth.user?.developer_id}`} replace />} />
+                      <Route path="/executive" element={auth.isAdmin ? <ExecutiveDashboard /> : <Navigate to="/" replace />} />
                       <Route path="/team" element={auth.isAdmin ? <TeamRegistry /> : <Navigate to="/" replace />} />
                       <Route path="/team/:id" element={<DeveloperDetail />} />
-                      <Route path="/repos" element={auth.isAdmin ? <Repos /> : <Navigate to="/" replace />} />
-                      <Route path="/sync" element={auth.isAdmin ? <SyncPage /> : <Navigate to="/" replace />} />
-                      <Route path="/insights/workload" element={auth.isAdmin ? <WorkloadOverview /> : <Navigate to="/" replace />} />
-                      <Route path="/insights/collaboration" element={auth.isAdmin ? <CollaborationMatrix /> : <Navigate to="/" replace />} />
-                      <Route path="/insights/benchmarks" element={auth.isAdmin ? <Benchmarks /> : <Navigate to="/" replace />} />
-                      <Route path="/insights/issue-quality" element={auth.isAdmin ? <IssueQuality /> : <Navigate to="/" replace />} />
-                      <Route path="/insights/code-churn" element={auth.isAdmin ? <CodeChurn /> : <Navigate to="/" replace />} />
-                      <Route path="/insights/cicd" element={auth.isAdmin ? <CIInsights /> : <Navigate to="/" replace />} />
-                      <Route path="/insights/dora" element={auth.isAdmin ? <DoraMetrics /> : <Navigate to="/" replace />} />
-                      <Route path="/insights/investment" element={auth.isAdmin ? <Investment /> : <Navigate to="/" replace />} />
-                      <Route path="/executive" element={auth.isAdmin ? <ExecutiveDashboard /> : <Navigate to="/" replace />} />
-                      <Route path="/ai" element={auth.isAdmin ? <AIAnalysis /> : <Navigate to="/" replace />} />
-                      <Route path="/settings/ai" element={auth.isAdmin ? <AISettingsPage /> : <Navigate to="/" replace />} />
                       <Route path="/goals" element={<Goals />} />
+
+                      {/* Insights — sidebar layout */}
+                      <Route path="/insights/*" element={
+                        auth.isAdmin ? (
+                          <SidebarLayout items={insightsSidebarItems} title="Insights">
+                            <Routes>
+                              <Route path="/workload" element={<WorkloadOverview />} />
+                              <Route path="/collaboration" element={<CollaborationMatrix />} />
+                              <Route path="/benchmarks" element={<Benchmarks />} />
+                              <Route path="/issue-quality" element={<IssueQuality />} />
+                              <Route path="/code-churn" element={<CodeChurn />} />
+                              <Route path="/cicd" element={<CIInsights />} />
+                              <Route path="/dora" element={<DoraMetrics />} />
+                              <Route path="/investment" element={<Investment />} />
+                              <Route path="*" element={<Navigate to="/insights/workload" replace />} />
+                            </Routes>
+                          </SidebarLayout>
+                        ) : <Navigate to="/" replace />
+                      } />
+
+                      {/* Admin — sidebar layout */}
+                      <Route path="/admin/*" element={
+                        auth.isAdmin ? (
+                          <SidebarLayout items={adminSidebarItems} title="Admin">
+                            <Routes>
+                              <Route path="/repos" element={<Repos />} />
+                              <Route path="/sync" element={<SyncPage />} />
+                              <Route path="/sync/:id" element={<SyncDetailPage />} />
+                              <Route path="/ai" element={<AIAnalysis />} />
+                              <Route path="/ai/settings" element={<AISettingsPage />} />
+                              <Route path="*" element={<Navigate to="/admin/repos" replace />} />
+                            </Routes>
+                          </SidebarLayout>
+                        ) : <Navigate to="/" replace />
+                      } />
                     </Routes>
                   </ErrorBoundary>
                 </Layout>

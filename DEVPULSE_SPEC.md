@@ -51,7 +51,7 @@ DevPulse is an engineering intelligence dashboard that tracks developer activity
 
 ## 3. Data Model
 
-### 3.1 developers (Team Registry — manual data)
+### 3.1 developers (Team Registry — auto-synced + manual data)
 
 | Column | Type | Notes |
 |--------|------|-------|
@@ -209,7 +209,7 @@ DevPulse is an engineering intelligence dashboard that tracks developer activity
 ### Design decisions
 
 - **No commits table.** Per-commit line stats require an individual API call per commit, which is a rate limit killer at scale. All code volume metrics (additions, deletions, changed_files) are tracked at the PR level, where GitHub provides them for free. If commit-level data is needed later, add it as a separate sync job with aggressive rate limiting.
-- **Author resolution is soft.** PRs/issues/reviews store `author_id` as a nullable FK. If the GitHub user isn't in the team registry, the row still gets created — you just can't filter by developer. This avoids data loss from external contributors.
+- **Author resolution is soft but auto-creates.** PRs/issues/reviews store `author_id` as a nullable FK. During sync, `resolve_author()` auto-creates developers from embedded GitHub user data (login, avatar_url). Raw GitHub usernames are stored on `pull_requests.author_github_username`, `pr_reviews.reviewer_github_username`, and `issues.assignee_github_username` for efficient bulk backfill. Org members are synced via `GET /orgs/{org}/members` at the start of each sync and on-demand via `POST /sync/contributors`.
 - **All text is stored.** PR bodies, review comments, and issue comments are persisted locally. This is the raw material for AI analysis, and avoids re-fetching from GitHub when analysis is triggered.
 
 
@@ -319,6 +319,7 @@ All stats endpoints accept `?date_from=...&date_to=...` query params. Default: l
 ```
 POST   /api/sync/start                  Start configurable sync (accepts SyncTriggerRequest)
 POST   /api/sync/resume/{event_id}      Resume an interrupted sync (remaining repos only)
+POST   /api/sync/contributors           Sync org members + backfill author links (background task)
 GET    /api/sync/status                 Get active sync progress + summary stats
 GET    /api/sync/repos                  List all repos with tracking status + PR/issue counts
 PATCH  /api/sync/repos/{id}/track       Enable/disable tracking for a repo

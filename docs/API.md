@@ -1168,7 +1168,7 @@ Start a new sync. Supports full or incremental, optional repo filtering and time
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `sync_type` | `"full"` \| `"incremental"` | `"incremental"` | Full re-syncs all data; incremental fetches since each repo's `last_synced_at` |
+| `sync_type` | `"full"` \| `"incremental"` | `"incremental"` | Full re-syncs all data; incremental fetches since each repo's `last_synced_at`. Note: `"contributors"` is also a valid sync_type (created by `POST /sync/contributors`), but not accepted here. |
 | `repo_ids` | `int[]` \| `null` | `null` | Specific repo IDs to sync. `null` = all tracked repos |
 | `since` | `datetime` \| `null` | `null` | Override per-repo `last_synced_at` with a uniform date |
 
@@ -1183,7 +1183,7 @@ Start a new sync. Supports full or incremental, optional repo filtering and time
 
 Resume an interrupted sync, processing only repos that were not completed in the original run.
 
-**Path Params:** `event_id` (int) — ID of the failed/partial sync event to resume.
+**Path Params:** `event_id` (int) — ID of the failed/partial/cancelled sync event to resume.
 
 **Response:** `202 Accepted`
 ```json
@@ -1194,6 +1194,48 @@ Resume an interrupted sync, processing only repos that were not completed in the
 - `404` — sync event not found
 - `400` — event is not resumable or no remaining repos
 - `409` — a sync is already in progress
+
+### POST /api/sync/cancel
+
+Request graceful cancellation of the active sync. Sets `cancel_requested = true` on the running SyncEvent. The sync loop checks this flag at repo boundaries and every 50-PR batch, then exits cleanly with `status = "cancelled"` and `is_resumable = true`.
+
+**Response:** `200 OK`
+```json
+{ "status": "cancel_requested", "event_id": 42 }
+```
+
+**Errors:** `404` — no active sync to cancel.
+
+### POST /api/sync/contributors
+
+Sync GitHub org members and backfill author/reviewer/assignee links on existing PRs, reviews, and issues. Runs as a background task. Does NOT trigger a full data sync — only discovers contributors and links them to existing records.
+
+Creates a `SyncEvent` with `sync_type = "contributors"` for progress tracking. The event is visible via `GET /api/sync/status` (as `active_sync` while running) and in sync history. Uses `repos_synced` to report the number of newly created developers.
+
+Two-step process:
+1. Fetches all members from `GET /orgs/{org}/members` and creates `developers` rows for any that don't exist yet (with `app_role = "developer"`, `is_active = true`, `display_name = login`).
+2. Bulk-updates `pull_requests.author_id`, `pr_reviews.reviewer_id`, and `issues.assignee_id` where the FK is NULL but the stored `*_github_username` column matches a known developer.
+
+**Response:** `202 Accepted`
+```json
+{ "status": "accepted" }
+```
+
+**Errors:**
+- `409` — a sync is already in progress
+
+---
+
+### POST /api/sync/force-stop
+
+Force-stop a stale or stuck sync by directly marking it as `cancelled` + `is_resumable = true`. Use when the background task has crashed and the sync is stuck in `started` status.
+
+**Response:** `200 OK`
+```json
+{ "status": "force_stopped", "event_id": 42 }
+```
+
+**Errors:** `404` — no active sync to stop.
 
 ### GET /api/sync/status
 
@@ -1208,6 +1250,11 @@ Get the current sync state: active sync (if any), last completed sync, and summa
     "status": "started",
     "total_repos": 50,
     "current_repo_name": "org/repo-name",
+    "current_step": "processing_prs",
+    "current_repo_prs_total": 200,
+    "current_repo_prs_done": 42,
+    "current_repo_issues_total": null,
+    "current_repo_issues_done": null,
     "repos_completed": [
       { "repo_id": 1, "repo_name": "org/repo-a", "status": "ok", "prs": 15, "issues": 3, "warnings": [] }
     ],
@@ -1220,6 +1267,7 @@ Get the current sync state: active sync (if any), last completed sync, and summa
       { "ts": "10:32:15", "level": "info", "msg": "Starting sync", "repo": "org/repo-a" }
     ],
     "rate_limit_wait_s": 0,
+    "cancel_requested": false,
     "is_resumable": false,
     "resumed_from_id": null,
     "started_at": "2026-03-28T10:30:00Z",
@@ -1233,6 +1281,12 @@ Get the current sync state: active sync (if any), last completed sync, and summa
   "last_sync_duration_s": 1234
 }
 ```
+
+### POST /api/sync/discover-repos
+
+Fetch repos from the GitHub org and upsert them into the database. Does NOT run a full sync — only discovers repos so users can select which ones to track/sync.
+
+**Response:** `200 OK` — `RepoResponse[]` (same format as `GET /api/sync/repos`)
 
 ### GET /api/sync/repos
 
@@ -1268,6 +1322,16 @@ Enable or disable tracking for a repository.
 
 **Response:** `200 OK` — `RepoResponse` (includes `pr_count`, `issue_count`)
 
+### GET /api/sync/events/{event_id}
+
+Get a single sync event by ID with full progress, error, and log details.
+
+**Path Params:** `event_id` (int)
+
+**Response:** `200 OK` — `SyncEventResponse`
+
+**Errors:** `404` — sync event not found.
+
 ### GET /api/sync/events
 
 List recent sync events with full progress and error details.
@@ -1282,10 +1346,14 @@ Each event includes:
 - `repo_ids`, `since_override` — sync scope configuration
 - `total_repos`, `repos_synced` — progress counters
 - `current_repo_name` — currently syncing repo (null when idle/done)
+- `current_step` — active phase within repo: `fetching_prs`, `processing_prs`, `fetching_issues`, `processing_issues`, `processing_issue_comments`, `syncing_file_tree`, `fetching_deployments` (null when idle/done)
+- `current_repo_prs_total`, `current_repo_prs_done` — PR-level progress within current repo
+- `current_repo_issues_total`, `current_repo_issues_done` — issue-level progress within current repo
 - `repos_completed` — list of `{repo_id, repo_name, status, prs, issues, warnings}`
 - `repos_failed` — list of `{repo_id, repo_name, error}`
 - `errors` — structured error objects (see below)
-- `log_summary` — condensed sync log entries `{ts, level, msg, repo?}`
+- `log_summary` — sync log entries `{ts, level, msg, repo?}` (max 500, priority eviction)
+- `cancel_requested` — `true` if cancellation has been requested
 - `is_resumable` — `true` if sync can be resumed via `POST /sync/resume/{id}`
 - `resumed_from_id` — links to the original interrupted sync event
 - `rate_limit_wait_s` — total seconds spent waiting for GitHub rate limits
@@ -1323,6 +1391,7 @@ Each entry in `SyncEventResponse.errors`:
 | `completed` | All repos synced successfully |
 | `completed_with_errors` | Some repos succeeded, some failed. `is_resumable = true` |
 | `failed` | Top-level failure or all repos failed. `is_resumable = true` |
+| `cancelled` | User-cancelled via `POST /sync/cancel` or force-stopped. `is_resumable = true` |
 
 ---
 

@@ -106,7 +106,7 @@ def _append_jsonb(obj: object, attr: str, value: dict | str) -> None:
 # --- Structured Error Helpers ---
 
 
-MAX_LOG_ENTRIES = 100
+MAX_LOG_ENTRIES = 500
 
 RETRYABLE_STATUS_CODES = {502, 503, 504}
 
@@ -180,6 +180,36 @@ def _add_log(
             logs.pop(0)
     logs.append(entry)
     ctx.sync_event.log_summary = logs
+
+
+class SyncCancelled(Exception):
+    """Raised when a sync is cancelled by user request."""
+    pass
+
+
+async def _check_cancel(ctx: SyncContext) -> None:
+    """Check if cancellation was requested and raise if so."""
+    db = ctx.db
+    result = await db.execute(
+        select(SyncEvent.cancel_requested).where(
+            SyncEvent.id == ctx.sync_event.id
+        )
+    )
+    if result.scalar_one_or_none():
+        _add_log(ctx, "warn", "Sync cancelled by user")
+        raise SyncCancelled("Sync cancelled by user request")
+
+
+def _clear_repo_progress(sync_event: "SyncEvent") -> None:
+    """Clear per-repo progress fields between repos."""
+    sync_event.current_step = None
+    sync_event.current_repo_prs_total = None
+    sync_event.current_repo_prs_done = None
+    sync_event.current_repo_issues_total = None
+    sync_event.current_repo_issues_done = None
+
+
+PROGRESS_COMMIT_INTERVAL = 10
 
 
 # --- Rate Limit Handling ---
@@ -330,14 +360,252 @@ async def github_get_paginated(
 
 
 async def resolve_author(
-    db: AsyncSession, github_username: str | None
+    db: AsyncSession, github_username: str | None, *, user_data: dict | None = None
 ) -> int | None:
+    """Resolve a GitHub username to a developer ID, optionally auto-creating.
+
+    If ``user_data`` is provided and the username is not found, a new Developer
+    row is created from the GitHub API user object (login, avatar_url, name).
+    """
     if not github_username:
         return None
     result = await db.execute(
         select(Developer.id).where(Developer.github_username == github_username)
     )
-    return result.scalar_one_or_none()
+    dev_id = result.scalar_one_or_none()
+    if dev_id is not None:
+        return dev_id
+
+    if user_data is None:
+        return None
+
+    # Auto-create developer from GitHub user data
+    display_name = user_data.get("name") or user_data.get("login") or github_username
+    dev = Developer(
+        github_username=github_username,
+        display_name=display_name,
+        avatar_url=user_data.get("avatar_url"),
+        app_role="developer",
+        is_active=True,
+    )
+    db.add(dev)
+    await db.flush()
+    logger.info("Auto-created developer: %s (id=%d)", github_username, dev.id)
+    return dev.id
+
+
+# --- Contributor Sync ---
+
+
+async def sync_org_contributors(
+    db: AsyncSession, client: httpx.AsyncClient, ctx: SyncContext | None = None,
+) -> int:
+    """Fetch all org members from GitHub and upsert them as developers.
+
+    Returns the number of newly created developers.
+    """
+    if ctx:
+        _add_log(ctx, "info", "Syncing org members...")
+
+    members_data = await github_get_paginated(
+        client,
+        f"/orgs/{settings.github_org}/members",
+        {},
+        ctx=ctx,
+    )
+
+    created = 0
+    for member in members_data:
+        login = member.get("login")
+        if not login:
+            continue
+
+        existing = await db.execute(
+            select(Developer.id).where(Developer.github_username == login)
+        )
+        if existing.scalar_one_or_none() is not None:
+            continue
+
+        display_name = member.get("name") or login
+        dev = Developer(
+            github_username=login,
+            display_name=display_name,
+            avatar_url=member.get("avatar_url"),
+            app_role="developer",
+            is_active=True,
+        )
+        db.add(dev)
+        created += 1
+
+    if created:
+        await db.flush()
+
+    if ctx:
+        _add_log(ctx, "info", f"Org members: {len(members_data)} found, {created} new developers created")
+    logger.info("sync_org_contributors: %d members, %d created", len(members_data), created)
+    return created
+
+
+async def backfill_author_links(db: AsyncSession) -> dict[str, int]:
+    """Bulk-update NULL author/reviewer/assignee FKs using stored github usernames.
+
+    Only updates rows where a matching developer actually exists (using an EXISTS
+    guard) so that rowcount accurately reflects real changes.
+
+    Returns counts of rows updated per table.
+    """
+    from sqlalchemy import update
+
+    # Backfill pull_requests.author_id
+    pr_subq = (
+        select(Developer.id)
+        .where(Developer.github_username == PullRequest.author_github_username)
+        .correlate(PullRequest)
+        .scalar_subquery()
+    )
+    pr_result = await db.execute(
+        update(PullRequest)
+        .where(
+            PullRequest.author_id.is_(None),
+            PullRequest.author_github_username.isnot(None),
+            select(Developer.id)
+            .where(Developer.github_username == PullRequest.author_github_username)
+            .correlate(PullRequest)
+            .exists(),
+        )
+        .values(author_id=pr_subq)
+    )
+    pr_count = pr_result.rowcount
+
+    # Backfill pr_reviews.reviewer_id
+    review_subq = (
+        select(Developer.id)
+        .where(Developer.github_username == PRReview.reviewer_github_username)
+        .correlate(PRReview)
+        .scalar_subquery()
+    )
+    review_result = await db.execute(
+        update(PRReview)
+        .where(
+            PRReview.reviewer_id.is_(None),
+            PRReview.reviewer_github_username.isnot(None),
+            select(Developer.id)
+            .where(Developer.github_username == PRReview.reviewer_github_username)
+            .correlate(PRReview)
+            .exists(),
+        )
+        .values(reviewer_id=review_subq)
+    )
+    review_count = review_result.rowcount
+
+    # Backfill issues.assignee_id
+    issue_subq = (
+        select(Developer.id)
+        .where(Developer.github_username == Issue.assignee_github_username)
+        .correlate(Issue)
+        .scalar_subquery()
+    )
+    issue_result = await db.execute(
+        update(Issue)
+        .where(
+            Issue.assignee_id.is_(None),
+            Issue.assignee_github_username.isnot(None),
+            select(Developer.id)
+            .where(Developer.github_username == Issue.assignee_github_username)
+            .correlate(Issue)
+            .exists(),
+        )
+        .values(assignee_id=issue_subq)
+    )
+    issue_count = issue_result.rowcount
+
+    await db.flush()
+    counts = {"pull_requests": pr_count, "pr_reviews": review_count, "issues": issue_count}
+    logger.info("backfill_author_links: %s", counts)
+    return counts
+
+
+async def run_contributor_sync() -> SyncEvent:
+    """Standalone contributor sync with SyncEvent tracking.
+
+    Creates a SyncEvent(sync_type="contributors"), fetches org members,
+    backfills author links, and records completion/failure.
+    """
+    async with AsyncSessionLocal() as db:
+        # Concurrency guard (safety net for TOCTOU race with the API check)
+        active_result = await db.execute(
+            select(SyncEvent).where(SyncEvent.status == "started").limit(1)
+        )
+        if active_result.scalar_one_or_none():
+            logger.warning("Skipping contributor sync — another sync is in progress")
+            raise RuntimeError("A sync is already in progress")
+
+        sync_event = SyncEvent(
+            sync_type="contributors",
+            status="started",
+            started_at=datetime.now(timezone.utc),
+            repos_synced=0,
+            prs_upserted=0,
+            issues_upserted=0,
+            errors=[],
+            repos_completed=[],
+            repos_failed=[],
+            log_summary=[],
+            is_resumable=False,
+            rate_limit_wait_s=0,
+        )
+        db.add(sync_event)
+        await db.commit()
+
+        sync_log = logger.getChild(f"sync.{sync_event.id}")
+        ctx = SyncContext(
+            db=db, client=None, sync_event=sync_event, sync_logger=sync_log,  # type: ignore[arg-type]
+        )
+        _add_log(ctx, "info", "Contributor sync started")
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                ctx.client = client
+                created = await sync_org_contributors(db, client, ctx=ctx)
+                await db.commit()
+
+            _add_log(ctx, "info", "Backfilling author links...")
+            backfill = await backfill_author_links(db)
+            await db.commit()
+
+            total_backfilled = sum(backfill.values())
+            if total_backfilled:
+                _add_log(ctx, "info", f"Backfilled {total_backfilled} author links")
+
+            sync_event.status = "completed"
+            sync_event.repos_synced = created
+            _add_log(ctx, "info", f"Contributor sync complete: {created} new developers")
+
+        except Exception as e:
+            sync_log.error("Contributor sync failed: %s", e)
+            saved_logs = list(sync_event.log_summary or [])
+            await db.rollback()
+            sync_event = await db.merge(sync_event)
+            ctx.sync_event = sync_event
+            sync_event.log_summary = saved_logs
+            sync_event.status = "failed"
+            _append_jsonb(
+                sync_event, "errors",
+                make_sync_error(step="contributor_sync", exception=e),
+            )
+            _add_log(ctx, "error", f"Contributor sync failed: {e}")
+
+        finally:
+            now = datetime.now(timezone.utc)
+            sync_event.completed_at = now
+            sync_event.cancel_requested = False
+            if sync_event.started_at:
+                sync_event.duration_s = int(
+                    (now - sync_event.started_at).total_seconds()
+                )
+            await db.commit()
+
+    return sync_event
 
 
 # --- Upsert Helpers ---
@@ -458,7 +726,8 @@ async def upsert_pull_request(
 
     user = pr_data.get("user") or {}
     author_login = user.get("login")
-    pr.author_id = await resolve_author(db, author_login)
+    pr.author_github_username = author_login
+    pr.author_id = await resolve_author(db, author_login, user_data=user)
 
     for field in ("created_at", "updated_at", "merged_at", "closed_at"):
         val = pr_data.get(field)
@@ -621,7 +890,9 @@ async def upsert_review(
     review.body_length = len(body_text)
 
     user = review_data.get("user") or {}
-    review.reviewer_id = await resolve_author(db, user.get("login"))
+    reviewer_login = user.get("login")
+    review.reviewer_github_username = reviewer_login
+    review.reviewer_id = await resolve_author(db, reviewer_login, user_data=user)
 
     submitted = review_data.get("submitted_at")
     if submitted:
@@ -766,7 +1037,9 @@ async def upsert_issue(
     issue.html_url = issue_data.get("html_url")
 
     assignee = issue_data.get("assignee") or {}
-    issue.assignee_id = await resolve_author(db, assignee.get("login"))
+    assignee_login = assignee.get("login")
+    issue.assignee_github_username = assignee_login
+    issue.assignee_id = await resolve_author(db, assignee_login, user_data=assignee if assignee_login else None)
 
     # Quality scoring fields
     body = issue_data.get("body") or ""
@@ -1114,14 +1387,20 @@ async def sync_repo(
     """Sync a single repo. Returns (prs_upserted, issues_upserted, warnings).
 
     Commits every BATCH_SIZE PRs for crash resilience within large repos.
+    Updates granular progress fields for frontend visibility.
     """
     db = ctx.db
     client = ctx.client
+    sync_event = ctx.sync_event
     prs_upserted = 0
     issues_upserted = 0
     warnings: list[str] = []
 
-    # Fetch PRs
+    # --- PRs ---
+    sync_event.current_step = "fetching_prs"
+    await db.commit()
+    _add_log(ctx, "info", "Fetching pull requests...", repo=repo.full_name)
+
     pr_params: dict = {"state": "all", "sort": "updated", "direction": "desc"}
     if since:
         pr_items = await github_get_paginated(
@@ -1135,6 +1414,16 @@ async def sync_repo(
         pr_items = await github_get_paginated(
             client, f"/repos/{repo.full_name}/pulls", pr_params, ctx=ctx
         )
+
+    sync_event.current_step = "processing_prs"
+    sync_event.current_repo_prs_total = len(pr_items)
+    sync_event.current_repo_prs_done = 0
+    await db.commit()
+    _add_log(
+        ctx, "info",
+        f"Found {len(pr_items)} PRs to process",
+        repo=repo.full_name,
+    )
 
     for pr_data in pr_items:
         pr = await upsert_pull_request(db, client, pr_data, repo)
@@ -1196,7 +1485,10 @@ async def sync_repo(
                     pr.number, pr.head_sha, e,
                 )
 
-        # Batch commit every BATCH_SIZE PRs
+        # Update progress counter
+        sync_event.current_repo_prs_done = prs_upserted
+
+        # Batch commit every BATCH_SIZE PRs (data durability)
         if prs_upserted % BATCH_SIZE == 0:
             await db.commit()
             _add_log(
@@ -1204,8 +1496,23 @@ async def sync_repo(
                 f"Batch committed {prs_upserted}/{len(pr_items)} PRs",
                 repo=repo.full_name,
             )
+            # Check for cancellation at batch boundaries
+            await _check_cancel(ctx)
+        # Lighter progress commit every PROGRESS_COMMIT_INTERVAL PRs
+        elif prs_upserted % PROGRESS_COMMIT_INTERVAL == 0:
+            await db.commit()
+            _add_log(
+                ctx, "info",
+                f"Processed {prs_upserted}/{len(pr_items)} PRs",
+                repo=repo.full_name,
+            )
 
-    # Fetch issues (skip PRs — they have a pull_request key)
+    # --- Issues ---
+    sync_event.current_step = "fetching_issues"
+    sync_event.current_repo_prs_done = prs_upserted
+    await db.commit()
+    _add_log(ctx, "info", "Fetching issues...", repo=repo.full_name)
+
     issue_params: dict = {"state": "all", "sort": "updated", "direction": "desc"}
     if since:
         issue_params["since"] = since.isoformat()
@@ -1213,13 +1520,31 @@ async def sync_repo(
     issue_items = await github_get_paginated(
         client, f"/repos/{repo.full_name}/issues", issue_params, ctx=ctx
     )
-    for issue_data in issue_items:
-        if "pull_request" in issue_data:
-            continue
+
+    # Filter out PRs from issue list
+    pure_issues = [i for i in issue_items if "pull_request" not in i]
+    sync_event.current_step = "processing_issues"
+    sync_event.current_repo_issues_total = len(pure_issues)
+    sync_event.current_repo_issues_done = 0
+    await db.commit()
+    _add_log(
+        ctx, "info",
+        f"Found {len(pure_issues)} issues to process",
+        repo=repo.full_name,
+    )
+
+    for issue_data in pure_issues:
         await upsert_issue(db, issue_data, repo)
         issues_upserted += 1
+        sync_event.current_repo_issues_done = issues_upserted
+        if issues_upserted % PROGRESS_COMMIT_INTERVAL == 0:
+            await db.commit()
 
-    # Fetch issue comments
+    # --- Issue Comments ---
+    sync_event.current_step = "processing_issue_comments"
+    await db.commit()
+    _add_log(ctx, "info", "Fetching issue comments...", repo=repo.full_name)
+
     comment_params: dict = {"sort": "updated", "direction": "desc"}
     if since:
         comment_params["since"] = since.isoformat()
@@ -1241,7 +1566,11 @@ async def sync_repo(
             if parent_issue:
                 await upsert_issue_comment(db, comment_data, parent_issue)
 
-    # Sync the repo file tree for stale directory detection
+    # --- File Tree ---
+    sync_event.current_step = "syncing_file_tree"
+    await db.commit()
+    _add_log(ctx, "info", "Syncing file tree...", repo=repo.full_name)
+
     try:
         _tree_count, tree_truncated = await sync_repo_tree(client, db, repo, ctx=ctx)
         repo.tree_truncated = tree_truncated
@@ -1250,7 +1579,11 @@ async def sync_repo(
         warnings.append(warn_msg)
         ctx.sync_logger.warning("sync_repo_tree failed for %s: %s", repo.full_name, e)
 
-    # Sync deployments for DORA metrics (skipped if DEPLOY_WORKFLOW_NAME not set)
+    # --- Deployments ---
+    sync_event.current_step = "fetching_deployments"
+    await db.commit()
+    _add_log(ctx, "info", "Fetching deployments...", repo=repo.full_name)
+
     try:
         await sync_deployments(client, db, repo, ctx=ctx)
     except Exception as e:
@@ -1260,6 +1593,27 @@ async def sync_repo(
 
     repo.last_synced_at = datetime.now(timezone.utc)
     return prs_upserted, issues_upserted, warnings
+
+
+async def discover_org_repos(db: AsyncSession) -> list[Repository]:
+    """Fetch all repos from the GitHub org and upsert them into the database.
+
+    This does NOT sync PRs/issues — it only discovers repos so the UI can
+    display them for selection before the first sync.
+    """
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        repos_data = await github_get_paginated(
+            client,
+            f"/orgs/{settings.github_org}/repos",
+            {"type": "all", "sort": "updated"},
+        )
+        for repo_data in repos_data:
+            await upsert_repo(db, repo_data)
+            await db.flush()
+        await db.commit()
+
+    result = await db.execute(select(Repository).order_by(Repository.full_name))
+    return list(result.scalars().all())
 
 
 async def run_sync(
@@ -1279,7 +1633,7 @@ async def run_sync(
     async with AsyncSessionLocal() as db:
         # Concurrency guard
         active_result = await db.execute(
-            select(SyncEvent).where(SyncEvent.status == "started")
+            select(SyncEvent).where(SyncEvent.status == "started").limit(1)
         )
         if active_result.scalar_one_or_none():
             logger.warning("Skipping sync — another sync is already in progress")
@@ -1342,12 +1696,25 @@ async def run_sync(
                     )
                     tracked_repos = list(result.scalars().all())
 
+                # Sync org contributors before processing repos
+                try:
+                    await sync_org_contributors(db, client, ctx=ctx)
+                    await db.commit()
+                except Exception as e:
+                    ctx.sync_logger.warning("sync_org_contributors failed: %s", e)
+                    _add_log(ctx, "warn", f"Contributor sync failed: {e}")
+
                 sync_event.total_repos = len(tracked_repos)
                 await db.commit()
                 _add_log(ctx, "info", f"{len(tracked_repos)} repos to sync")
 
+                cancelled = False
                 for repo in tracked_repos:
-                    # Update current repo for progress visibility
+                    # Check for cancellation before each repo
+                    await _check_cancel(ctx)
+
+                    # Clear per-repo progress and set current repo
+                    _clear_repo_progress(sync_event)
                     sync_event.current_repo_name = repo.full_name
                     await db.commit()
 
@@ -1390,6 +1757,11 @@ async def run_sync(
                             status_label, prs, issues,
                         )
 
+                    except SyncCancelled:
+                        sync_log.info("Sync cancelled by user")
+                        cancelled = True
+                        break
+
                     except Exception as e:
                         sync_log.error("Error syncing %s: %s", repo.full_name, e)
 
@@ -1418,17 +1790,37 @@ async def run_sync(
                         _add_log(ctx, "error", str(e)[:200], repo=repo.full_name)
                         await db.commit()
 
+                # Backfill author links for any newly created developers
+                try:
+                    backfill = await backfill_author_links(db)
+                    total_backfilled = sum(backfill.values())
+                    if total_backfilled:
+                        _add_log(ctx, "info", f"Backfilled {total_backfilled} author links")
+                    await db.commit()
+                except Exception as e:
+                    ctx.sync_logger.warning("backfill_author_links failed: %s", e)
+
                 # Determine final status
-                failed_count = len(sync_event.repos_failed or [])
-                completed_count = len(sync_event.repos_completed or [])
-                if failed_count == 0:
-                    sync_event.status = "completed"
-                elif completed_count > 0:
-                    sync_event.status = "completed_with_errors"
+                if cancelled:
+                    sync_event.status = "cancelled"
                     sync_event.is_resumable = True
                 else:
-                    sync_event.status = "failed"
-                    sync_event.is_resumable = True
+                    failed_count = len(sync_event.repos_failed or [])
+                    completed_count = len(sync_event.repos_completed or [])
+                    if failed_count == 0:
+                        sync_event.status = "completed"
+                    elif completed_count > 0:
+                        sync_event.status = "completed_with_errors"
+                        sync_event.is_resumable = True
+                    else:
+                        sync_event.status = "failed"
+                        sync_event.is_resumable = True
+
+        except SyncCancelled:
+            sync_log.info("Sync cancelled at top level")
+            sync_event.status = "cancelled"
+            sync_event.is_resumable = True
+            _add_log(ctx, "warn", "Sync cancelled by user")
 
         except Exception as e:
             sync_log.error("Sync failed: %s", e)
@@ -1448,6 +1840,8 @@ async def run_sync(
         finally:
             now = datetime.now(timezone.utc)
             sync_event.current_repo_name = None
+            _clear_repo_progress(sync_event)
+            sync_event.cancel_requested = False
             sync_event.completed_at = now
             sync_event.rate_limit_wait_s = ctx.rate_limit_wait_total
             if sync_event.started_at:

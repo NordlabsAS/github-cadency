@@ -222,7 +222,7 @@ export default function AIAnalysis() {
             AI budget is {Math.round((aiSettings.budget_pct_used ?? 0) * 100)}% used this month
             ({aiSettings.current_month_tokens.toLocaleString()} / {aiSettings.monthly_token_budget?.toLocaleString()} tokens).
           </span>
-          <Link to="/settings/ai" className="ml-auto text-xs font-medium text-amber-700 underline hover:no-underline dark:text-amber-400">
+          <Link to="/admin/ai/settings" className="ml-auto text-xs font-medium text-amber-700 underline hover:no-underline dark:text-amber-400">
             Manage in AI Settings
           </Link>
         </div>

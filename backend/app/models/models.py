@@ -129,6 +129,7 @@ class PullRequest(Base):
     html_url: Mapped[str | None] = mapped_column(Text)
     head_sha: Mapped[str | None] = mapped_column(String(40))
     work_category: Mapped[str | None] = mapped_column(String(20))
+    author_github_username: Mapped[str | None] = mapped_column(String(255))
 
     repo: Mapped["Repository"] = relationship(back_populates="pull_requests")
     author: Mapped["Developer | None"] = relationship(back_populates="pull_requests")
@@ -153,6 +154,7 @@ class PRReview(Base):
     quality_tier: Mapped[str] = mapped_column(
         String(20), default="minimal", server_default="minimal"
     )
+    reviewer_github_username: Mapped[str | None] = mapped_column(String(255))
     submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     pr: Mapped["PullRequest"] = relationship(back_populates="reviews")
@@ -249,6 +251,7 @@ class Issue(Base):
     github_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     repo_id: Mapped[int] = mapped_column(ForeignKey("repositories.id"), nullable=False)
     assignee_id: Mapped[int | None] = mapped_column(ForeignKey("developers.id"))
+    assignee_github_username: Mapped[str | None] = mapped_column(String(255))
     number: Mapped[int] = mapped_column(Integer, nullable=False)
     title: Mapped[str | None] = mapped_column(Text)
     body: Mapped[str | None] = mapped_column(Text)
@@ -306,6 +309,11 @@ class SyncEvent(Base):
     since_override: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     total_repos: Mapped[int | None] = mapped_column(Integer)
     current_repo_name: Mapped[str | None] = mapped_column(String(512))
+    current_step: Mapped[str | None] = mapped_column(String(50))
+    current_repo_prs_total: Mapped[int | None] = mapped_column(Integer)
+    current_repo_prs_done: Mapped[int | None] = mapped_column(Integer)
+    current_repo_issues_total: Mapped[int | None] = mapped_column(Integer)
+    current_repo_issues_done: Mapped[int | None] = mapped_column(Integer)
     repos_completed: Mapped[list | None] = mapped_column(
         JSONB, server_default="[]"
     )
@@ -317,6 +325,9 @@ class SyncEvent(Base):
     )
     resumed_from_id: Mapped[int | None] = mapped_column(
         ForeignKey("sync_events.id")
+    )
+    cancel_requested: Mapped[bool] = mapped_column(
+        Boolean, server_default="false", default=False
     )
     log_summary: Mapped[list | None] = mapped_column(
         JSONB, server_default="[]"

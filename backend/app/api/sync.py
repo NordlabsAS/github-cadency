@@ -14,7 +14,7 @@ from app.schemas.schemas import (
     SyncStatusResponse,
     SyncTriggerRequest,
 )
-from app.services.github_sync import run_sync
+from app.services.github_sync import discover_org_repos, run_contributor_sync, run_sync
 
 router = APIRouter(dependencies=[Depends(require_admin)])
 
@@ -30,7 +30,7 @@ async def start_sync(
 ):
     """Start a new sync. Returns 409 if a sync is already running."""
     active = await db.execute(
-        select(SyncEvent).where(SyncEvent.status == "started")
+        select(SyncEvent).where(SyncEvent.status == "started").limit(1)
     )
     if active.scalar_one_or_none():
         raise HTTPException(409, "A sync is already in progress")
@@ -53,7 +53,7 @@ async def resume_sync(
     """Resume an interrupted sync, processing only remaining repos."""
     # Concurrency guard
     active = await db.execute(
-        select(SyncEvent).where(SyncEvent.status == "started")
+        select(SyncEvent).where(SyncEvent.status == "started").limit(1)
     )
     if active.scalar_one_or_none():
         raise HTTPException(409, "A sync is already in progress")
@@ -90,6 +90,64 @@ async def resume_sync(
     return {"status": "accepted", "remaining_repos": len(remaining)}
 
 
+@router.post("/sync/cancel", status_code=200)
+async def cancel_sync(db: AsyncSession = Depends(get_db)):
+    """Request cancellation of the active sync."""
+    active = await db.execute(
+        select(SyncEvent).where(SyncEvent.status == "started").limit(1)
+    )
+    event = active.scalar_one_or_none()
+    if not event:
+        raise HTTPException(404, "No active sync to cancel")
+
+    event.cancel_requested = True
+    await db.commit()
+    return {"status": "cancel_requested", "event_id": event.id}
+
+
+@router.post("/sync/contributors", status_code=202)
+async def sync_contributors(
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
+    """Sync org members from GitHub and backfill author links on existing data.
+
+    This does NOT run a full data sync — it only discovers contributors and
+    links them to existing PRs/reviews/issues. Returns 409 if a sync is running.
+    """
+    active = await db.execute(
+        select(SyncEvent).where(SyncEvent.status == "started").limit(1)
+    )
+    if active.scalar_one_or_none():
+        raise HTTPException(409, "A sync is already in progress")
+
+    background_tasks.add_task(run_contributor_sync)
+    return {"status": "accepted"}
+
+
+@router.post("/sync/force-stop", status_code=200)
+async def force_stop_sync(db: AsyncSession = Depends(get_db)):
+    """Force-stop a stale sync by marking it as failed + resumable."""
+    active = await db.execute(
+        select(SyncEvent).where(SyncEvent.status == "started").limit(1)
+    )
+    event = active.scalar_one_or_none()
+    if not event:
+        raise HTTPException(404, "No active sync to stop")
+
+    now = datetime.now(timezone.utc)
+    event.status = "cancelled"
+    event.is_resumable = True
+    event.cancel_requested = False
+    event.current_repo_name = None
+    event.current_step = None
+    event.completed_at = now
+    if event.started_at:
+        event.duration_s = int((now - event.started_at).total_seconds())
+    await db.commit()
+    return {"status": "force_stopped", "event_id": event.id}
+
+
 # --- Sync Status ---
 
 
@@ -98,14 +156,17 @@ async def sync_status(db: AsyncSession = Depends(get_db)):
     """Get current sync status: active sync + summary stats."""
     # Active sync
     active_result = await db.execute(
-        select(SyncEvent).where(SyncEvent.status == "started")
+        select(SyncEvent)
+        .where(SyncEvent.status == "started")
+        .order_by(SyncEvent.started_at.desc())
+        .limit(1)
     )
     active_event = active_result.scalar_one_or_none()
 
     # Last completed sync
     last_result = await db.execute(
         select(SyncEvent)
-        .where(SyncEvent.status.in_(["completed", "completed_with_errors", "failed"]))
+        .where(SyncEvent.status.in_(["completed", "completed_with_errors", "failed", "cancelled"]))
         .order_by(SyncEvent.completed_at.desc())
         .limit(1)
     )
@@ -143,10 +204,21 @@ async def sync_status(db: AsyncSession = Depends(get_db)):
 # --- Repo Management ---
 
 
-@router.get("/sync/repos", response_model=list[RepoResponse])
-async def list_repos(db: AsyncSession = Depends(get_db)):
-    """List all repos with PR and issue counts."""
-    # Subquery for PR count per repo
+@router.post("/sync/discover-repos", response_model=list[RepoResponse])
+async def discover_repos(db: AsyncSession = Depends(get_db)):
+    """Fetch repos from the GitHub org and upsert them into the database.
+
+    This does NOT run a full sync — it only discovers repos so users can
+    select which ones to track/sync.
+    """
+    await discover_org_repos(db)
+
+    # Return the full repo list (same as GET /sync/repos)
+    return await _list_repos_query(db)
+
+
+async def _list_repos_query(db: AsyncSession) -> list[dict]:
+    """Shared repo listing query used by both list and discover endpoints."""
     pr_count_sq = (
         select(
             PullRequest.repo_id,
@@ -155,7 +227,6 @@ async def list_repos(db: AsyncSession = Depends(get_db)):
         .group_by(PullRequest.repo_id)
         .subquery()
     )
-    # Subquery for issue count per repo
     issue_count_sq = (
         select(
             Issue.repo_id,
@@ -179,7 +250,7 @@ async def list_repos(db: AsyncSession = Depends(get_db)):
     repos = []
     for row in result.all():
         repo = row[0]
-        repo_dict = {
+        repos.append({
             "id": repo.id,
             "github_id": repo.github_id,
             "name": repo.name,
@@ -191,9 +262,14 @@ async def list_repos(db: AsyncSession = Depends(get_db)):
             "created_at": repo.created_at,
             "pr_count": row[1],
             "issue_count": row[2],
-        }
-        repos.append(repo_dict)
+        })
     return repos
+
+
+@router.get("/sync/repos", response_model=list[RepoResponse])
+async def list_repos(db: AsyncSession = Depends(get_db)):
+    """List all repos with PR and issue counts."""
+    return await _list_repos_query(db)
 
 
 @router.patch("/sync/repos/{repo_id}/track", response_model=RepoResponse)
@@ -235,6 +311,18 @@ async def toggle_tracking(
 
 
 # --- Sync History ---
+
+
+@router.get("/sync/events/{event_id}", response_model=SyncEventResponse)
+async def get_sync_event(
+    event_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Get a single sync event by ID."""
+    event = await db.get(SyncEvent, event_id)
+    if not event:
+        raise HTTPException(404, "Sync event not found")
+    return event
 
 
 @router.get("/sync/events", response_model=list[SyncEventResponse])

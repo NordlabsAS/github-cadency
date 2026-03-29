@@ -10,6 +10,19 @@ export function useRepos() {
   })
 }
 
+export function useDiscoverRepos() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () =>
+      apiFetch<Repo[]>('/sync/discover-repos', { method: 'POST' }),
+    onSuccess: (repos) => {
+      qc.setQueryData(['repos'], repos)
+      toast.success(`Discovered ${repos.length} repositories`)
+    },
+    onError: () => toast.error('Failed to discover repositories from GitHub'),
+  })
+}
+
 export function useToggleTracking() {
   const qc = useQueryClient()
   return useMutation({
@@ -79,5 +92,65 @@ export function useResumeSync() {
       toast.success('Sync resumed')
     },
     onError: () => toast.error('Failed to resume sync'),
+  })
+}
+
+export function useCancelSync() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () =>
+      apiFetch('/sync/cancel', { method: 'POST' }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['sync-status'] })
+      qc.invalidateQueries({ queryKey: ['sync-events'] })
+      toast.success('Cancel requested — sync will stop after current step')
+    },
+    onError: () => toast.error('Failed to cancel sync'),
+  })
+}
+
+export function useForceStopSync() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () =>
+      apiFetch('/sync/force-stop', { method: 'POST' }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['sync-status'] })
+      qc.invalidateQueries({ queryKey: ['sync-events'] })
+      toast.success('Sync force-stopped')
+    },
+    onError: () => toast.error('Failed to force-stop sync'),
+  })
+}
+
+export function useSyncContributors() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () =>
+      apiFetch('/sync/contributors', { method: 'POST' }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['sync-status'] })
+      qc.invalidateQueries({ queryKey: ['sync-events'] })
+      toast.success('Contributor sync started')
+    },
+    onError: (error: Error) => {
+      if (error.message.includes('409')) {
+        toast.error('A sync is already in progress')
+      } else {
+        toast.error('Failed to sync contributors')
+      }
+    },
+  })
+}
+
+export function useSyncEvent(eventId: number | undefined) {
+  return useQuery<SyncEvent>({
+    queryKey: ['sync-event', eventId],
+    queryFn: () => apiFetch(`/sync/events/${eventId}`),
+    enabled: !!eventId,
+    refetchInterval: (query) => {
+      const status = query.state.data?.status
+      return status === 'started' ? 3_000 : false
+    },
   })
 }

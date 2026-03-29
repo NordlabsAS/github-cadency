@@ -46,6 +46,7 @@ async def lifespan(app: FastAPI):
         args=["full"],
         hour=settings.full_sync_cron_hour,
         id="full_sync",
+        misfire_grace_time=None,  # Run even after restart
     )
     scheduler.start()
     logger.info(

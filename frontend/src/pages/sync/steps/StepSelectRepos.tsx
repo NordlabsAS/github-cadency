@@ -3,12 +3,16 @@ import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Badge } from '@/components/ui/badge'
+import { Loader2, RefreshCw } from 'lucide-react'
 import type { Repo } from '@/utils/types'
 
 interface StepSelectReposProps {
   repos: Repo[]
   selectedIds: number[]
   onChangeSelection: (ids: number[]) => void
+  isLoading?: boolean
+  onDiscover?: () => void
+  isDiscovering?: boolean
 }
 
 function timeAgo(dateStr: string | null): string {
@@ -27,6 +31,9 @@ export default function StepSelectRepos({
   repos,
   selectedIds,
   onChangeSelection,
+  isLoading,
+  onDiscover,
+  isDiscovering,
 }: StepSelectReposProps) {
   const [search, setSearch] = useState('')
 
@@ -46,6 +53,35 @@ export default function StepSelectRepos({
     } else {
       onChangeSelection([...selectedIds, id])
     }
+  }
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center py-8 text-sm text-muted-foreground">
+        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+        Loading repositories...
+      </div>
+    )
+  }
+
+  if (repos.length === 0) {
+    return (
+      <div className="flex flex-col items-center gap-3 rounded-md border border-dashed py-8">
+        <p className="text-sm text-muted-foreground">
+          No repositories found. Fetch them from your GitHub organization first.
+        </p>
+        {onDiscover && (
+          <Button onClick={onDiscover} disabled={isDiscovering}>
+            {isDiscovering ? (
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            ) : (
+              <RefreshCw className="mr-2 h-4 w-4" />
+            )}
+            {isDiscovering ? 'Discovering...' : 'Discover Repos'}
+          </Button>
+        )}
+      </div>
+    )
   }
 
   return (
@@ -71,6 +107,21 @@ export default function StepSelectRepos({
         >
           Deselect All
         </Button>
+        {onDiscover && (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={onDiscover}
+            disabled={isDiscovering}
+          >
+            {isDiscovering ? (
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            ) : (
+              <RefreshCw className="mr-2 h-4 w-4" />
+            )}
+            Refresh
+          </Button>
+        )}
         <span className="ml-auto text-sm text-muted-foreground">
           {selectedIds.length} selected
         </span>

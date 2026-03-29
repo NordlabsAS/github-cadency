@@ -1,7 +1,7 @@
 import { useReducer, useEffect, useMemo, useRef } from 'react'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
-import { useRepos, useStartSync } from '@/hooks/useSync'
+import { useRepos, useDiscoverRepos, useStartSync } from '@/hooks/useSync'
 import StepChooseScope from './steps/StepChooseScope'
 import StepSelectRepos from './steps/StepSelectRepos'
 import StepTimeRange from './steps/StepTimeRange'
@@ -83,7 +83,8 @@ function computeSinceDate(timeRange: TimeRangeOption, customDate: string): strin
 
 export default function SyncWizard() {
   const [state, dispatch] = useReducer(reducer, initialState)
-  const { data: repos = [] } = useRepos()
+  const { data: repos = [], isLoading: reposLoading } = useRepos()
+  const discoverRepos = useDiscoverRepos()
   const startSync = useStartSync()
 
   // Pre-select tracked repos once on initial load
@@ -169,6 +170,9 @@ export default function SyncWizard() {
             repos={repos}
             selectedIds={state.selectedRepoIds}
             onChangeSelection={(ids) => dispatch({ type: 'SET_REPOS', repoIds: ids })}
+            isLoading={reposLoading}
+            onDiscover={() => discoverRepos.mutate()}
+            isDiscovering={discoverRepos.isPending}
           />
           <div className="flex justify-between">
             <Button variant="ghost" onClick={() => dispatch({ type: 'PREV_STEP' })}>

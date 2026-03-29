@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { Badge } from '@/components/ui/badge'
 import {
   Table,
@@ -9,9 +9,7 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { cn } from '@/lib/utils'
-import SyncErrorDetail from './SyncErrorDetail'
-import SyncLogViewer from './SyncLogViewer'
-import type { SyncEvent, SyncError } from '@/utils/types'
+import type { SyncEvent } from '@/utils/types'
 
 interface SyncHistoryTableProps {
   events: SyncEvent[]
@@ -22,6 +20,7 @@ function statusVariant(status: string | null) {
     case 'completed': return 'default' as const
     case 'started': return 'secondary' as const
     case 'failed': return 'destructive' as const
+    case 'cancelled': return 'outline' as const
     case 'completed_with_errors': return 'outline' as const
     default: return 'outline' as const
   }
@@ -53,7 +52,7 @@ function formatDuration(seconds: number | null): string {
 }
 
 export default function SyncHistoryTable({ events }: SyncHistoryTableProps) {
-  const [expandedId, setExpandedId] = useState<number | null>(null)
+  const navigate = useNavigate()
 
   return (
     <div className="rounded-md border">
@@ -73,7 +72,6 @@ export default function SyncHistoryTable({ events }: SyncHistoryTableProps) {
         <TableBody>
           {events.map((event) => {
             const isActive = event.status === 'started'
-            const isExpanded = expandedId === event.id
             const errorCount = (event.errors ?? []).length
             const failedCount = (event.repos_failed ?? []).length
             const completedCount = event.repos_completed?.length ?? event.repos_synced ?? 0
@@ -83,10 +81,10 @@ export default function SyncHistoryTable({ events }: SyncHistoryTableProps) {
               <TableRow
                 key={event.id}
                 className={cn(
-                  'cursor-pointer',
+                  'cursor-pointer hover:bg-muted/50',
                   isActive && 'border-l-4 border-l-primary',
                 )}
-                onClick={() => setExpandedId(isExpanded ? null : event.id)}
+                onClick={() => navigate(`/admin/sync/${event.id}`)}
               >
                 <TableCell>
                   <div className="flex items-center gap-1.5">
@@ -141,53 +139,6 @@ export default function SyncHistoryTable({ events }: SyncHistoryTableProps) {
               </TableCell>
             </TableRow>
           )}
-
-          {/* Expanded detail row */}
-          {expandedId != null && (() => {
-            const event = events.find((e) => e.id === expandedId)
-            if (!event) return null
-            const errors = (event.errors ?? []).filter(
-              (e): e is SyncError => e != null && typeof e === 'object' && 'step' in e
-            )
-            const logs = event.log_summary ?? []
-            return (
-              <TableRow key={`${expandedId}-detail`}>
-                <TableCell colSpan={8} className="bg-muted/30">
-                  <div className="space-y-3 py-2">
-                    {errors.length > 0 && (
-                      <div>
-                        <div className="mb-1 text-xs font-medium text-muted-foreground">Errors</div>
-                        <SyncErrorDetail errors={errors} />
-                      </div>
-                    )}
-                    {(event.repos_failed ?? []).length > 0 && (
-                      <div>
-                        <div className="mb-1 text-xs font-medium text-muted-foreground">Failed Repos</div>
-                        <div className="space-y-1">
-                          {(event.repos_failed ?? []).map((f, i) => (
-                            <div key={i} className="flex items-center gap-2 text-xs">
-                              <Badge variant="destructive" className="text-xs">failed</Badge>
-                              <span className="font-medium">{f.repo_name}</span>
-                              <span className="text-muted-foreground truncate">{f.error}</span>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                    {logs.length > 0 && (
-                      <div>
-                        <div className="mb-1 text-xs font-medium text-muted-foreground">Sync Log</div>
-                        <SyncLogViewer logs={logs} />
-                      </div>
-                    )}
-                    {errors.length === 0 && logs.length === 0 && (event.repos_failed ?? []).length === 0 && (
-                      <p className="text-xs text-muted-foreground">No detailed info for this sync event.</p>
-                    )}
-                  </div>
-                </TableCell>
-              </TableRow>
-            )
-          })()}
         </TableBody>
       </Table>
     </div>

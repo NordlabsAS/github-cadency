@@ -1,6 +1,8 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { useQueryClient } from '@tanstack/react-query'
 import { useDevelopers, useCreateDeveloper, useUpdateDeveloper } from '@/hooks/useDevelopers'
+import { useSyncContributors, useSyncStatus } from '@/hooks/useSync'
 import ErrorCard from '@/components/ErrorCard'
 import TableSkeleton from '@/components/TableSkeleton'
 import { Button } from '@/components/ui/button'
@@ -23,6 +25,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
+import { CheckCircle2, RefreshCw, XCircle, Users } from 'lucide-react'
 import type { Developer, DeveloperCreate } from '@/utils/types'
 
 const ROLES = ['developer', 'senior_developer', 'lead', 'architect', 'devops', 'qa', 'intern']
@@ -153,13 +156,36 @@ function DeveloperForm({
 
 export default function TeamRegistry() {
   const navigate = useNavigate()
+  const qc = useQueryClient()
   const [teamFilter, setTeamFilter] = useState('')
   const { data: developers, isLoading, isError, refetch } = useDevelopers(teamFilter || undefined)
   const createDev = useCreateDeveloper()
+  const syncContributors = useSyncContributors()
+  const { data: syncStatus } = useSyncStatus()
   const [editDev, setEditDev] = useState<Developer | null>(null)
   const updateDev = useUpdateDeveloper(editDev?.id ?? 0)
   const [addOpen, setAddOpen] = useState(false)
   const [editOpen, setEditOpen] = useState(false)
+  const [showResult, setShowResult] = useState(false)
+
+  const activeContributorSync =
+    syncStatus?.active_sync?.sync_type === 'contributors' ? syncStatus.active_sync : null
+  const anySyncActive = !!syncStatus?.active_sync
+
+  // Refresh developer list and show completion banner when contributor sync finishes
+  const wasActiveRef = useRef(false)
+  useEffect(() => {
+    if (wasActiveRef.current && !activeContributorSync) {
+      qc.invalidateQueries({ queryKey: ['developers'] })
+      setShowResult(true)
+      const timer = setTimeout(() => setShowResult(false), 10_000)
+      wasActiveRef.current = false
+      return () => clearTimeout(timer)
+    }
+    wasActiveRef.current = !!activeContributorSync
+  }, [activeContributorSync, qc])
+
+  const lastCompleted = syncStatus?.last_completed
 
   const teams = [...new Set((developers ?? []).map((d) => d.team).filter(Boolean))] as string[]
 
@@ -179,6 +205,15 @@ export default function TeamRegistry() {
             ))}
           </select>
 
+          <Button
+            variant="outline"
+            onClick={() => syncContributors.mutate()}
+            disabled={syncContributors.isPending || anySyncActive}
+          >
+            <RefreshCw className={`mr-2 h-4 w-4 ${syncContributors.isPending || activeContributorSync ? 'animate-spin' : ''}`} />
+            Sync Contributors
+          </Button>
+
           <Dialog open={addOpen} onOpenChange={setAddOpen}>
             <DialogTrigger asChild>
               <Button>Add Developer</Button>
@@ -197,6 +232,46 @@ export default function TeamRegistry() {
           </Dialog>
         </div>
       </div>
+
+      {/* Active contributor sync banner */}
+      {activeContributorSync && (
+        <div className="flex items-center gap-3 rounded-lg border border-primary/20 bg-primary/5 px-4 py-3">
+          <span className="relative flex h-2.5 w-2.5">
+            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-primary opacity-75" />
+            <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-primary" />
+          </span>
+          <Users className="h-4 w-4 text-primary" />
+          <span className="text-sm font-medium">Syncing contributors...</span>
+          {(activeContributorSync.repos_synced ?? 0) > 0 && (
+            <Badge variant="secondary">
+              {activeContributorSync.repos_synced} new
+            </Badge>
+          )}
+          <span className="ml-auto text-xs text-muted-foreground">
+            {(activeContributorSync.log_summary ?? []).slice(-1)[0]?.msg ?? 'Starting...'}
+          </span>
+        </div>
+      )}
+
+      {/* Completion result banner (fades after 10s) */}
+      {!activeContributorSync && showResult && lastCompleted?.sync_type === 'contributors' && (
+        <div className={`flex items-center gap-3 rounded-lg border px-4 py-3 ${
+          lastCompleted.status === 'completed'
+            ? 'border-emerald-500/20 bg-emerald-500/5'
+            : 'border-red-500/20 bg-red-500/5'
+        }`}>
+          {lastCompleted.status === 'completed' ? (
+            <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+          ) : (
+            <XCircle className="h-4 w-4 text-red-600" />
+          )}
+          <span className="text-sm">
+            {lastCompleted.status === 'completed'
+              ? `Contributor sync complete${lastCompleted.repos_synced ? ` — ${lastCompleted.repos_synced} new developers added` : ''}`
+              : 'Contributor sync failed'}
+          </span>
+        </div>
+      )}
 
       {isError ? (
         <ErrorCard message="Could not load developers." onRetry={() => refetch()} />

@@ -171,10 +171,16 @@ export interface SyncEvent {
   since_override: string | null
   total_repos: number | null
   current_repo_name: string | null
+  current_step: string | null
+  current_repo_prs_total: number | null
+  current_repo_prs_done: number | null
+  current_repo_issues_total: number | null
+  current_repo_issues_done: number | null
   repos_completed: SyncRepoResult[] | null
   repos_failed: SyncRepoFailure[] | null
   is_resumable: boolean
   resumed_from_id: number | null
+  cancel_requested: boolean
   log_summary: SyncLogEntry[] | null
   rate_limit_wait_s: number | null
 }
