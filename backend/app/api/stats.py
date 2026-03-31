@@ -10,7 +10,9 @@ from app.models.models import Developer, Repository
 from app.schemas.schemas import (
     AppRole,
     AuthUser,
-    BenchmarksResponse,
+    BenchmarkGroupResponse,
+    BenchmarkGroupUpdate,
+    BenchmarksV2Response,
     CIStatsResponse,
     CodeChurnResponse,
     DORAMetricsResponse,
@@ -21,21 +23,30 @@ from app.schemas.schemas import (
     DeveloperStatsWithPercentilesResponse,
     DeveloperTrendsResponse,
     IssueCreatorStatsResponse,
+    IssueLinkageByDeveloper,
     IssueLinkageStats,
     IssueQualityStats,
     RepoStatsResponse,
+    RepoSummaryItem,
     RiskAssessment,
     RiskSummaryResponse,
     StalePRsResponse,
     TeamStatsResponse,
+    UnassignedRoleCountResponse,
+    RecategorizeRequest,
+    WorkAllocationItem,
+    WorkAllocationItemsResponse,
     WorkAllocationResponse,
     WorkloadResponse,
 )
 from app.services.collaboration import get_collaboration, get_collaboration_pair_detail, get_collaboration_trends
 from app.services.risk import get_pr_risk, get_risk_summary
-from app.services.work_category import get_work_allocation
+from app.services.work_categories import load_valid_categories
+from app.services.work_category import get_work_allocation, get_work_allocation_items, recategorize_item
 from app.services.stats import (
-    get_benchmarks,
+    get_benchmark_groups,
+    get_benchmarks_v2,
+    update_benchmark_group,
     get_ci_stats,
     get_code_churn,
     get_dora_metrics,
@@ -44,9 +55,11 @@ from app.services.stats import (
     get_developer_trends,
     get_issue_creator_stats,
     get_issue_label_distribution,
+    get_issue_linkage_by_developer,
     get_issue_linkage_stats,
     get_issue_quality_stats,
     get_repo_stats,
+    get_repos_summary,
     get_stale_prs,
     get_team_stats,
     get_workload,
@@ -90,6 +103,16 @@ async def team_stats(
     return await get_team_stats(db, team, date_from, date_to)
 
 
+@router.get("/stats/repos/summary", response_model=list[RepoSummaryItem])
+async def repos_summary(
+    date_from: datetime | None = Query(None),
+    date_to: datetime | None = Query(None),
+    _: AuthUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    return await get_repos_summary(db, date_from, date_to)
+
+
 @router.get("/stats/repo/{repo_id}", response_model=RepoStatsResponse)
 async def repo_stats(
     repo_id: int,
@@ -104,15 +127,40 @@ async def repo_stats(
     return await get_repo_stats(db, repo_id, date_from, date_to)
 
 
-@router.get("/stats/benchmarks", response_model=BenchmarksResponse)
+@router.get("/stats/benchmark-groups", response_model=list[BenchmarkGroupResponse])
+async def benchmark_groups(
+    _: AuthUser = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    return await get_benchmark_groups(db)
+
+
+@router.patch("/stats/benchmark-groups/{group_key}", response_model=BenchmarkGroupResponse)
+async def patch_benchmark_group(
+    group_key: str,
+    update: BenchmarkGroupUpdate,
+    _: AuthUser = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        return await update_benchmark_group(db, group_key, update)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/stats/benchmarks", response_model=BenchmarksV2Response)
 async def benchmarks(
+    group: str | None = Query(None),
     team: str | None = Query(None),
     date_from: datetime | None = Query(None),
     date_to: datetime | None = Query(None),
     _: AuthUser = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    return await get_benchmarks(db, team, date_from, date_to)
+    try:
+        return await get_benchmarks_v2(db, group, team, date_from, date_to)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 @router.get(
@@ -203,6 +251,17 @@ async def issue_linkage(
     db: AsyncSession = Depends(get_db),
 ):
     return await get_issue_linkage_stats(db, team, date_from, date_to)
+
+
+@router.get("/stats/issue-linkage/developers", response_model=IssueLinkageByDeveloper)
+async def issue_linkage_by_developer(
+    team: str | None = Query(None),
+    date_from: datetime | None = Query(None),
+    date_to: datetime | None = Query(None),
+    _: AuthUser = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    return await get_issue_linkage_by_developer(db, team, date_from, date_to)
 
 
 @router.get("/stats/issues/quality", response_model=IssueQualityStats)
@@ -310,3 +369,38 @@ async def work_allocation(
     db: AsyncSession = Depends(get_db),
 ):
     return await get_work_allocation(db, team, date_from, date_to, use_ai)
+
+
+@router.get("/stats/work-allocation/items", response_model=WorkAllocationItemsResponse)
+async def work_allocation_items(
+    category: str = Query(...),
+    type: str = Query("all"),
+    date_from: datetime | None = Query(None),
+    date_to: datetime | None = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    _: AuthUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    valid_cats = await load_valid_categories(db)
+    if category not in valid_cats:
+        raise HTTPException(status_code=422, detail=f"category must be one of: {', '.join(sorted(valid_cats))}")
+    if type not in ("all", "pr", "issue"):
+        raise HTTPException(status_code=422, detail="type must be one of: all, pr, issue")
+    return await get_work_allocation_items(db, category, type, date_from, date_to, page, page_size)
+
+
+@router.patch("/stats/work-allocation/items/{item_type}/{item_id}/category", response_model=WorkAllocationItem)
+async def recategorize_work_item(
+    item_type: str,
+    item_id: int,
+    body: RecategorizeRequest,
+    _: AuthUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    if item_type not in ("pr", "issue"):
+        raise HTTPException(status_code=400, detail="item_type must be 'pr' or 'issue'")
+    try:
+        return await recategorize_item(db, item_type, item_id, body.category)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))

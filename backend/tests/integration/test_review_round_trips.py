@@ -131,6 +131,18 @@ class TestReviewRoundTripsInTeamStats:
 
 
 class TestReviewRoundsInBenchmarks:
+    @pytest.fixture(autouse=True)
+    async def seed_groups(self, db_session):
+        from app.models.models import BenchmarkGroupConfig
+        group = BenchmarkGroupConfig(
+            group_key="ics", display_name="IC Engineers", display_order=1,
+            roles=["developer", "senior_developer", "lead", "architect", "intern"],
+            metrics=["prs_merged", "time_to_merge_h", "review_rounds", "reviews_given"],
+            min_team_size=3, is_default=True,
+        )
+        db_session.add(group)
+        await db_session.commit()
+
     @pytest.mark.asyncio
     async def test_benchmarks_include_review_rounds(
         self, db_session, client, sample_developer, sample_developer_b, sample_repo

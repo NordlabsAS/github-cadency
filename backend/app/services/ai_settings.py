@@ -1,6 +1,5 @@
 """AI settings, cost controls, and usage tracking service."""
 
-import logging
 from datetime import datetime, timezone
 from typing import Any
 
@@ -8,6 +7,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings as app_settings
+from app.logging import get_logger
 from app.models.models import AIAnalysis, AISettings, AIUsageLog
 from app.services.exceptions import AIFeatureDisabledError
 from app.schemas.schemas import (
@@ -19,7 +19,7 @@ from app.schemas.schemas import (
     DailyUsage,
 )
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # Feature metadata — labels, descriptions, disable-impact text
 FEATURE_META: dict[str, dict[str, str]] = {
@@ -504,6 +504,82 @@ async def get_daily_usage(
         )
         for day, data in sorted(daily.items())
     ]
+
+
+async def estimate_analysis_cost(
+    db: AsyncSession,
+    feature: str,
+    scope_type: str | None = None,
+    scope_id: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+) -> AICostEstimate:
+    """Estimate token usage and cost for an AI analysis without calling Claude."""
+    from datetime import timedelta
+
+    ai_settings = await get_ai_settings(db)
+
+    now = datetime.now(timezone.utc)
+    df = datetime.fromisoformat(date_from) if date_from else now - timedelta(days=30)
+    dt = datetime.fromisoformat(date_to) if date_to else now
+
+    est_input = 0
+    est_output = 0
+    data_items = 0
+    note = ""
+
+    if feature == "general_analysis":
+        from app.services.ai_analysis import _gather_scope_texts
+
+        if scope_type and scope_id:
+            items, _ = await _gather_scope_texts(db, scope_type, scope_id, df, dt)
+            data_items = len(items)
+            est_input = data_items * 125 + 150
+            est_output = 2000
+            note = f"Based on {data_items} data items in scope"
+        else:
+            note = "Provide scope_type and scope_id for accurate estimate"
+
+    elif feature == "one_on_one_prep":
+        est_input = 5000
+        est_output = 3000
+        data_items = 1
+        note = "Fixed estimate based on typical 1:1 context size"
+
+    elif feature == "team_health":
+        from sqlalchemy import func as sqlfunc
+
+        from app.models.models import Developer
+
+        dev_count = await db.scalar(
+            select(sqlfunc.count()).select_from(Developer).where(
+                Developer.is_active.is_(True)
+            )
+        ) or 0
+        est_input = dev_count * 200 + 3000
+        est_output = 3000
+        data_items = dev_count
+        note = f"Based on {dev_count} active developers"
+
+    elif feature == "work_categorization":
+        est_input = 200 * 10 + 60
+        est_output = 200 * 5
+        data_items = 200
+        note = "Max estimate (200 items per batch)"
+
+    cost = compute_cost(
+        est_input, est_output,
+        ai_settings.input_token_price_per_million,
+        ai_settings.output_token_price_per_million,
+    )
+
+    return AICostEstimate(
+        estimated_input_tokens=est_input,
+        estimated_output_tokens=est_output,
+        estimated_cost_usd=round(cost, 4),
+        data_items=data_items,
+        note=note,
+    )
 
 
 async def get_usage_summary(

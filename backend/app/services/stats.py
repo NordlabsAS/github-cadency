@@ -4,20 +4,29 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import and_, case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.models import Deployment, Developer, Issue, IssueComment, PRCheckRun, PRFile, PRReview, PRReviewComment, PullRequest, RepoTreeFile, Repository
+from app.models.models import BenchmarkGroupConfig, Deployment, Developer, Issue, IssueComment, PRCheckRun, PRFile, PRReview, PRReviewComment, PullRequest, RepoTreeFile, Repository
 from app.schemas.schemas import (
+    BenchmarkGroupResponse,
+    BenchmarkGroupUpdate,
     BenchmarkMetric,
-    BenchmarksResponse,
+    BenchmarkMetricInfo,
+    BenchmarksV2Response,
+    DeveloperBenchmarkRow,
     DeveloperStatsResponse,
+    MetricValue,
+    TeamMedianRow,
     DeveloperStatsWithPercentilesResponse,
     DeveloperTrendsResponse,
     DeveloperWorkload,
     IssueCreatorStats,
     IssueCreatorStatsResponse,
+    IssueLinkageByDeveloper,
+    DeveloperLinkageRow,
     IssueLinkageStats,
     IssueQualityStats,
     PercentilePlacement,
     RepoStatsResponse,
+    RepoSummaryItem,
     ReviewBreakdown,
     ReviewQualityBreakdown,
     StalePR,
@@ -372,6 +381,20 @@ async def get_developer_stats(
         )
     ) or 0
 
+    # PRs linked to issues (have non-empty closes_issue_numbers)
+    linkage_rows = (await db.execute(
+        select(PullRequest.closes_issue_numbers).where(
+            PullRequest.author_id == developer_id,
+            PullRequest.created_at >= date_from,
+            PullRequest.created_at <= date_to,
+            PullRequest.closes_issue_numbers.isnot(None),
+        )
+    )).all()
+    prs_linked_to_issue = sum(1 for r in linkage_rows if r[0])
+    issue_linkage_rate = (
+        round(prs_linked_to_issue / prs_opened, 4) if prs_opened > 0 else None
+    )
+
     return DeveloperStatsResponse(
         prs_opened=prs_opened,
         prs_merged=prs_merged,
@@ -403,6 +426,121 @@ async def get_developer_stats(
         comment_type_distribution=comment_type_distribution,
         nit_ratio=nit_ratio,
         blocker_catch_rate=blocker_catch_rate,
+        prs_linked_to_issue=prs_linked_to_issue,
+        issue_linkage_rate=issue_linkage_rate,
+    )
+
+
+async def get_activity_summary(
+    db: AsyncSession,
+    developer_id: int,
+) -> "ActivitySummaryResponse":
+    from app.schemas.schemas import ActivitySummaryResponse
+    from app.services.work_category import classify_work_item
+
+    # PRs authored / merged / open
+    prs_authored = await db.scalar(
+        select(func.count()).where(PullRequest.author_id == developer_id)
+    ) or 0
+    prs_merged = await db.scalar(
+        select(func.count()).where(
+            PullRequest.author_id == developer_id,
+            PullRequest.is_merged.is_(True),
+        )
+    ) or 0
+    prs_open = await db.scalar(
+        select(func.count()).where(
+            PullRequest.author_id == developer_id,
+            PullRequest.state == "open",
+            PullRequest.is_draft.isnot(True),
+        )
+    ) or 0
+
+    # Reviews given
+    reviews_given = await db.scalar(
+        select(func.count()).where(PRReview.reviewer_id == developer_id)
+    ) or 0
+
+    # Issues created / assigned
+    issues_created = await db.scalar(
+        select(func.count()).where(Issue.creator_id == developer_id)
+    ) or 0
+    issues_assigned = await db.scalar(
+        select(func.count()).where(Issue.assignee_id == developer_id)
+    ) or 0
+
+    # Repos touched (authored PRs + reviewed PRs)
+    pr_repos = select(PullRequest.repo_id).where(
+        PullRequest.author_id == developer_id
+    )
+    review_repos = select(PullRequest.repo_id).join(
+        PRReview, PRReview.pr_id == PullRequest.id
+    ).where(PRReview.reviewer_id == developer_id)
+    repos_union = pr_repos.union(review_repos).subquery()
+    repos_touched = await db.scalar(
+        select(func.count()).select_from(repos_union)
+    ) or 0
+
+    # First / last activity across PRs and reviews
+    pr_first = await db.scalar(
+        select(func.min(PullRequest.created_at)).where(
+            PullRequest.author_id == developer_id
+        )
+    )
+    pr_last = await db.scalar(
+        select(func.max(
+            func.coalesce(PullRequest.merged_at, PullRequest.closed_at, PullRequest.created_at)
+        )).where(
+            PullRequest.author_id == developer_id
+        )
+    )
+    review_first = await db.scalar(
+        select(func.min(PRReview.submitted_at)).where(
+            PRReview.reviewer_id == developer_id
+        )
+    )
+    review_last = await db.scalar(
+        select(func.max(PRReview.submitted_at)).where(
+            PRReview.reviewer_id == developer_id
+        )
+    )
+    candidates_first = [d for d in [pr_first, review_first] if d is not None]
+    candidates_last = [d for d in [pr_last, review_last] if d is not None]
+    first_activity = min(candidates_first) if candidates_first else None
+    last_activity = max(candidates_last) if candidates_last else None
+
+    # Work category breakdown for merged PRs
+    rows = (await db.execute(
+        select(
+            PullRequest.work_category,
+            PullRequest.labels,
+            PullRequest.title,
+        ).where(
+            PullRequest.author_id == developer_id,
+            PullRequest.is_merged.is_(True),
+        )
+    )).all()
+
+    cat_counts: dict[str, int] = {}
+    for row in rows:
+        stored_cat = row[0]
+        if stored_cat:
+            cat = stored_cat
+        else:
+            cat = classify_work_item(row[1], row[2])
+        cat_counts[cat] = cat_counts.get(cat, 0) + 1
+
+    return ActivitySummaryResponse(
+        prs_authored=prs_authored,
+        prs_merged=prs_merged,
+        prs_open=prs_open,
+        reviews_given=reviews_given,
+        issues_created=issues_created,
+        issues_assigned=issues_assigned,
+        repos_touched=repos_touched,
+        first_activity=first_activity,
+        last_activity=last_activity,
+        work_categories=cat_counts,
     )
 
 
@@ -444,7 +582,7 @@ async def get_team_stats(
         )
     ) or 0
 
-    merge_rate = (total_merged / total_prs * 100) if total_prs > 0 else None
+    merge_rate = (total_merged / total_prs) if total_prs > 0 else None
 
     # Avg time to first review
     avg_ttfr = await db.scalar(
@@ -638,7 +776,191 @@ async def get_repo_stats(
     )
 
 
+async def get_repos_summary(
+    db: AsyncSession,
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+) -> list[RepoSummaryItem]:
+    date_from, date_to = _default_range(date_from, date_to)
+    period_length = date_to - date_from
+    prev_to = date_from
+    prev_from = prev_to - period_length
+
+    # Get all tracked repo IDs
+    tracked_ids = (
+        await db.scalars(
+            select(Repository.id).where(Repository.is_tracked.is_(True))
+        )
+    ).all()
+    if not tracked_ids:
+        return []
+
+    repo_id_set = list(tracked_ids)
+
+    # --- Current period queries ---
+
+    # 1. PR counts + last PR date
+    pr_rows = (
+        await db.execute(
+            select(
+                PullRequest.repo_id,
+                func.count().label("total_prs"),
+                func.max(PullRequest.created_at).label("last_pr_date"),
+            )
+            .where(
+                PullRequest.repo_id.in_(repo_id_set),
+                PullRequest.created_at >= date_from,
+                PullRequest.created_at <= date_to,
+            )
+            .group_by(PullRequest.repo_id)
+        )
+    ).all()
+    pr_map = {r.repo_id: r for r in pr_rows}
+
+    # 2. Merged PRs + avg merge time (current)
+    merged_rows = (
+        await db.execute(
+            select(
+                PullRequest.repo_id,
+                func.count().label("total_merged"),
+                func.avg(PullRequest.time_to_merge_s).label("avg_ttm"),
+            )
+            .where(
+                PullRequest.repo_id.in_(repo_id_set),
+                PullRequest.is_merged.is_(True),
+                PullRequest.merged_at >= date_from,
+                PullRequest.merged_at <= date_to,
+            )
+            .group_by(PullRequest.repo_id)
+        )
+    ).all()
+    merged_map = {r.repo_id: r for r in merged_rows}
+
+    # 3. Issue counts (current)
+    issue_rows = (
+        await db.execute(
+            select(
+                Issue.repo_id,
+                func.count().label("total_issues"),
+            )
+            .where(
+                Issue.repo_id.in_(repo_id_set),
+                Issue.created_at >= date_from,
+                Issue.created_at <= date_to,
+            )
+            .group_by(Issue.repo_id)
+        )
+    ).all()
+    issue_map = {r.repo_id: r for r in issue_rows}
+
+    # 4. Review counts (current)
+    review_rows = (
+        await db.execute(
+            select(
+                PullRequest.repo_id,
+                func.count().label("total_reviews"),
+            )
+            .select_from(PRReview)
+            .join(PullRequest, PRReview.pr_id == PullRequest.id)
+            .where(
+                PullRequest.repo_id.in_(repo_id_set),
+                PRReview.submitted_at >= date_from,
+                PRReview.submitted_at <= date_to,
+            )
+            .group_by(PullRequest.repo_id)
+        )
+    ).all()
+    review_map = {r.repo_id: r for r in review_rows}
+
+    # --- Previous period queries (for trends) ---
+
+    # 5. PR counts (previous)
+    prev_pr_rows = (
+        await db.execute(
+            select(
+                PullRequest.repo_id,
+                func.count().label("total_prs"),
+            )
+            .where(
+                PullRequest.repo_id.in_(repo_id_set),
+                PullRequest.created_at >= prev_from,
+                PullRequest.created_at <= prev_to,
+            )
+            .group_by(PullRequest.repo_id)
+        )
+    ).all()
+    prev_pr_map = {r.repo_id: r for r in prev_pr_rows}
+
+    # 6. Merged PRs + avg merge time (previous)
+    prev_merged_rows = (
+        await db.execute(
+            select(
+                PullRequest.repo_id,
+                func.count().label("total_merged"),
+                func.avg(PullRequest.time_to_merge_s).label("avg_ttm"),
+            )
+            .where(
+                PullRequest.repo_id.in_(repo_id_set),
+                PullRequest.is_merged.is_(True),
+                PullRequest.merged_at >= prev_from,
+                PullRequest.merged_at <= prev_to,
+            )
+            .group_by(PullRequest.repo_id)
+        )
+    ).all()
+    prev_merged_map = {r.repo_id: r for r in prev_merged_rows}
+
+    # --- Assemble results ---
+    results = []
+    for rid in repo_id_set:
+        pr = pr_map.get(rid)
+        merged = merged_map.get(rid)
+        issue = issue_map.get(rid)
+        review = review_map.get(rid)
+        prev_pr = prev_pr_map.get(rid)
+        prev_merged = prev_merged_map.get(rid)
+
+        avg_ttm = merged.avg_ttm if merged else None
+        prev_avg_ttm = prev_merged.avg_ttm if prev_merged else None
+
+        results.append(
+            RepoSummaryItem(
+                repo_id=rid,
+                total_prs=pr.total_prs if pr else 0,
+                total_merged=merged.total_merged if merged else 0,
+                total_issues=issue.total_issues if issue else 0,
+                total_reviews=review.total_reviews if review else 0,
+                avg_time_to_merge_hours=avg_ttm / 3600 if avg_ttm else None,
+                last_pr_date=pr.last_pr_date if pr else None,
+                prev_total_prs=prev_pr.total_prs if prev_pr else 0,
+                prev_total_merged=prev_merged.total_merged if prev_merged else 0,
+                prev_avg_time_to_merge_hours=prev_avg_ttm / 3600 if prev_avg_ttm else None,
+            )
+        )
+
+    return results
+
+
 # --- M2: Team Benchmarks ---
+
+# Canonical registry of all benchmark-able metrics
+BENCHMARK_METRICS: dict[str, dict] = {
+    "prs_merged":              {"label": "PRs Merged",             "lower_is_better": False, "unit": "count"},
+    "time_to_merge_h":         {"label": "Time to Merge",          "lower_is_better": True,  "unit": "hours"},
+    "time_to_first_review_h":  {"label": "Time to First Review",   "lower_is_better": True,  "unit": "hours"},
+    "time_to_approve_h":       {"label": "Time to Approve",        "lower_is_better": True,  "unit": "hours"},
+    "time_after_approve_h":    {"label": "Post-Approval Merge",    "lower_is_better": True,  "unit": "hours"},
+    "reviews_given":           {"label": "Reviews Given",          "lower_is_better": False, "unit": "count"},
+    "review_turnaround_h":     {"label": "Review Turnaround",      "lower_is_better": True,  "unit": "hours"},
+    "additions_per_pr":        {"label": "Additions per PR",       "lower_is_better": False, "unit": "lines"},
+    "review_rounds":           {"label": "Review Rounds",          "lower_is_better": True,  "unit": "count"},
+    "review_quality_score":    {"label": "Review Quality",         "lower_is_better": False, "unit": "score"},
+    "changes_requested_rate":  {"label": "Changes Requested Rate", "lower_is_better": False, "unit": "ratio"},
+    "blocker_catch_rate":      {"label": "Blocker Catch Rate",     "lower_is_better": False, "unit": "ratio"},
+    "issues_closed":           {"label": "Issues Closed",          "lower_is_better": False, "unit": "count"},
+    "prs_merged_bugfix":       {"label": "Bugfix PRs Merged",     "lower_is_better": False, "unit": "count"},
+    "issue_linkage_rate":      {"label": "Issue Linkage Rate",    "lower_is_better": False, "unit": "ratio"},
+}
 
 
 async def _compute_per_developer_metrics(
@@ -646,14 +968,26 @@ async def _compute_per_developer_metrics(
     dev_ids: list[int],
     date_from: datetime,
     date_to: datetime,
+    requested_metrics: set[str] | None = None,
 ) -> dict[str, list[float]]:
-    """Compute benchmark metrics per developer using batch queries (GROUP BY)."""
+    """Compute benchmark metrics per developer using batch queries (GROUP BY).
+
+    If requested_metrics is provided, only compute those metrics (avoids unnecessary queries).
+    """
+    all_base_metrics = [
+        "time_to_merge_h", "time_to_first_review_h", "time_to_approve_h",
+        "time_after_approve_h", "prs_merged", "review_turnaround_h",
+        "reviews_given", "additions_per_pr", "review_rounds",
+    ]
+    extended_metrics = [
+        "review_quality_score", "changes_requested_rate", "blocker_catch_rate",
+        "issues_closed", "prs_merged_bugfix", "issue_linkage_rate",
+    ]
+    target = set(requested_metrics) if requested_metrics else set(all_base_metrics)
+    all_keys = [k for k in all_base_metrics + extended_metrics if k in target]
+
     if not dev_ids:
-        return {k: [] for k in [
-            "time_to_merge_h", "time_to_first_review_h", "time_to_approve_h",
-            "time_after_approve_h", "prs_merged", "review_turnaround_h",
-            "reviews_given", "additions_per_pr", "review_rounds",
-        ]}
+        return {k: [] for k in all_keys}
 
     dev_set = set(dev_ids)
 
@@ -732,46 +1066,223 @@ async def _compute_per_developer_metrics(
     )).all()
     turnaround_map: dict[int, float] = {row.reviewer_id: row.avg_turnaround for row in turnaround_rows}
 
+    # --- Extended batches (only run when requested) ---
+
+    # Batch 5: Review quality score per reviewer
+    need_quality = "review_quality_score" in target
+    quality_map: dict[int, float] = {}
+    if need_quality:
+        quality_rows = (await db.execute(
+            select(
+                PRReview.reviewer_id,
+                PRReview.quality_tier,
+                func.count().label("cnt"),
+            ).where(
+                PRReview.reviewer_id.in_(dev_ids),
+                PRReview.submitted_at >= date_from,
+                PRReview.submitted_at <= date_to,
+                PRReview.quality_tier.isnot(None),
+            ).group_by(PRReview.reviewer_id, PRReview.quality_tier)
+        )).all()
+        # Aggregate per developer
+        tier_counts: dict[int, dict[str, int]] = {}
+        for row in quality_rows:
+            tc = tier_counts.setdefault(row.reviewer_id, {})
+            tc[row.quality_tier] = row.cnt
+        tier_weights = {"rubber_stamp": 0, "minimal": 1, "standard": 3, "thorough": 5}
+        for dev_id, tiers in tier_counts.items():
+            total = sum(tiers.values())
+            if total > 0:
+                raw = sum(tier_weights.get(t, 0) * c for t, c in tiers.items()) / total
+                quality_map[dev_id] = round(raw * 2, 2)  # 0-10 scale
+
+    # Batch 6: Changes requested rate + review counts for blocker catch rate
+    need_cr_rate = "changes_requested_rate" in target
+    cr_rate_map: dict[int, float] = {}
+    review_total_map: dict[int, int] = {}
+    if need_cr_rate:
+        state_rows = (await db.execute(
+            select(
+                PRReview.reviewer_id,
+                PRReview.state,
+                func.count().label("cnt"),
+            ).where(
+                PRReview.reviewer_id.in_(dev_ids),
+                PRReview.submitted_at >= date_from,
+                PRReview.submitted_at <= date_to,
+            ).group_by(PRReview.reviewer_id, PRReview.state)
+        )).all()
+        state_counts: dict[int, dict[str, int]] = {}
+        for row in state_rows:
+            sc = state_counts.setdefault(row.reviewer_id, {})
+            sc[row.state] = row.cnt
+        for dev_id, states in state_counts.items():
+            total = sum(states.values())
+            review_total_map[dev_id] = total
+            cr = states.get("CHANGES_REQUESTED", 0)
+            cr_rate_map[dev_id] = round(cr / total, 4) if total > 0 else 0.0
+
+    # Batch 7: Blocker catch rate per reviewer
+    need_blocker = "blocker_catch_rate" in target
+    blocker_map: dict[int, float] = {}
+    if need_blocker:
+        blocker_rows = (await db.execute(
+            select(
+                PRReview.reviewer_id,
+                func.count(func.distinct(PRReviewComment.review_id)).label("blocker_reviews"),
+            )
+            .select_from(PRReviewComment)
+            .join(PRReview, PRReviewComment.review_id == PRReview.id)
+            .where(
+                PRReview.reviewer_id.in_(dev_ids),
+                PRReview.submitted_at >= date_from,
+                PRReview.submitted_at <= date_to,
+                PRReviewComment.comment_type == "blocker",
+            ).group_by(PRReview.reviewer_id)
+        )).all()
+        blocker_count_map = {row.reviewer_id: row.blocker_reviews for row in blocker_rows}
+        # Need total reviews — reuse from batch 6 or compute
+        if not review_total_map:
+            total_rows = (await db.execute(
+                select(
+                    PRReview.reviewer_id,
+                    func.count().label("total"),
+                ).where(
+                    PRReview.reviewer_id.in_(dev_ids),
+                    PRReview.submitted_at >= date_from,
+                    PRReview.submitted_at <= date_to,
+                ).group_by(PRReview.reviewer_id)
+            )).all()
+            review_total_map = {row.reviewer_id: row.total for row in total_rows}
+        for dev_id in dev_ids:
+            total = review_total_map.get(dev_id, 0)
+            bc = blocker_count_map.get(dev_id, 0)
+            blocker_map[dev_id] = round(bc / total, 4) if total > 0 else 0.0
+
+    # Batch 8: Issues closed per assignee
+    need_issues = "issues_closed" in target
+    issues_map: dict[int, int] = {}
+    if need_issues:
+        issue_rows = (await db.execute(
+            select(
+                Issue.assignee_id,
+                func.count().label("closed"),
+            ).where(
+                Issue.assignee_id.in_(dev_ids),
+                Issue.state == "closed",
+                Issue.closed_at >= date_from,
+                Issue.closed_at <= date_to,
+            ).group_by(Issue.assignee_id)
+        )).all()
+        issues_map = {row.assignee_id: row.closed for row in issue_rows}
+
+    # Batch 9: Bugfix PRs merged per author
+    need_bugfix = "prs_merged_bugfix" in target
+    bugfix_map: dict[int, int] = {}
+    if need_bugfix:
+        bugfix_rows = (await db.execute(
+            select(
+                PullRequest.author_id,
+                func.count().label("bugfix_count"),
+            ).where(
+                PullRequest.author_id.in_(dev_ids),
+                PullRequest.is_merged.is_(True),
+                PullRequest.merged_at >= date_from,
+                PullRequest.merged_at <= date_to,
+                PullRequest.work_category == "bugfix",
+            ).group_by(PullRequest.author_id)
+        )).all()
+        bugfix_map = {row.author_id: row.bugfix_count for row in bugfix_rows}
+
+    # Batch 10: Issue linkage rate per author
+    need_linkage = "issue_linkage_rate" in target
+    linkage_rate_map: dict[int, float] = {}
+    if need_linkage:
+        # Total PRs per author
+        total_pr_rows = (await db.execute(
+            select(
+                PullRequest.author_id,
+                func.count().label("total"),
+            ).where(
+                PullRequest.author_id.in_(dev_ids),
+                PullRequest.created_at >= date_from,
+                PullRequest.created_at <= date_to,
+            ).group_by(PullRequest.author_id)
+        )).all()
+        total_pr_map = {row.author_id: row.total for row in total_pr_rows}
+        # PRs with linked issues per author (fetch + Python filter for SQLite compat)
+        linkage_raw = (await db.execute(
+            select(
+                PullRequest.author_id,
+                PullRequest.closes_issue_numbers,
+            ).where(
+                PullRequest.author_id.in_(dev_ids),
+                PullRequest.created_at >= date_from,
+                PullRequest.created_at <= date_to,
+                PullRequest.closes_issue_numbers.isnot(None),
+            )
+        )).all()
+        linked_pr_map: dict[int, int] = {}
+        for row in linkage_raw:
+            if row.closes_issue_numbers:
+                linked_pr_map[row.author_id] = linked_pr_map.get(row.author_id, 0) + 1
+        for dev_id in dev_ids:
+            total = total_pr_map.get(dev_id, 0)
+            linked = linked_pr_map.get(dev_id, 0)
+            linkage_rate_map[dev_id] = round(linked / total, 4) if total > 0 else 0.0
+
     # Assemble per-developer metrics in consistent order
-    metrics: dict[str, list[float]] = {
-        "time_to_merge_h": [],
-        "time_to_first_review_h": [],
-        "time_to_approve_h": [],
-        "time_after_approve_h": [],
-        "prs_merged": [],
-        "review_turnaround_h": [],
-        "reviews_given": [],
-        "additions_per_pr": [],
-        "review_rounds": [],
-    }
+    metrics: dict[str, list[float]] = {k: [] for k in all_keys}
 
     for dev_id in dev_ids:
         m = merged_map.get(dev_id, {})
         c = created_map.get(dev_id, {})
         prs_merged = m.get("prs_merged", 0)
 
-        metrics["prs_merged"].append(float(prs_merged))
-        avg_ttm = m.get("avg_ttm")
-        metrics["time_to_merge_h"].append(avg_ttm / 3600 if avg_ttm else 0.0)
-        avg_ttfr = c.get("avg_ttfr")
-        metrics["time_to_first_review_h"].append(avg_ttfr / 3600 if avg_ttfr else 0.0)
-        avg_tta = c.get("avg_tta")
-        metrics["time_to_approve_h"].append(avg_tta / 3600 if avg_tta else 0.0)
-        avg_taa = m.get("avg_taa")
-        metrics["time_after_approve_h"].append(avg_taa / 3600 if avg_taa else 0.0)
-        metrics["reviews_given"].append(float(reviews_map.get(dev_id, 0)))
-        avg_turnaround = turnaround_map.get(dev_id)
-        metrics["review_turnaround_h"].append(avg_turnaround / 3600 if avg_turnaround else 0.0)
-        total_additions = m.get("total_additions", 0)
-        metrics["additions_per_pr"].append(total_additions / prs_merged if prs_merged > 0 else 0.0)
-        avg_rounds = m.get("avg_rounds")
-        metrics["review_rounds"].append(float(avg_rounds) if avg_rounds is not None else 0.0)
+        if "prs_merged" in target:
+            metrics["prs_merged"].append(float(prs_merged))
+        if "time_to_merge_h" in target:
+            avg_ttm = m.get("avg_ttm")
+            metrics["time_to_merge_h"].append(avg_ttm / 3600 if avg_ttm else 0.0)
+        if "time_to_first_review_h" in target:
+            avg_ttfr = c.get("avg_ttfr")
+            metrics["time_to_first_review_h"].append(avg_ttfr / 3600 if avg_ttfr else 0.0)
+        if "time_to_approve_h" in target:
+            avg_tta = c.get("avg_tta")
+            metrics["time_to_approve_h"].append(avg_tta / 3600 if avg_tta else 0.0)
+        if "time_after_approve_h" in target:
+            avg_taa = m.get("avg_taa")
+            metrics["time_after_approve_h"].append(avg_taa / 3600 if avg_taa else 0.0)
+        if "reviews_given" in target:
+            metrics["reviews_given"].append(float(reviews_map.get(dev_id, 0)))
+        if "review_turnaround_h" in target:
+            avg_turnaround = turnaround_map.get(dev_id)
+            metrics["review_turnaround_h"].append(avg_turnaround / 3600 if avg_turnaround else 0.0)
+        if "additions_per_pr" in target:
+            total_additions = m.get("total_additions", 0)
+            metrics["additions_per_pr"].append(total_additions / prs_merged if prs_merged > 0 else 0.0)
+        if "review_rounds" in target:
+            avg_rounds = m.get("avg_rounds")
+            metrics["review_rounds"].append(float(avg_rounds) if avg_rounds is not None else 0.0)
+        if "review_quality_score" in target:
+            metrics["review_quality_score"].append(quality_map.get(dev_id, 0.0))
+        if "changes_requested_rate" in target:
+            metrics["changes_requested_rate"].append(cr_rate_map.get(dev_id, 0.0))
+        if "blocker_catch_rate" in target:
+            metrics["blocker_catch_rate"].append(blocker_map.get(dev_id, 0.0))
+        if "issues_closed" in target:
+            metrics["issues_closed"].append(float(issues_map.get(dev_id, 0)))
+        if "prs_merged_bugfix" in target:
+            metrics["prs_merged_bugfix"].append(float(bugfix_map.get(dev_id, 0)))
+        if "issue_linkage_rate" in target:
+            metrics["issue_linkage_rate"].append(linkage_rate_map.get(dev_id, 0.0))
 
     return metrics
 
 
 def _percentiles(values: list[float]) -> BenchmarkMetric:
     """Compute p25, p50, p75 using linear interpolation."""
+    values = [float(v) for v in values]
     if len(values) < 2:
         v = values[0] if values else 0.0
         return BenchmarkMetric(p25=v, p50=v, p75=v)
@@ -787,6 +1298,7 @@ def _percentiles(values: list[float]) -> BenchmarkMetric:
 _LOWER_IS_BETTER = {
     "time_to_merge_h", "time_to_first_review_h", "review_turnaround_h",
     "review_rounds", "time_to_approve_h", "time_after_approve_h",
+    "change_failure_rate",
 }
 
 
@@ -814,37 +1326,210 @@ def _percentile_band(
         return "above_p75"
 
 
-async def get_benchmarks(
+async def get_benchmark_groups(
     db: AsyncSession,
+) -> list[BenchmarkGroupResponse]:
+    """Return all benchmark groups ordered by display_order."""
+    rows = (await db.execute(
+        select(BenchmarkGroupConfig).order_by(BenchmarkGroupConfig.display_order)
+    )).scalars().all()
+    return [BenchmarkGroupResponse.model_validate(r) for r in rows]
+
+
+async def update_benchmark_group(
+    db: AsyncSession,
+    group_key: str,
+    update: BenchmarkGroupUpdate,
+) -> BenchmarkGroupResponse:
+    """Update a benchmark group's config."""
+    from app.models.models import RoleDefinition
+
+    row = (await db.execute(
+        select(BenchmarkGroupConfig).where(BenchmarkGroupConfig.group_key == group_key)
+    )).scalar_one_or_none()
+    if not row:
+        raise ValueError(f"Benchmark group '{group_key}' not found")
+
+    if update.roles is not None:
+        valid_result = await db.execute(select(RoleDefinition.role_key))
+        valid_roles = {r[0] for r in valid_result.all()}
+        invalid = set(update.roles) - valid_roles
+        if invalid:
+            raise ValueError(f"Invalid roles: {invalid}")
+        row.roles = update.roles
+    if update.metrics is not None:
+        invalid_metrics = set(update.metrics) - set(BENCHMARK_METRICS.keys())
+        if invalid_metrics:
+            raise ValueError(f"Invalid metrics: {invalid_metrics}")
+        if not update.metrics:
+            raise ValueError("Metrics list cannot be empty")
+        row.metrics = update.metrics
+    if update.display_name is not None:
+        row.display_name = update.display_name
+    if update.display_order is not None:
+        row.display_order = update.display_order
+    if update.min_team_size is not None:
+        row.min_team_size = update.min_team_size
+
+    await db.commit()
+    await db.refresh(row)
+    return BenchmarkGroupResponse.model_validate(row)
+
+
+async def get_benchmarks_v2(
+    db: AsyncSession,
+    group_key: str | None = None,
     team: str | None = None,
     date_from: datetime | None = None,
     date_to: datetime | None = None,
-) -> BenchmarksResponse:
+) -> BenchmarksV2Response:
+    """Compute role-based peer group benchmarks."""
     date_from, date_to = _default_range(date_from, date_to)
 
-    dev_query = select(Developer.id).where(Developer.is_active.is_(True))
+    # Load group config
+    if group_key:
+        group_row = (await db.execute(
+            select(BenchmarkGroupConfig).where(BenchmarkGroupConfig.group_key == group_key)
+        )).scalar_one_or_none()
+    else:
+        # Default to first group by display_order
+        group_row = (await db.execute(
+            select(BenchmarkGroupConfig).order_by(BenchmarkGroupConfig.display_order).limit(1)
+        )).scalar_one_or_none()
+
+    if not group_row:
+        raise ValueError(f"Benchmark group '{group_key}' not found")
+
+    group = BenchmarkGroupResponse.model_validate(group_row)
+
+    # Query developers in this group's roles (excluding system/non-contributor categories)
+    from app.models.models import RoleDefinition
+
+    excluded_categories = ("system", "non_contributor")
+    excluded_roles_q = select(RoleDefinition.role_key).where(
+        RoleDefinition.contribution_category.in_(excluded_categories)
+    )
+    dev_query = select(
+        Developer.id, Developer.display_name, Developer.avatar_url,
+        Developer.team, Developer.role,
+    ).where(
+        Developer.is_active.is_(True),
+        Developer.role.in_(group.roles),
+        Developer.role.notin_(excluded_roles_q),
+    )
     if team:
         dev_query = dev_query.where(Developer.team == team)
-    dev_result = await db.execute(dev_query)
-    dev_ids = [row[0] for row in dev_result.all()]
+    dev_rows = (await db.execute(dev_query)).all()
+
+    dev_ids = [r.id for r in dev_rows]
+    dev_info = {r.id: r for r in dev_rows}
+
+    # Build metric info list
+    metric_info = [
+        BenchmarkMetricInfo(
+            key=k,
+            label=BENCHMARK_METRICS[k]["label"],
+            lower_is_better=BENCHMARK_METRICS[k]["lower_is_better"],
+            unit=BENCHMARK_METRICS[k]["unit"],
+        )
+        for k in group.metrics if k in BENCHMARK_METRICS
+    ]
 
     if not dev_ids:
-        return BenchmarksResponse(
+        return BenchmarksV2Response(
+            group=group,
             period_start=date_from,
             period_end=date_to,
             sample_size=0,
             team=team,
             metrics={},
+            metric_info=metric_info,
+            developers=[],
+            team_comparison=None,
         )
 
-    per_dev = await _compute_per_developer_metrics(db, dev_ids, date_from, date_to)
+    # Compute per-developer metrics for group's metric set only
+    requested = set(group.metrics) & set(BENCHMARK_METRICS.keys())
+    per_dev = await _compute_per_developer_metrics(db, dev_ids, date_from, date_to, requested)
 
-    return BenchmarksResponse(
+    # Compute percentiles
+    benchmarks = {name: _percentiles(values) for name, values in per_dev.items()}
+
+    # Build developer rows with per-metric values and bands
+    developers: list[DeveloperBenchmarkRow] = []
+    for i, dev_id in enumerate(dev_ids):
+        info = dev_info[dev_id]
+        dev_metrics: dict[str, MetricValue] = {}
+        for metric_key in per_dev:
+            val = per_dev[metric_key][i]
+            bm = benchmarks.get(metric_key)
+            band = _percentile_band(val, bm, metric_key) if bm else None
+            dev_metrics[metric_key] = MetricValue(
+                value=round(val, 2) if val is not None else None,
+                percentile_band=band,
+            )
+        developers.append(DeveloperBenchmarkRow(
+            developer_id=dev_id,
+            display_name=info.display_name,
+            avatar_url=info.avatar_url,
+            team=info.team,
+            role=info.role,
+            metrics=dev_metrics,
+        ))
+
+    # Sort by primary metric (first in group's metrics list), best first
+    primary = group.metrics[0] if group.metrics else None
+    if primary and primary in per_dev:
+        is_lower_better = primary in _LOWER_IS_BETTER
+        developers.sort(
+            key=lambda d: (
+                d.metrics.get(primary, MetricValue(value=None, percentile_band=None)).value is None,
+                (d.metrics.get(primary, MetricValue(value=None, percentile_band=None)).value or 0.0)
+                * (1 if is_lower_better else -1),
+            )
+        )
+
+    # Team comparison (when no team filter and multiple teams)
+    team_comparison: list[TeamMedianRow] | None = None
+    if not team:
+        team_devs: dict[str, list[int]] = {}
+        for dev_id in dev_ids:
+            t = dev_info[dev_id].team
+            if t:
+                team_devs.setdefault(t, []).append(dev_id)
+
+        eligible_teams = {
+            t: ids for t, ids in team_devs.items()
+            if len(ids) >= group_row.min_team_size
+        }
+        if len(eligible_teams) >= 2:
+            team_comparison = []
+            for t, t_ids in sorted(eligible_teams.items()):
+                t_medians: dict[str, float | None] = {}
+                for metric_key, values in per_dev.items():
+                    # Extract values for this team's developers
+                    t_values = [values[dev_ids.index(did)] for did in t_ids]
+                    if t_values:
+                        pct = _percentiles(t_values)
+                        t_medians[metric_key] = pct.p50
+                    else:
+                        t_medians[metric_key] = None
+                team_comparison.append(TeamMedianRow(
+                    team=t,
+                    sample_size=len(t_ids),
+                    metrics=t_medians,
+                ))
+
+    return BenchmarksV2Response(
+        group=group,
         period_start=date_from,
         period_end=date_to,
         sample_size=len(dev_ids),
         team=team,
-        metrics={name: _percentiles(values) for name, values in per_dev.items()},
+        metrics=benchmarks,
+        metric_info=metric_info,
+        developers=developers,
+        team_comparison=team_comparison,
     )
 
 
@@ -858,10 +1543,22 @@ async def get_developer_stats_with_percentiles(
     base = await get_developer_stats(db, developer_id, date_from, date_to)
 
     # Get the developer's team for team-relative benchmarks
+    # Filter peer group to same contribution category so PMs don't dilute dev percentiles
+    from app.models.models import RoleDefinition
+    from app.services.roles import get_role_category_map
+
     dev = await db.get(Developer, developer_id)
     dev_query = select(Developer.id).where(Developer.is_active.is_(True))
     if dev and dev.team:
         dev_query = dev_query.where(Developer.team == dev.team)
+    if dev and dev.role:
+        category_map = await get_role_category_map(db)
+        dev_category = category_map.get(dev.role)
+        if dev_category:
+            same_category_roles = [
+                k for k, v in category_map.items() if v == dev_category
+            ]
+            dev_query = dev_query.where(Developer.role.in_(same_category_roles))
     dev_result = await db.execute(dev_query)
     dev_ids = [row[0] for row in dev_result.all()]
 
@@ -1668,6 +2365,98 @@ async def get_issue_linkage_stats(
         avg_prs_per_issue=avg_prs_per_issue,
         issues_with_multiple_prs=issues_with_multiple_prs,
         prs_without_linked_issues=prs_without_linked_issues,
+    )
+
+
+async def get_issue_linkage_by_developer(
+    db: AsyncSession,
+    team: str | None = None,
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    attention_threshold: float = 0.2,
+) -> IssueLinkageByDeveloper:
+    date_from, date_to = _default_range(date_from, date_to)
+
+    # Get active developers, optionally filtered by team
+    dev_filters = [Developer.is_active.is_(True)]
+    if team:
+        dev_filters.append(Developer.team == team)
+    dev_result = await db.execute(
+        select(Developer.id, Developer.github_username, Developer.display_name, Developer.team)
+        .where(*dev_filters)
+    )
+    devs = dev_result.all()
+    if not devs:
+        return IssueLinkageByDeveloper(
+            developers=[], team_average_rate=0.0,
+            attention_threshold=attention_threshold, attention_developers=[],
+        )
+    dev_ids = [d.id for d in devs]
+    dev_lookup = {d.id: d for d in devs}
+
+    # Total PRs per author
+    total_rows = (await db.execute(
+        select(
+            PullRequest.author_id,
+            func.count().label("total"),
+        ).where(
+            PullRequest.author_id.in_(dev_ids),
+            PullRequest.created_at >= date_from,
+            PullRequest.created_at <= date_to,
+        ).group_by(PullRequest.author_id)
+    )).all()
+    total_map = {row.author_id: row.total for row in total_rows}
+
+    # PRs with linked issues per author (fetch + Python filter for SQLite compat)
+    linkage_raw = (await db.execute(
+        select(
+            PullRequest.author_id,
+            PullRequest.closes_issue_numbers,
+        ).where(
+            PullRequest.author_id.in_(dev_ids),
+            PullRequest.created_at >= date_from,
+            PullRequest.created_at <= date_to,
+            PullRequest.closes_issue_numbers.isnot(None),
+        )
+    )).all()
+    linked_map: dict[int, int] = {}
+    for row in linkage_raw:
+        if row.closes_issue_numbers:
+            linked_map[row.author_id] = linked_map.get(row.author_id, 0) + 1
+
+    # Build per-developer rows (only devs with at least 1 PR)
+    rows: list[DeveloperLinkageRow] = []
+    total_prs_all = 0
+    total_linked_all = 0
+    for dev_id in dev_ids:
+        prs_total = total_map.get(dev_id, 0)
+        if prs_total == 0:
+            continue
+        prs_linked = linked_map.get(dev_id, 0)
+        total_prs_all += prs_total
+        total_linked_all += prs_linked
+        d = dev_lookup[dev_id]
+        rows.append(DeveloperLinkageRow(
+            developer_id=dev_id,
+            github_username=d.github_username,
+            display_name=d.display_name or d.github_username,
+            team=d.team,
+            prs_total=prs_total,
+            prs_linked=prs_linked,
+            linkage_rate=round(prs_linked / prs_total, 4),
+        ))
+
+    # Sort by linkage_rate ascending so worst offenders are first
+    rows.sort(key=lambda r: r.linkage_rate)
+
+    team_avg = round(total_linked_all / total_prs_all, 4) if total_prs_all > 0 else 0.0
+    attention = [r for r in rows if r.linkage_rate < attention_threshold]
+
+    return IssueLinkageByDeveloper(
+        developers=rows,
+        team_average_rate=team_avg,
+        attention_threshold=attention_threshold,
+        attention_developers=attention,
     )
 
 

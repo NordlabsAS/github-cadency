@@ -1,10 +1,11 @@
-import { useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { useMemo } from 'react'
+import { Link, useSearchParams } from 'react-router-dom'
 import { useDateRange } from '@/hooks/useDateRange'
-import { useBenchmarks, useAllDeveloperStats } from '@/hooks/useStats'
+import { useBenchmarkGroups, useBenchmarksV2 } from '@/hooks/useStats'
 import { useDevelopers } from '@/hooks/useDevelopers'
 import ErrorCard from '@/components/ErrorCard'
 import StatCardSkeleton from '@/components/StatCardSkeleton'
+import SortableHead from '@/components/SortableHead'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -17,171 +18,120 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { cn } from '@/lib/utils'
-import type { BenchmarkMetric, Developer, DeveloperStatsWithPercentiles, ReviewBreakdown } from '@/utils/types'
-
-// Metric display config
-interface MetricConfig {
-  label: string
-  lowerIsBetter: boolean
-  format: (v: number) => string
-}
-
-const metricConfigs: Record<string, MetricConfig> = {
-  prs_merged: { label: 'PRs Merged', lowerIsBetter: false, format: (v) => v.toFixed(0) },
-  time_to_merge_h: { label: 'Time to Merge (h)', lowerIsBetter: true, format: (v) => v.toFixed(1) },
-  time_to_first_review_h: { label: 'Time to First Review (h)', lowerIsBetter: true, format: (v) => v.toFixed(1) },
-  time_to_approve_h: { label: 'Time to Approve (h)', lowerIsBetter: true, format: (v) => v.toFixed(1) },
-  time_after_approve_h: { label: 'Post-Approval Merge (h)', lowerIsBetter: true, format: (v) => v.toFixed(1) },
-  reviews_given: { label: 'Reviews Given', lowerIsBetter: false, format: (v) => v.toFixed(0) },
-  review_turnaround_h: { label: 'Review Turnaround (h)', lowerIsBetter: true, format: (v) => v.toFixed(1) },
-  additions_per_pr: { label: 'Additions per PR', lowerIsBetter: false, format: (v) => v.toFixed(0) },
-  review_rounds: { label: 'Review Rounds', lowerIsBetter: true, format: (v) => v.toFixed(1) },
-}
+import type {
+  BenchmarkMetric,
+  BenchmarkMetricInfo,
+  DeveloperBenchmarkRow,
+} from '@/utils/types'
 
 // Percentile band styles
 const bandStyles = {
-  above_p75: { normal: 'bg-emerald-500/10 text-emerald-600', label: 'Top 25%' },
-  p50_to_p75: { normal: 'bg-emerald-500/5 text-emerald-600', label: '50th–75th' },
-  p25_to_p50: { normal: 'bg-amber-500/10 text-amber-600', label: '25th–50th' },
-  below_p25: { normal: 'bg-red-500/10 text-red-600', label: 'Bottom 25%' },
-}
+  above_p75: { color: 'bg-emerald-500/10 text-emerald-600', bar: 'bg-emerald-500', label: 'Top 25%' },
+  p50_to_p75: { color: 'bg-emerald-500/5 text-emerald-600', bar: 'bg-emerald-400', label: '50th\u201375th' },
+  p25_to_p50: { color: 'bg-amber-500/10 text-amber-600', bar: 'bg-amber-400', label: '25th\u201350th' },
+  below_p25: { color: 'bg-red-500/10 text-red-600', bar: 'bg-red-400', label: 'Bottom 25%' },
+} as const
 
 type Band = keyof typeof bandStyles
 
-function getBand(value: number, metric: BenchmarkMetric, lowerIsBetter: boolean): Band {
-  if (lowerIsBetter) {
-    if (value <= metric.p25) return 'above_p75'
-    if (value <= metric.p50) return 'p50_to_p75'
-    if (value <= metric.p75) return 'p25_to_p50'
-    return 'below_p25'
+function formatMetricValue(value: number | null, info: BenchmarkMetricInfo): string {
+  if (value == null) return '\u2014'
+  switch (info.unit) {
+    case 'hours': return value.toFixed(1)
+    case 'ratio': return (value * 100).toFixed(1) + '%'
+    case 'percent': return value.toFixed(1) + '%'
+    case 'score': return value.toFixed(1)
+    case 'per_day': return value.toFixed(2)
+    default: return value.toFixed(0)
   }
-  if (value >= metric.p75) return 'above_p75'
-  if (value >= metric.p50) return 'p50_to_p75'
-  if (value >= metric.p25) return 'p25_to_p50'
-  return 'below_p25'
-}
-
-// Map benchmark metric key → field on DeveloperStatsWithPercentiles
-const metricToStatsField: Record<string, string> = {
-  prs_merged: 'prs_merged',
-  time_to_merge_h: 'avg_time_to_merge_hours',
-  time_to_first_review_h: 'avg_time_to_first_review_hours',
-  time_to_approve_h: 'avg_time_to_approve_hours',
-  time_after_approve_h: 'avg_time_after_approve_hours',
-  reviews_given: 'reviews_given',
-}
-
-function extractMetricValue(
-  stats: DeveloperStatsWithPercentiles,
-  metricKey: string,
-): number | null {
-  // Try percentiles first (backend returns these for the matching key)
-  const placement = stats.percentiles?.[metricKey]
-  if (placement) return placement.value
-
-  // Fallback to raw stats field
-  const field = metricToStatsField[metricKey]
-  if (!field) return null
-
-  const raw = stats[field as keyof DeveloperStatsWithPercentiles]
-  if (typeof raw === 'number') return raw
-  // reviews_given is ReviewBreakdown
-  if (raw && typeof raw === 'object' && 'approved' in raw) {
-    const rb = raw as ReviewBreakdown
-    return rb.approved + rb.changes_requested + rb.commented
-  }
-  return null
-}
-
-const bandBarColors: Record<Band, string> = {
-  above_p75: 'bg-emerald-500',
-  p50_to_p75: 'bg-emerald-400',
-  p25_to_p50: 'bg-amber-400',
-  below_p25: 'bg-red-400',
 }
 
 export default function Benchmarks() {
   const { dateFrom, dateTo } = useDateRange()
-  const [teamFilter, setTeamFilter] = useState<string>('')
-  const [selectedMetric, setSelectedMetric] = useState<string>('prs_merged')
+  const [searchParams, setSearchParams] = useSearchParams()
+  const groupParam = searchParams.get('group') || undefined
+  const teamParam = searchParams.get('team') || undefined
+  const sortKey = searchParams.get('sort') || undefined
+  const sortDir = (searchParams.get('dir') as 'asc' | 'desc') || undefined
 
-  const { data: benchmarks, isLoading: benchmarksLoading, isError, refetch } = useBenchmarks(teamFilter || undefined, dateFrom, dateTo)
+  const { data: groups, isLoading: groupsLoading } = useBenchmarkGroups()
+  const { data: benchmarks, isLoading: benchmarksLoading, isError, refetch } = useBenchmarksV2(
+    groupParam, teamParam, dateFrom, dateTo
+  )
   const { data: developers } = useDevelopers()
 
-  const activeDeveloperIds = useMemo(() => {
-    if (!developers) return []
-    return developers.filter((d) => d.is_active).map((d) => d.id)
-  }, [developers])
-
-  // Single batch hook — fetches all developer stats in parallel (TanStack useQueries)
-  const devStatsResults = useAllDeveloperStats(activeDeveloperIds, dateFrom, dateTo)
-  const devStatsLoading = devStatsResults.some((r) => r.isLoading)
-
-  // Build a map of developer_id → stats for ranking
-  const devStatsMap = useMemo(() => {
-    const map = new Map<number, DeveloperStatsWithPercentiles>()
-    devStatsResults.forEach((result, i) => {
-      if (result.data) {
-        map.set(activeDeveloperIds[i], result.data)
-      }
-    })
-    return map
-  }, [devStatsResults, activeDeveloperIds])
-
+  // Extract unique team names from developers
   const teams = useMemo(() => {
     if (!developers) return []
     const set = new Set(developers.map((d) => d.team).filter(Boolean) as string[])
     return Array.from(set).sort()
   }, [developers])
 
-  const availableMetrics = useMemo(() => {
-    if (!benchmarks) return []
-    return Object.keys(benchmarks.metrics).filter((k) => k in metricConfigs)
+  // Build metric info map for formatting
+  const metricInfoMap = useMemo(() => {
+    if (!benchmarks) return new Map<string, BenchmarkMetricInfo>()
+    return new Map(benchmarks.metric_info.map((m) => [m.key, m]))
   }, [benchmarks])
 
-  // Build sorted ranking for selected metric
-  const ranking = useMemo(() => {
-    if (!developers || !benchmarks || !selectedMetric) return []
-    const benchmark = benchmarks.metrics[selectedMetric]
-    if (!benchmark) return []
-    const config = metricConfigs[selectedMetric]
+  // Sort developers
+  const sortedDevelopers = useMemo(() => {
+    if (!benchmarks) return []
+    const devs = [...benchmarks.developers]
+    const key = sortKey || benchmarks.group.metrics[0]
+    if (!key) return devs
+    const info = metricInfoMap.get(key)
+    const ascending = sortDir === 'asc' || (!sortDir && info?.lower_is_better)
 
-    const entries: { developer: Developer; value: number | null; band: Band }[] = []
-    for (const dev of developers.filter((d) => d.is_active)) {
-      const stats = devStatsMap.get(dev.id)
-      let value: number | null = null
-      let band: Band = 'p25_to_p50'
-
-      if (stats) {
-        value = extractMetricValue(stats, selectedMetric)
-        if (value != null) {
-          band = getBand(value, benchmark, config.lowerIsBetter)
-        }
-      }
-      entries.push({ developer: dev, value, band })
-    }
-
-    // Sort: developers with values first, sorted by value (best first)
-    entries.sort((a, b) => {
-      if (a.value == null && b.value == null) return 0
-      if (a.value == null) return 1
-      if (b.value == null) return -1
-      return config.lowerIsBetter ? a.value - b.value : b.value - a.value
+    devs.sort((a, b) => {
+      const av = a.metrics[key]?.value
+      const bv = b.metrics[key]?.value
+      if (av == null && bv == null) return 0
+      if (av == null) return 1
+      if (bv == null) return -1
+      return ascending ? av - bv : bv - av
     })
+    return devs
+  }, [benchmarks, sortKey, sortDir, metricInfoMap])
 
-    return entries
-  }, [developers, benchmarks, selectedMetric, devStatsMap])
+  function updateParam(key: string, value: string | undefined) {
+    const next = new URLSearchParams(searchParams)
+    if (value) {
+      next.set(key, value)
+    } else {
+      next.delete(key)
+    }
+    // Reset sort when switching group
+    if (key === 'group') {
+      next.delete('sort')
+      next.delete('dir')
+    }
+    setSearchParams(next, { replace: true })
+  }
+
+  function handleSort(metricKey: string) {
+    const next = new URLSearchParams(searchParams)
+    if (sortKey === metricKey) {
+      // Toggle direction
+      next.set('dir', sortDir === 'asc' ? 'desc' : 'asc')
+    } else {
+      next.set('sort', metricKey)
+      const info = metricInfoMap.get(metricKey)
+      next.set('dir', info?.lower_is_better ? 'asc' : 'desc')
+    }
+    setSearchParams(next, { replace: true })
+  }
 
   if (isError) {
     return <ErrorCard message="Could not load benchmark data." onRetry={refetch} />
   }
 
-  const isLoading = benchmarksLoading || devStatsLoading
+  const isLoading = groupsLoading || benchmarksLoading
 
   if (isLoading) {
     return (
       <div className="space-y-6">
-        <h1 className="text-2xl font-bold">Team Benchmarks</h1>
+        <h1 className="text-2xl font-bold">Benchmarks</h1>
+        <Skeleton className="h-10 w-full rounded-lg" />
         <Skeleton className="h-48 w-full rounded-lg" />
         <div className="grid gap-4 sm:grid-cols-3">
           {Array.from({ length: 6 }).map((_, i) => <StatCardSkeleton key={i} />)}
@@ -190,132 +140,261 @@ export default function Benchmarks() {
     )
   }
 
-  if (!benchmarks || Object.keys(benchmarks.metrics).length === 0) {
-    return (
-      <div className="space-y-6">
-        <h1 className="text-2xl font-bold">Team Benchmarks</h1>
-        <p className="text-muted-foreground">Not enough data to compute benchmarks. Need at least 3 developers with activity.</p>
-      </div>
-    )
-  }
-
-  const selectedBenchmark = benchmarks.metrics[selectedMetric]
-  const selectedConfig = metricConfigs[selectedMetric]
-  const maxDisplay = selectedBenchmark ? (selectedBenchmark.p75 * 1.5 || 1) : 1
+  const activeGroup = benchmarks?.group
+  const unassignedBanner = benchmarks && benchmarks.sample_size === 0 && groups && groups.length > 0
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      {/* Header */}
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h1 className="text-2xl font-bold">Team Benchmarks</h1>
-          <p className="text-sm text-muted-foreground">
-            {benchmarks.sample_size} developer{benchmarks.sample_size !== 1 ? 's' : ''} in sample
-          </p>
+          <h1 className="text-2xl font-bold">Benchmarks</h1>
+          {benchmarks && (
+            <p className="text-sm text-muted-foreground">
+              {benchmarks.sample_size} developer{benchmarks.sample_size !== 1 ? 's' : ''} in{' '}
+              {activeGroup?.display_name || 'group'}
+              {benchmarks.team && ` \u00b7 ${benchmarks.team}`}
+            </p>
+          )}
         </div>
-        {teams.length > 0 && (
-          <select
-            value={teamFilter}
-            onChange={(e) => setTeamFilter(e.target.value)}
-            className="rounded-md border bg-background px-2 py-1 text-sm"
-          >
-            <option value="">All teams</option>
-            {teams.map((t) => (
-              <option key={t} value={t}>{t}</option>
-            ))}
-          </select>
-        )}
+
+        {/* Filters */}
+        <div className="flex items-center gap-2">
+          {teams.length > 0 && (
+            <select
+              value={teamParam || ''}
+              onChange={(e) => updateParam('team', e.target.value || undefined)}
+              className="rounded-md border bg-background px-2 py-1.5 text-sm"
+            >
+              <option value="">All teams</option>
+              {teams.map((t) => (
+                <option key={t} value={t}>{t}</option>
+              ))}
+            </select>
+          )}
+        </div>
       </div>
 
-      {/* Percentile summary table */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Percentile Distribution</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Metric</TableHead>
-                <TableHead className="text-right">p25</TableHead>
-                <TableHead className="text-right">p50 (median)</TableHead>
-                <TableHead className="text-right">p75</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {availableMetrics.map((key) => {
-                const config = metricConfigs[key]
-                const m = benchmarks.metrics[key]
-                return (
-                  <TableRow
-                    key={key}
-                    className={cn(
-                      'cursor-pointer transition-colors',
-                      selectedMetric === key && 'bg-muted'
-                    )}
-                    onClick={() => setSelectedMetric(key)}
-                  >
-                    <TableCell className="font-medium">{config.label}</TableCell>
-                    <TableCell className="text-right">{config.format(m.p25)}</TableCell>
-                    <TableCell className="text-right font-medium">{config.format(m.p50)}</TableCell>
-                    <TableCell className="text-right">{config.format(m.p75)}</TableCell>
-                  </TableRow>
-                )
-              })}
-            </TableBody>
-          </Table>
-        </CardContent>
-      </Card>
-
-      {/* Developer ranking for selected metric */}
-      {selectedBenchmark && selectedConfig && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">
-              Developer Ranking: {selectedConfig.label}
-            </CardTitle>
-            <p className="text-xs text-muted-foreground">
-              {selectedConfig.lowerIsBetter ? 'Lower is better' : 'Higher is better'}
-              {' — '}p25: {selectedConfig.format(selectedBenchmark.p25)}, median: {selectedConfig.format(selectedBenchmark.p50)}, p75: {selectedConfig.format(selectedBenchmark.p75)}
-            </p>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-1">
-              {ranking.map(({ developer, value, band }) => {
-                const barWidth = value != null ? Math.min((value / maxDisplay) * 100, 100) : 0
-                const bandStyle = bandStyles[band]
-
-                return (
-                  <div key={developer.id} className="flex items-center gap-3 py-1.5">
-                    <Link
-                      to={`/team/${developer.id}`}
-                      className="w-32 shrink-0 truncate text-sm font-medium text-primary hover:underline"
-                    >
-                      {developer.display_name}
-                    </Link>
-                    <div className="flex-1">
-                      <div className="h-4 w-full rounded-full bg-muted overflow-hidden">
-                        <div
-                          className={cn('h-full rounded-full transition-all', bandBarColors[band])}
-                          style={{ width: `${barWidth}%` }}
-                        />
-                      </div>
-                    </div>
-                    <span className="w-16 text-right text-sm font-mono">
-                      {value != null ? selectedConfig.format(value) : '—'}
-                    </span>
-                    <Badge variant="secondary" className={cn('w-20 justify-center text-[10px]', bandStyle.normal)}>
-                      {bandStyle.label}
-                    </Badge>
-                  </div>
-                )
-              })}
-              {ranking.length === 0 && (
-                <p className="text-sm text-muted-foreground py-4 text-center">No developer data available.</p>
+      {/* Group tabs */}
+      {groups && groups.length > 0 && (
+        <div className="flex gap-1 rounded-lg bg-muted p-1">
+          {groups.map((g) => (
+            <button
+              key={g.group_key}
+              onClick={() => updateParam('group', g.group_key === groups[0].group_key ? undefined : g.group_key)}
+              className={cn(
+                'rounded-md px-3 py-1.5 text-sm font-medium transition-colors',
+                (activeGroup?.group_key === g.group_key)
+                  ? 'bg-background text-foreground shadow-sm'
+                  : 'text-muted-foreground hover:text-foreground'
               )}
-            </div>
+            >
+              {g.display_name}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* Empty state */}
+      {unassignedBanner && (
+        <Card>
+          <CardContent className="py-8 text-center">
+            <p className="text-muted-foreground">
+              No developers found with roles matching this group.{' '}
+              <Link to="/admin/team" className="text-primary hover:underline">
+                Assign roles in Team Registry
+              </Link>{' '}
+              to enable benchmarking.
+            </p>
           </CardContent>
         </Card>
       )}
+
+      {benchmarks && benchmarks.sample_size > 0 && (
+        <>
+          {/* Percentile Distribution */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Percentile Distribution</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Metric</TableHead>
+                    <TableHead className="text-right">p25</TableHead>
+                    <TableHead className="text-right">p50 (median)</TableHead>
+                    <TableHead className="text-right">p75</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {benchmarks.metric_info.map((info) => {
+                    const m = benchmarks.metrics[info.key]
+                    if (!m) return null
+                    return (
+                      <TableRow key={info.key}>
+                        <TableCell className="font-medium">{info.label}</TableCell>
+                        <TableCell className="text-right">{formatMetricValue(m.p25, info)}</TableCell>
+                        <TableCell className="text-right font-medium">{formatMetricValue(m.p50, info)}</TableCell>
+                        <TableCell className="text-right">{formatMetricValue(m.p75, info)}</TableCell>
+                      </TableRow>
+                    )
+                  })}
+                </TableBody>
+              </Table>
+            </CardContent>
+          </Card>
+
+          {/* Developer Ranking Table */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Developer Ranking</CardTitle>
+              {benchmarks.sample_size < 3 && (
+                <p className="text-xs text-amber-600">
+                  Fewer than 3 developers \u2014 percentile bands may not be meaningful.
+                </p>
+              )}
+            </CardHeader>
+            <CardContent>
+              <div className="overflow-x-auto">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead className="sticky left-0 bg-background">Developer</TableHead>
+                      <TableHead>Team</TableHead>
+                      {benchmarks.metric_info.map((info) => (
+                        <SortableHead
+                          key={info.key}
+                          label={info.label}
+                          sortKey={info.key}
+                          currentSort={sortKey || benchmarks.group.metrics[0]}
+                          direction={
+                            (sortKey || benchmarks.group.metrics[0]) === info.key
+                              ? (sortDir || (info.lower_is_better ? 'asc' : 'desc'))
+                              : undefined
+                          }
+                          onSort={() => handleSort(info.key)}
+                          className="text-right"
+                        />
+                      ))}
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {sortedDevelopers.map((dev) => (
+                      <DeveloperRow
+                        key={dev.developer_id}
+                        dev={dev}
+                        metricInfoList={benchmarks.metric_info}
+                        benchmarkMetrics={benchmarks.metrics}
+                      />
+                    ))}
+                    {sortedDevelopers.length === 0 && (
+                      <TableRow>
+                        <TableCell colSpan={benchmarks.metric_info.length + 2} className="text-center text-muted-foreground py-8">
+                          No developer data available.
+                        </TableCell>
+                      </TableRow>
+                    )}
+                  </TableBody>
+                </Table>
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Team Comparison */}
+          {benchmarks.team_comparison && benchmarks.team_comparison.length >= 2 && (
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Team Comparison (medians)</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="overflow-x-auto">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Team</TableHead>
+                        <TableHead className="text-right">Developers</TableHead>
+                        {benchmarks.metric_info.map((info) => (
+                          <TableHead key={info.key} className="text-right">{info.label}</TableHead>
+                        ))}
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {benchmarks.team_comparison.map((t) => (
+                        <TableRow key={t.team}>
+                          <TableCell className="font-medium">{t.team}</TableCell>
+                          <TableCell className="text-right">{t.sample_size}</TableCell>
+                          {benchmarks.metric_info.map((info) => (
+                            <TableCell key={info.key} className="text-right font-mono text-sm">
+                              {formatMetricValue(t.metrics[info.key] ?? null, info)}
+                            </TableCell>
+                          ))}
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+        </>
+      )}
     </div>
+  )
+}
+
+function DeveloperRow({
+  dev,
+  metricInfoList,
+  benchmarkMetrics,
+}: {
+  dev: DeveloperBenchmarkRow
+  metricInfoList: BenchmarkMetricInfo[]
+  benchmarkMetrics: Record<string, BenchmarkMetric>
+}) {
+  return (
+    <TableRow>
+      <TableCell className="sticky left-0 bg-background">
+        <Link
+          to={`/team/${dev.developer_id}`}
+          className="font-medium text-primary hover:underline"
+        >
+          {dev.display_name}
+        </Link>
+      </TableCell>
+      <TableCell className="text-muted-foreground text-sm">{dev.team || '\u2014'}</TableCell>
+      {metricInfoList.map((info) => {
+        const mv = dev.metrics[info.key]
+        const band = mv?.percentile_band as Band | null
+        const style = band ? bandStyles[band] : null
+        const bm = benchmarkMetrics[info.key]
+        // Bar width proportional to p75*1.5
+        const maxVal = bm ? bm.p75 * 1.5 || 1 : 1
+        const barWidth = mv?.value != null ? Math.min((mv.value / maxVal) * 100, 100) : 0
+
+        return (
+          <TableCell key={info.key} className="text-right">
+            <div className="flex items-center justify-end gap-2">
+              <div className="hidden w-16 sm:block">
+                <div className="h-2 w-full rounded-full bg-muted overflow-hidden">
+                  <div
+                    className={cn('h-full rounded-full', style?.bar || 'bg-muted-foreground/30')}
+                    style={{ width: `${barWidth}%` }}
+                  />
+                </div>
+              </div>
+              <span className="w-14 font-mono text-sm">
+                {formatMetricValue(mv?.value ?? null, info)}
+              </span>
+              {band && style && (
+                <Badge variant="secondary" className={cn('w-20 justify-center text-[10px]', style.color)}>
+                  {style.label}
+                </Badge>
+              )}
+            </div>
+          </TableCell>
+        )
+      })}
+    </TableRow>
   )
 }

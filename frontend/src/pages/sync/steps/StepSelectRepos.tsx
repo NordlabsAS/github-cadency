@@ -5,6 +5,7 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { Badge } from '@/components/ui/badge'
 import { Loader2, RefreshCw } from 'lucide-react'
 import type { Repo } from '@/utils/types'
+import { timeAgo } from '@/utils/format'
 
 interface StepSelectReposProps {
   repos: Repo[]
@@ -13,18 +14,6 @@ interface StepSelectReposProps {
   isLoading?: boolean
   onDiscover?: () => void
   isDiscovering?: boolean
-}
-
-function timeAgo(dateStr: string | null): string {
-  if (!dateStr) return 'Never synced'
-  const seconds = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000)
-  if (seconds < 60) return `${seconds}s ago`
-  const minutes = Math.floor(seconds / 60)
-  if (minutes < 60) return `${minutes}m ago`
-  const hours = Math.floor(minutes / 60)
-  if (hours < 24) return `${hours}h ago`
-  const days = Math.floor(hours / 24)
-  return `${days}d ago`
 }
 
 export default function StepSelectRepos({

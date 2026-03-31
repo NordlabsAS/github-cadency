@@ -8,14 +8,11 @@ from pydantic import BaseModel, ConfigDict
 # --- Enums ---
 
 
-class DeveloperRole(str, Enum):
-    developer = "developer"
-    senior_developer = "senior_developer"
-    lead = "lead"
-    architect = "architect"
-    devops = "devops"
-    qa = "qa"
-    intern = "intern"
+class ContributionCategory(str, Enum):
+    code_contributor = "code_contributor"
+    issue_contributor = "issue_contributor"
+    non_contributor = "non_contributor"
+    system = "system"
 
 
 class AppRole(str, Enum):
@@ -59,7 +56,7 @@ class DeveloperCreate(BaseModel):
     github_username: str
     display_name: str
     email: str | None = None
-    role: DeveloperRole | None = None
+    role: str | None = None
     skills: list[str] | None = None
     specialty: str | None = None
     location: str | None = None
@@ -72,7 +69,7 @@ class DeveloperCreate(BaseModel):
 class DeveloperUpdate(BaseModel):
     display_name: str | None = None
     email: str | None = None
-    role: DeveloperRole | None = None
+    role: str | None = None
     skills: list[str] | None = None
     specialty: str | None = None
     location: str | None = None
@@ -113,6 +110,148 @@ class DeactivationImpactResponse(BaseModel):
     open_prs: int
     open_issues: int
     open_branches: list[str]
+
+
+class ActivitySummaryResponse(BaseModel):
+    prs_authored: int = 0
+    prs_merged: int = 0
+    prs_open: int = 0
+    reviews_given: int = 0
+    issues_created: int = 0
+    issues_assigned: int = 0
+    repos_touched: int = 0
+    first_activity: datetime | None = None
+    last_activity: datetime | None = None
+    work_categories: dict[str, int] = {}
+
+
+# --- Team schemas ---
+
+
+class TeamResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    display_order: int
+
+
+class TeamCreate(BaseModel):
+    name: str
+
+
+class TeamUpdate(BaseModel):
+    name: str | None = None
+    display_order: int | None = None
+
+
+# --- Role definition schemas ---
+
+
+class RoleDefinitionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    role_key: str
+    display_name: str
+    contribution_category: ContributionCategory
+    display_order: int
+    is_default: bool
+
+
+class RoleCreate(BaseModel):
+    role_key: str
+    display_name: str
+    contribution_category: ContributionCategory
+
+
+class RoleUpdate(BaseModel):
+    display_name: str | None = None
+    contribution_category: ContributionCategory | None = None
+    display_order: int | None = None
+
+
+# --- Work category schemas ---
+
+VALID_MATCH_TYPES = frozenset({"label", "title_regex", "prefix", "issue_type"})
+
+
+class WorkCategoryResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    category_key: str
+    display_name: str
+    description: str | None = None
+    color: str
+    exclude_from_stats: bool
+    display_order: int
+    is_default: bool
+
+
+class WorkCategoryCreate(BaseModel):
+    category_key: str
+    display_name: str
+    description: str | None = None
+    color: str
+    exclude_from_stats: bool = False
+
+
+class WorkCategoryUpdate(BaseModel):
+    display_name: str | None = None
+    description: str | None = None
+    color: str | None = None
+    exclude_from_stats: bool | None = None
+    display_order: int | None = None
+
+
+class WorkCategoryRuleResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    match_type: str
+    match_value: str
+    description: str | None = None
+    case_sensitive: bool
+    category_key: str
+    priority: int
+
+
+class WorkCategoryRuleCreate(BaseModel):
+    match_type: str
+    match_value: str
+    description: str | None = None
+    case_sensitive: bool = False
+    category_key: str
+    priority: int
+
+
+class WorkCategoryRuleUpdate(BaseModel):
+    match_type: str | None = None
+    match_value: str | None = None
+    description: str | None = None
+    case_sensitive: bool | None = None
+    category_key: str | None = None
+    priority: int | None = None
+
+
+class ReclassifyResponse(BaseModel):
+    prs_updated: int
+    issues_updated: int
+    duration_s: float
+
+
+class WorkCategorySuggestion(BaseModel):
+    match_type: str
+    match_value: str
+    suggested_category: str
+    usage_count: int
+
+
+class BulkCreateRulesRequest(BaseModel):
+    rules: list[WorkCategoryRuleCreate]
+
+
+class BulkCreateRulesResponse(BaseModel):
+    created: int
 
 
 # --- Stats schemas ---
@@ -167,6 +306,8 @@ class DeveloperStatsResponse(BaseModel):
     comment_type_distribution: dict[str, int] = {}
     nit_ratio: float | None = None
     blocker_catch_rate: float | None = None
+    prs_linked_to_issue: int = 0
+    issue_linkage_rate: float | None = None
 
 
 class TopContributor(BaseModel):
@@ -200,6 +341,19 @@ class RepoStatsResponse(BaseModel):
     top_contributors: list[TopContributor] = []
 
 
+class RepoSummaryItem(BaseModel):
+    repo_id: int
+    total_prs: int = 0
+    total_merged: int = 0
+    total_issues: int = 0
+    total_reviews: int = 0
+    avg_time_to_merge_hours: float | None = None
+    last_pr_date: datetime | None = None
+    prev_total_prs: int = 0
+    prev_total_merged: int = 0
+    prev_avg_time_to_merge_hours: float | None = None
+
+
 # --- Benchmark schemas (M2) ---
 
 
@@ -207,14 +361,6 @@ class BenchmarkMetric(BaseModel):
     p25: float
     p50: float
     p75: float
-
-
-class BenchmarksResponse(BaseModel):
-    period_start: datetime
-    period_end: datetime
-    sample_size: int
-    team: str | None = None
-    metrics: dict[str, BenchmarkMetric]
 
 
 class PercentilePlacement(BaseModel):
@@ -225,6 +371,72 @@ class PercentilePlacement(BaseModel):
 
 class DeveloperStatsWithPercentilesResponse(DeveloperStatsResponse):
     percentiles: dict[str, PercentilePlacement] | None = None
+
+
+# --- Benchmark Group Config schemas ---
+
+
+class BenchmarkGroupResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    group_key: str
+    display_name: str
+    display_order: int
+    roles: list[str]
+    metrics: list[str]
+    min_team_size: int
+    is_default: bool
+
+
+class BenchmarkGroupUpdate(BaseModel):
+    display_name: str | None = None
+    display_order: int | None = None
+    roles: list[str] | None = None
+    metrics: list[str] | None = None
+    min_team_size: int | None = None
+
+
+class BenchmarkMetricInfo(BaseModel):
+    key: str
+    label: str
+    lower_is_better: bool
+    unit: str
+
+
+class MetricValue(BaseModel):
+    value: float | None
+    percentile_band: str | None  # below_p25, p25_to_p50, p50_to_p75, above_p75
+
+
+class DeveloperBenchmarkRow(BaseModel):
+    developer_id: int
+    display_name: str
+    avatar_url: str | None
+    team: str | None
+    role: str | None
+    metrics: dict[str, MetricValue]
+
+
+class TeamMedianRow(BaseModel):
+    team: str
+    sample_size: int
+    metrics: dict[str, float | None]
+
+
+class BenchmarksV2Response(BaseModel):
+    group: BenchmarkGroupResponse
+    period_start: datetime
+    period_end: datetime
+    sample_size: int
+    team: str | None = None
+    metrics: dict[str, BenchmarkMetric]
+    metric_info: list[BenchmarkMetricInfo]
+    developers: list[DeveloperBenchmarkRow]
+    team_comparison: list[TeamMedianRow] | None = None
+
+
+class UnassignedRoleCountResponse(BaseModel):
+    count: int
 
 
 # --- Trend schemas (M3) ---
@@ -316,6 +528,23 @@ class IssueLinkageStats(BaseModel):
     avg_prs_per_issue: float | None
     issues_with_multiple_prs: int
     prs_without_linked_issues: int
+
+
+class DeveloperLinkageRow(BaseModel):
+    developer_id: int
+    github_username: str
+    display_name: str
+    team: str | None = None
+    prs_total: int
+    prs_linked: int
+    linkage_rate: float  # 0.0–1.0
+
+
+class IssueLinkageByDeveloper(BaseModel):
+    developers: list[DeveloperLinkageRow]
+    team_average_rate: float
+    attention_threshold: float
+    attention_developers: list[DeveloperLinkageRow]
 
 
 # --- Issue Quality schemas (P3-03) ---
@@ -589,6 +818,7 @@ class SyncTriggerRequest(BaseModel):
     sync_type: Literal["full", "incremental"] = "incremental"
     repo_ids: list[int] | None = None
     since: datetime | None = None
+    sync_scope: str | None = None
 
 
 class PreflightCheck(BaseModel):
@@ -631,6 +861,23 @@ class SyncEventResponse(BaseModel):
     cancel_requested: bool = False
     log_summary: list[dict] | None = None
     rate_limit_wait_s: int = 0
+    triggered_by: str | None = None
+    sync_scope: str | None = None
+
+
+class SyncScheduleConfigResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    auto_sync_enabled: bool = True
+    incremental_interval_minutes: int = 15
+    full_sync_cron_hour: int = 2
+    updated_at: datetime | None = None
+
+
+class SyncScheduleConfigUpdate(BaseModel):
+    auto_sync_enabled: bool | None = None
+    incremental_interval_minutes: int | None = None
+    full_sync_cron_hour: int | None = None
 
 
 class SyncStatusResponse(BaseModel):
@@ -640,6 +887,7 @@ class SyncStatusResponse(BaseModel):
     total_repos_count: int = 0
     last_successful_sync: datetime | None = None
     last_sync_duration_s: int | None = None
+    schedule: SyncScheduleConfigResponse | None = None
 
 
 # --- AI Analysis schemas ---
@@ -826,6 +1074,35 @@ class WorkAllocationResponse(BaseModel):
     ai_classified_count: int = 0
     total_prs: int = 0
     total_issues: int = 0
+
+
+class WorkAllocationItem(BaseModel):
+    id: int
+    type: str
+    number: int
+    title: str | None = None
+    labels: list[str] | None = None
+    repo_name: str | None = None
+    author_name: str | None = None
+    author_id: int | None = None
+    html_url: str | None = None
+    category: str
+    category_source: str | None = None
+    merged_at: datetime | None = None
+    created_at: datetime | None = None
+    additions: int | None = None
+    deletions: int | None = None
+
+
+class WorkAllocationItemsResponse(BaseModel):
+    items: list[WorkAllocationItem]
+    total: int
+    page: int
+    page_size: int
+
+
+class RecategorizeRequest(BaseModel):
+    category: str
 
 
 # --- AI Settings schemas (P5) ---
@@ -1111,3 +1388,20 @@ class NotificationHistoryResponse(BaseModel):
 class SlackTestResponse(BaseModel):
     success: bool
     message: str
+
+
+# --- Frontend Log Ingestion ---
+
+
+class FrontendLogEntry(BaseModel):
+    level: Literal["warn", "error"] = "error"
+    message: str
+    event_type: str = "frontend.error"
+    context: dict[str, Any] | None = None
+    timestamp: str | None = None
+    url: str | None = None
+    user_agent: str | None = None
+
+
+class FrontendLogBatch(BaseModel):
+    entries: list[FrontendLogEntry]

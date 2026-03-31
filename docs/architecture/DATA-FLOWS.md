@@ -1,6 +1,6 @@
 ---
 purpose: "Step-by-step data flows with file:function references for all major operations"
-last-updated: "2026-03-29"
+last-updated: "2026-03-31"
 related:
   - docs/architecture/OVERVIEW.md
   - docs/architecture/SERVICE-LAYER.md
@@ -15,17 +15,18 @@ related:
 
 Three entry points converge on `run_sync()`:
 
-1. **Scheduled incremental**: `main.py:scheduled_sync()` fires every `sync_interval_minutes` (default 15) via APScheduler
+1. **Scheduled incremental**: `main.py:scheduled_sync()` fires every `incremental_interval_minutes` (loaded from `sync_schedule_config` DB table, default 15) via APScheduler. Checks `auto_sync_enabled` at runtime before proceeding.
 2. **Scheduled full**: same wrapper, cron-based at `full_sync_cron_hour` (default 2 AM)
 3. **API-triggered**: `api/sync.py:start_sync()` -> `BackgroundTasks.add_task(run_sync, ...)`
+4. **Startup resume**: `main.py:_recover_orphaned_syncs()` — finds any `SyncEvent` with `status='started'`, force-cancels it, then fires `asyncio.create_task(run_sync(...))` for the most recent one
 
 Resume: `api/sync.py:resume_sync()` computes remaining repo IDs from `repos_completed` and passes them to `run_sync()`.
 
 ### Orchestration (`services/github_sync.py:run_sync`)
 
 ```
-1. Concurrency guard: SELECT SyncEvent WHERE status="started"
-2. Create SyncEvent(status="started"), commit
+1. Concurrency guard: PostgreSQL advisory lock (key 1937337955) + SELECT SyncEvent WHERE status="started"
+2. Create SyncEvent(status="started"), commit, release advisory lock
 3. Open httpx.AsyncClient (GitHub App JWT -> installation token)
 4. If not resume: fetch org repos via github_get_paginated, upsert repos
 5. sync_org_contributors(db, client, ctx) -> upsert Developer rows
@@ -45,10 +46,12 @@ Resume: `api/sync.py:resume_sync()` computes remaining repo IDs from `repos_comp
 ### Per-Repo Sync (`services/github_sync.py:sync_repo`)
 
 ```
+0. Load classification rules once: work_categories.get_all_rules(db)
 1. [fetching_prs] github_get_paginated(/repos/{name}/pulls)
 2. [processing_prs] For each PR:
    a. upsert_pull_request() -> SELECT by (repo_id, number), create/update
       - resolve_author(): if matching developer is inactive, auto-reactivates (is_active=True, flush, warning log)
+      - classify_work_item_with_rules(pr.labels, pr.title, rules) -> set work_category + work_category_source (skip if source="manual")
    b. github_get_paginated(/pulls/{n}/reviews) -> upsert_review() each
    c. github_get_paginated(/pulls/{n}/comments) -> upsert_review_comment() each
       - classify_comment_type() for each comment
@@ -63,15 +66,17 @@ Resume: `api/sync.py:resume_sync()` computes remaining repo IDs from `repos_comp
 3. [fetching_issues] github_get_paginated(/repos/{name}/issues)
 4. [processing_issues] For each (non-PR) issue:
    a. upsert_issue() -> time_to_close_s, quality fields
+      - classify_work_item_with_rules(issue.labels, issue.title, rules) -> set work_category + work_category_source (skip if source="manual")
    b. Every 10 issues: progress commit
 5. [processing_issue_comments] github_get_paginated(/issues/comments)
    a. Match to parent issue via issue_url
    b. upsert_issue_comment() -> extract_mentions(body) -> comment.mentions JSONB
 6. [syncing_file_tree] DELETE all RepoTreeFile for repo, INSERT from /git/trees/{branch}?recursive=1
 7. [fetching_deployments] If DEPLOY_WORKFLOW_NAME set:
-   a. Fetch Actions workflow runs
+   a. Fetch Actions workflow runs (manual pagination — response structure differs from standard)
    b. upsert_deployment() each
    c. compute_deployment_lead_times()
+   d. detect_deployment_failures() -> flag failures (3 signals: failed workflow, revert PRs within 48h, hotfix PRs), link recovery deployments for MTTR
 8. Commit, update repo.last_synced_at
 ```
 
@@ -91,7 +96,7 @@ Resume: `api/sync.py:resume_sync()` computes remaining repo IDs from `repos_comp
 UPDATE pull_requests SET author_id = (SELECT id FROM developers WHERE ...)
   WHERE author_id IS NULL AND author_github_username IS NOT NULL
   AND EXISTS (SELECT 1 FROM developers WHERE ...)
--- Same for pr_reviews.reviewer_id and issues.assignee_id
+-- Same for pr_reviews.reviewer_id, issues.assignee_id, and issues.creator_id
 ```
 
 ## 2. Webhook Processing
@@ -141,14 +146,16 @@ UPDATE pull_requests SET author_id = (SELECT id FROM developers WHERE ...)
 3. Assemble into DeveloperStatsResponse
 ```
 
-### Benchmarks (`services/stats.py:get_benchmarks`)
+### Benchmarks v2 (`services/stats.py:get_benchmarks_v2`)
 
 ```
-1. Fetch all active developer IDs for team
-2. _compute_per_developer_metrics(db, dev_ids, date_from, date_to):
-   For each developer: ~9 scalar queries (N+1 pattern)
-3. _percentiles(values) -> statistics.quantiles(n=4)
-4. Assemble per-metric percentile bands
+1. Load group config from benchmark_group_config (roles + metrics for this group)
+2. Resolve developers matching group roles (via role_definitions contribution categories)
+3. _compute_per_developer_metrics(db, dev_ids, date_from, date_to, requested_metrics):
+   - Batch GROUP BY queries (only for requested metrics), NOT per-developer N+1
+4. _percentile_band() per metric per developer (inverts for lower-is-better)
+5. Optional team comparison: per-team medians when >=2 teams meet min_team_size
+6. Assemble BenchmarksV2Response
 ```
 
 ### Trends (`services/stats.py:get_developer_trends`)
@@ -189,7 +196,7 @@ UPDATE pull_requests SET author_id = (SELECT id FROM developers WHERE ...)
 ```
 1. Same guard chain
 2. Gather enriched context:
-   - get_developer_stats() + get_developer_trends() + get_benchmarks()
+   - get_developer_stats() + get_developer_trends() + get_benchmarks_v2()
    - Fetch recent PRs with review details
    - list_goals() + get_goal_progress() for each
    - get_issue_creator_stats()
@@ -329,39 +336,56 @@ Per developer, 4 components (25 pts each, total 0-100):
 
 ```
 1. Fetch merged PRs + created issues for period
-2. Deterministic classification:
-   a. classify_work_item(labels, title):
-      - Tier 1: LABEL_CATEGORY_MAP (exact lowercase match)
-      - Tier 2: TITLE_PATTERNS (regex)
-      - Tier 3: "unknown"
-   b. For items with stored work_category and deterministic "unknown": use stored value
-3. cross_reference_pr_categories(prs, issues):
+2. Load classification rules from DB: work_categories.get_all_rules(db)
+3. For each item, classify_work_item_with_rules(labels, title, rules):
+   a. Label rules: exact match against PR/issue labels (by priority)
+   b. Title regex rules: regex match against title (by priority)
+   c. Title prefix rules: prefix match against title (by priority)
+   d. Fallback: "unknown"
+   e. For items with stored work_category (non-manual): use stored value if deterministic = "unknown"
+   f. Manual overrides (work_category_source="manual"): never overwritten
+4. cross_reference_pr_categories(prs, issues):
    - PRs with "unknown": check closes_issue_numbers -> adopt linked issue's category
-4. If use_ai=True:
+5. If use_ai=True:
    a. Collect remaining unknowns
    b. ai_classify_batch(items, db):
       - check_feature_enabled + check_budget
       - Batch up to 200 items -> Claude API
-      - Validate response indices and categories
+      - Validate response indices and categories (against valid category_keys from DB)
       - Return {item_id: category}
    c. Apply AI results, write work_category back to DB
-5. Aggregate into CategoryAllocation + per-developer + trend buckets
+6. Aggregate into CategoryAllocation + per-developer + trend buckets
 ```
+
+### Admin-Configurable Rules
+
+Categories and rules are managed via the `/api/work-categories` API surface (`services/work_categories.py`):
+- Categories: CRUD with `exclude_from_stats` toggle, color, display_order
+- Rules: CRUD with `match_type` (label/title_regex/prefix), `match_value`, `priority`, `case_sensitive`
+- Reclassify: `POST /work-categories/reclassify` re-runs all rules against non-manual items
+- At sync time: `github_sync.py` lazy-imports `classify_work_item_with_rules` and `get_all_rules` to classify PRs and issues
 
 ## 9. App Startup
 
 **Entry**: `main.py:lifespan()`
 
 ```
-1. Create AsyncIOScheduler
-2. Add incremental sync job: interval, every sync_interval_minutes
-3. Add full sync job: cron at full_sync_cron_hour:00, misfire_grace_time=None
-4. scheduler.start()
-5. yield -> app serves requests
-6. On shutdown: scheduler.shutdown(wait=True)
+1. _log_config_warnings() — validate GitHub App config
+2. _recover_orphaned_syncs() — detect and resume any sync stuck in "started" status
+3. Load SyncScheduleConfig from DB (singleton id=1); fallback to env var defaults
+4. Create AsyncIOScheduler
+5. If auto_sync_enabled:
+   a. Add incremental sync job: interval, every incremental_interval_minutes
+   b. Add full sync job: cron at full_sync_cron_hour:00, misfire_grace_time=None
+6. Add Slack scheduled jobs:
+   a. scheduled_stale_pr_check: hourly at :05 (checks configured hour at runtime)
+   b. scheduled_weekly_digest: hourly at :10 (checks configured day+hour at runtime)
+7. scheduler.start(), store in app.state.scheduler
+8. yield -> app serves requests
+9. On shutdown: scheduler.shutdown(wait=True)
 
 Router registration (main.py):
-- All routers get /api prefix
+- All 12 routers get /api prefix
 - CORS: allow_origins=[frontend_url], credentials=True, all methods/headers
 - Standalone GET /api/health (no auth)
 ```
@@ -396,14 +420,19 @@ Admin configures via `PATCH /slack/config` (stored in `slack_config` singleton).
 
 | Severity | Area | Description |
 |----------|------|-------------|
+| ~~High~~ | ~~AI~~ | ~~`run_one_on_one_prep()` and `run_team_health()` import `get_benchmarks` (renamed)~~ — **Fixed**: Updated to `get_benchmarks_v2` |
 | ~~High~~ | ~~Auth~~ | ~~No JWT revocation -- deactivated users retain access up to 7 days~~ — **Fixed**: `get_current_user()` now checks `developers.is_active` on every request |
+| Medium | Auth | JWT delivered in URL query parameter (`?token=...`) — visible in browser history, server logs, and Referer headers |
 | Medium | Sync | Auto-reactivation in `resolve_author()` / `sync_org_contributors()` can undo manual deactivation -- if the developer appears in GitHub activity or org members during the next sync, `is_active` is silently set back to `True` (warning log only) |
+| Medium | Sync | `scheduled_sync()` blocks APScheduler — long-running syncs prevent Slack scheduled jobs from running on time |
+| Medium | Sync | Issue comment parent resolution via string-splitting `issue_url` (`split("/")[-1]`) — fragile if GitHub URL format changes |
 | Medium | Webhooks | All-or-nothing commit -- failure in any handler rolls back all event processing |
 | Medium | Webhooks | Review comments on unknown PRs silently dropped (no retry mechanism) |
 | Medium | Webhooks | No dedup/queue -- rapid events on same PR trigger concurrent full re-syncs |
 | Medium | Webhooks | `handle_pull_request_review()` calls `recompute_review_quality_tiers()` but not `compute_approval_metrics()` -- approval fields stale until next scheduled sync |
-| Medium | Collaboration | `recompute_collaboration_scores()` always uses last-30-day window regardless of how much historical data was synced |
-| Medium | AI | No retry or timeout handling on Claude API calls -- transient failures propagate as HTTP 500 |
+| ~~Medium~~ | ~~Collaboration~~ | ~~`recompute_collaboration_scores()` always uses last-30-day window~~ — **Fixed**: Uses `since_override` or 90-day window for full syncs |
+| ~~Medium~~ | ~~AI~~ | ~~No retry or timeout handling on Claude API calls~~ — **Fixed**: Client uses `max_retries=3` and `timeout=120s` |
 | Medium | Goals | Auto-achievement is a write side effect on a GET endpoint |
 | Low | Timestamps | `_safe_delta_seconds` / `_to_naive` workarounds for SQLite vs PostgreSQL timezone mismatch |
 | Low | Config | Empty `jwt_secret` produces a warning but app starts with insecure signing |
+| Low | Auth | No JWT refresh mechanism — users must re-authenticate every 7 days via full OAuth flow |

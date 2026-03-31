@@ -81,6 +81,37 @@ function computeSinceDate(timeRange: TimeRangeOption, customDate: string): strin
   return undefined
 }
 
+const TIME_RANGE_SCOPE_LABELS: Record<TimeRangeOption, string> = {
+  since_last: 'since last sync',
+  last_7d: '7 days',
+  last_14d: '14 days',
+  last_30d: '30 days',
+  last_60d: '60 days',
+  last_90d: '90 days',
+  custom: 'custom range',
+  all: 'full resync',
+}
+
+function computeSyncScope(
+  selectedRepos: { full_name: string }[],
+  timeRange: TimeRangeOption,
+  totalTrackedCount: number,
+): string {
+  const timeLabel = TIME_RANGE_SCOPE_LABELS[timeRange]
+  const repoCount = selectedRepos.length
+
+  // All tracked repos
+  if (repoCount === totalTrackedCount || repoCount === 0) {
+    return `All tracked repos \u00b7 ${timeLabel}`
+  }
+  // Single repo — show the name
+  if (repoCount === 1) {
+    return `${selectedRepos[0].full_name} \u00b7 ${timeLabel}`
+  }
+  // Multiple repos
+  return `${repoCount} repos \u00b7 ${timeLabel}`
+}
+
 export default function SyncWizard() {
   const [state, dispatch] = useReducer(reducer, initialState)
   const { data: repos = [], isLoading: reposLoading } = useRepos()
@@ -99,21 +130,28 @@ export default function SyncWizard() {
     }
   }, [repos])
 
+  const trackedCount = useMemo(() => repos.filter((r) => r.is_tracked).length, [repos])
+
   const selectedRepos = useMemo(
     () => repos.filter((r) => state.selectedRepoIds.includes(r.id)),
     [repos, state.selectedRepoIds],
   )
 
   const handleQuickSync = () => {
-    startSync.mutate({ sync_type: 'incremental' })
+    startSync.mutate({
+      sync_type: 'incremental',
+      sync_scope: 'All tracked repos \u00b7 since last sync',
+    })
   }
 
   const handleStartCustomSync = () => {
     const syncType = state.timeRange === 'since_last' ? 'incremental' : 'full'
+    const scope = computeSyncScope(selectedRepos, state.timeRange, trackedCount)
     const request: SyncStartRequest = {
       sync_type: syncType,
       repo_ids: state.selectedRepoIds,
       since: computeSinceDate(state.timeRange, state.customDate),
+      sync_scope: scope,
     }
     startSync.mutate(request)
   }

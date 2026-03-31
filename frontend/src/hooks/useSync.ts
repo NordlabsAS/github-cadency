@@ -1,27 +1,15 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
-import { apiFetch } from '@/utils/api'
-import type { PreflightResponse, Repo, SyncEvent, SyncStartRequest, SyncStatusResponse } from '@/utils/types'
+import { ApiError, apiFetch } from '@/utils/api'
+import type { PreflightResponse, Repo, SyncEvent, SyncScheduleConfig, SyncStartRequest, SyncStatusResponse } from '@/utils/types'
 
-/**
- * Extract a human-readable detail from an apiFetch error.
- * apiFetch throws `new Error("STATUS: BODY")`, so we try to parse the JSON detail.
- */
+/** Extract a human-readable detail from an apiFetch error. */
 function extractErrorDetail(error: Error): string {
-  const msg = error.message
-  // Try to extract JSON detail from "STATUS: {\"detail\": \"...\"}"
-  const colonIdx = msg.indexOf(': ')
-  if (colonIdx > 0) {
-    const body = msg.slice(colonIdx + 2)
-    try {
-      const parsed = JSON.parse(body)
-      if (parsed.detail) return parsed.detail
-    } catch {
-      // Not JSON, return the raw body
-      if (body.length > 0 && body.length < 300) return body
-    }
+  if (error instanceof ApiError) {
+    const d = error.detail
+    return typeof d === 'string' ? d : d?.message ?? error.message
   }
-  return msg
+  return error.message
 }
 
 export function usePreflight() {
@@ -92,17 +80,21 @@ export function useStartSync() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (request: SyncStartRequest) =>
-      apiFetch('/sync/start', {
+      apiFetch<SyncEvent>('/sync/start', {
         method: 'POST',
         body: JSON.stringify(request),
       }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['sync-status'] })
+    onSuccess: (syncEvent: SyncEvent) => {
+      // Set the returned sync event as active_sync immediately so the UI
+      // switches to the progress view without waiting for the next poll.
+      qc.setQueryData<SyncStatusResponse>(['sync-status'], (old) =>
+        old ? { ...old, active_sync: syncEvent } : undefined,
+      )
       qc.invalidateQueries({ queryKey: ['sync-events'] })
       toast.success('Sync started')
     },
     onError: (error: Error) => {
-      if (error.message.includes('409')) {
+      if (error instanceof ApiError && error.status === 409) {
         toast.error('A sync is already in progress')
       } else {
         toast.error(`Failed to start sync: ${extractErrorDetail(error)}`)
@@ -115,9 +107,11 @@ export function useResumeSync() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (eventId: number) =>
-      apiFetch(`/sync/resume/${eventId}`, { method: 'POST' }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['sync-status'] })
+      apiFetch<SyncEvent>(`/sync/resume/${eventId}`, { method: 'POST' }),
+    onSuccess: (syncEvent: SyncEvent) => {
+      qc.setQueryData<SyncStatusResponse>(['sync-status'], (old) =>
+        old ? { ...old, active_sync: syncEvent } : undefined,
+      )
       qc.invalidateQueries({ queryKey: ['sync-events'] })
       toast.success('Sync resumed')
     },
@@ -164,7 +158,7 @@ export function useSyncContributors() {
       toast.success('Contributor sync started')
     },
     onError: (error: Error) => {
-      if (error.message.includes('409')) {
+      if (error instanceof ApiError && error.status === 409) {
         toast.error('A sync is already in progress')
       } else {
         toast.error(`Failed to sync contributors: ${extractErrorDetail(error)}`)
@@ -182,5 +176,30 @@ export function useSyncEvent(eventId: number | undefined) {
       const status = query.state.data?.status
       return status === 'started' ? 3_000 : false
     },
+  })
+}
+
+export function useSyncSchedule() {
+  return useQuery<SyncScheduleConfig>({
+    queryKey: ['sync-schedule'],
+    queryFn: () => apiFetch('/sync/schedule'),
+    staleTime: 60_000,
+  })
+}
+
+export function useUpdateSyncSchedule() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (data: Partial<SyncScheduleConfig>) =>
+      apiFetch<SyncScheduleConfig>('/sync/schedule', {
+        method: 'PATCH',
+        body: JSON.stringify(data),
+      }),
+    onSuccess: (updated) => {
+      qc.setQueryData(['sync-schedule'], updated)
+      qc.invalidateQueries({ queryKey: ['sync-status'] })
+      toast.success('Sync schedule updated')
+    },
+    onError: (error: Error) => toast.error(`Failed to update schedule: ${extractErrorDetail(error)}`),
   })
 }

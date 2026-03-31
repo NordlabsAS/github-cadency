@@ -290,7 +290,7 @@ export default function Dashboard() {
             />
             <StatCard
               title="Merge Rate"
-              value={stats.merge_rate != null ? `${stats.merge_rate.toFixed(1)}%` : 'N/A'}
+              value={stats.merge_rate != null ? `${(stats.merge_rate * 100).toFixed(1)}%` : 'N/A'}
               trend={trend('merge_rate')}
               tooltip="Percentage of closed PRs that were merged (merged / (merged + closed without merge))"
             />

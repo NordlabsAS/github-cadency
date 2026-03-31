@@ -1,20 +1,39 @@
-import { Fragment, useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { useMemo, useState } from 'react'
+import { Link, useNavigate } from 'react-router-dom'
 import { useDateRange } from '@/hooks/useDateRange'
 import { useCollaboration } from '@/hooks/useStats'
 import { useDevelopers } from '@/hooks/useDevelopers'
 import ErrorCard from '@/components/ErrorCard'
 import PairDetailSheet from '@/components/PairDetailSheet'
+import SortableHead from '@/components/SortableHead'
 import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table'
 import { cn } from '@/lib/utils'
 import type { CollaborationPair, CollaborationInsights } from '@/utils/types'
 
+const PAGE_SIZE = 25
+
 export default function CollaborationMatrix() {
   const { dateFrom, dateTo } = useDateRange()
+  const navigate = useNavigate()
   const [teamFilter, setTeamFilter] = useState<string>('')
   const [selectedPair, setSelectedPair] = useState<{ reviewerId: number; authorId: number } | null>(null)
+  const [activeTeamPair, setActiveTeamPair] = useState<{ reviewerTeam: string; authorTeam: string } | null>(null)
+  const [sortField, setSortField] = useState<SortField>('reviews_count')
+  const [sortAsc, setSortAsc] = useState(false)
+  const [currentPage, setCurrentPage] = useState(1)
+  const [searchQuery, setSearchQuery] = useState('')
 
   const { data, isLoading, isError, refetch } = useCollaboration(teamFilter || undefined, dateFrom, dateTo)
   const { data: developers } = useDevelopers()
@@ -25,6 +44,25 @@ export default function CollaborationMatrix() {
     return Array.from(set).sort()
   }, [developers])
 
+  function handleSortToggle(field: SortField) {
+    if (field === sortField) {
+      setSortAsc(!sortAsc)
+    } else {
+      setSortField(field)
+      setSortAsc(field === 'reviewer_name' || field === 'author_name')
+    }
+    setCurrentPage(1)
+  }
+
+  function handleTeamCellClick(reviewerTeam: string, authorTeam: string) {
+    if (activeTeamPair?.reviewerTeam === reviewerTeam && activeTeamPair?.authorTeam === authorTeam) {
+      setActiveTeamPair(null)
+    } else {
+      setActiveTeamPair({ reviewerTeam, authorTeam })
+    }
+    setCurrentPage(1)
+  }
+
   if (isError) {
     return <ErrorCard message="Could not load collaboration data." onRetry={refetch} />
   }
@@ -33,9 +71,10 @@ export default function CollaborationMatrix() {
     return (
       <div className="space-y-6">
         <h1 className="text-2xl font-bold">Collaboration Matrix</h1>
+        <Skeleton className="h-48 w-full rounded-lg" />
         <Skeleton className="h-64 w-full rounded-lg" />
-        <div className="grid gap-4 sm:grid-cols-2">
-          {Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-32 rounded-lg" />)}
+        <div className="grid gap-4 sm:grid-cols-3">
+          {Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-32 rounded-lg" />)}
         </div>
       </div>
     )
@@ -57,7 +96,7 @@ export default function CollaborationMatrix() {
         {teams.length > 0 && (
           <select
             value={teamFilter}
-            onChange={(e) => setTeamFilter(e.target.value)}
+            onChange={(e) => { setTeamFilter(e.target.value); setActiveTeamPair(null); setCurrentPage(1) }}
             className="rounded-md border bg-background px-2 py-1 text-sm"
           >
             <option value="">All teams</option>
@@ -68,7 +107,26 @@ export default function CollaborationMatrix() {
         )}
       </div>
 
-      <HeatmapGrid matrix={data.matrix} onCellClick={(reviewerId, authorId) => setSelectedPair({ reviewerId, authorId })} />
+      <TeamHeatmap
+        matrix={data.matrix}
+        activeFilter={activeTeamPair}
+        onCellClick={handleTeamCellClick}
+      />
+
+      <PairsTable
+        matrix={data.matrix}
+        teamFilter={activeTeamPair}
+        sortField={sortField}
+        sortAsc={sortAsc}
+        currentPage={currentPage}
+        searchQuery={searchQuery}
+        onSortToggle={handleSortToggle}
+        onPageChange={setCurrentPage}
+        onSearchChange={(q) => { setSearchQuery(q); setCurrentPage(1) }}
+        onPairClick={(reviewerId, authorId) => setSelectedPair({ reviewerId, authorId })}
+        onPairNavigate={(reviewerId, authorId) => navigate(`/insights/collaboration/${reviewerId}/${authorId}`)}
+      />
+
       <InsightsPanel insights={data.insights} />
 
       <PairDetailSheet
@@ -81,119 +139,138 @@ export default function CollaborationMatrix() {
   )
 }
 
-// --- Heatmap Grid ---
+// --- Team Heatmap ---
 
-function HeatmapGrid({ matrix, onCellClick }: { matrix: CollaborationPair[]; onCellClick: (reviewerId: number, authorId: number) => void }) {
-  const [hoveredCell, setHoveredCell] = useState<{ reviewer: string; author: string } | null>(null)
+interface TeamAggregation {
+  total: number
+  approvals: number
+  changes_requested: number
+}
 
-  // Build unique reviewer and author lists
-  const { reviewers, authors, cellMap, maxCount } = useMemo(() => {
-    const reviewerSet = new Map<number, string>()
-    const authorSet = new Map<number, string>()
-    const map = new Map<string, CollaborationPair>()
-    let max = 0
+function TeamHeatmap({
+  matrix,
+  activeFilter,
+  onCellClick,
+}: {
+  matrix: CollaborationPair[]
+  activeFilter: { reviewerTeam: string; authorTeam: string } | null
+  onCellClick: (reviewerTeam: string, authorTeam: string) => void
+}) {
+  const { teamNames, cellMap, maxCount } = useMemo(() => {
+    const map = new Map<string, TeamAggregation>()
+    const teamSet = new Set<string>()
 
     for (const pair of matrix) {
-      reviewerSet.set(pair.reviewer_id, pair.reviewer_name)
-      authorSet.set(pair.author_id, pair.author_name)
-      map.set(`${pair.reviewer_id}-${pair.author_id}`, pair)
-      if (pair.reviews_count > max) max = pair.reviews_count
+      const rTeam = pair.reviewer_team ?? 'Unassigned'
+      const aTeam = pair.author_team ?? 'Unassigned'
+      teamSet.add(rTeam)
+      teamSet.add(aTeam)
+      const key = `${rTeam}::${aTeam}`
+      const existing = map.get(key)
+      if (existing) {
+        existing.total += pair.reviews_count
+        existing.approvals += pair.approvals
+        existing.changes_requested += pair.changes_requested
+      } else {
+        map.set(key, {
+          total: pair.reviews_count,
+          approvals: pair.approvals,
+          changes_requested: pair.changes_requested,
+        })
+      }
     }
 
-    return {
-      reviewers: Array.from(reviewerSet.entries()).map(([id, name]) => ({ id, name })),
-      authors: Array.from(authorSet.entries()).map(([id, name]) => ({ id, name })),
-      cellMap: map,
-      maxCount: max,
+    let max = 0
+    for (const v of map.values()) {
+      if (v.total > max) max = v.total
     }
+
+    const names = Array.from(teamSet).sort((a, b) => {
+      if (a === 'Unassigned') return 1
+      if (b === 'Unassigned') return -1
+      return a.localeCompare(b)
+    })
+
+    return { teamNames: names, cellMap: map, maxCount: max }
   }, [matrix])
 
-  if (reviewers.length === 0 || authors.length === 0) return null
+  if (teamNames.length === 0) return null
 
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">Review Heatmap</CardTitle>
-        <p className="text-xs text-muted-foreground">Rows = reviewers, Columns = PR authors. Color intensity = review count.</p>
+        <CardTitle className="text-base">Team Review Flow</CardTitle>
+        <p className="text-xs text-muted-foreground">
+          Rows = reviewing teams, Columns = PR author teams. Click a cell to filter the pairs table below.
+        </p>
       </CardHeader>
       <CardContent>
         <div className="overflow-x-auto">
           <div
-            className="inline-grid gap-px"
+            className="inline-grid gap-1"
             style={{
-              gridTemplateColumns: `120px repeat(${authors.length}, minmax(48px, 64px))`,
+              gridTemplateColumns: `140px repeat(${teamNames.length}, minmax(80px, 120px))`,
             }}
           >
             {/* Header row */}
             <div />
-            {authors.map((a) => (
+            {teamNames.map((t) => (
               <div
-                key={`h-${a.id}`}
-                className="truncate px-1 py-1 text-center text-[11px] font-medium text-muted-foreground"
-                title={a.name}
+                key={`h-${t}`}
+                className="truncate px-2 py-1.5 text-center text-xs font-medium text-muted-foreground"
+                title={t}
               >
-                {a.name.split(' ')[0]}
+                {t}
               </div>
             ))}
 
             {/* Data rows */}
-            {reviewers.map((r) => (
-              <Fragment key={`r-${r.id}`}>
+            {teamNames.map((rTeam) => (
+              <>
                 <div
-                  className="truncate pr-2 py-1 text-right text-[11px] font-medium text-muted-foreground"
-                  title={r.name}
+                  key={`label-${rTeam}`}
+                  className="truncate pr-2 py-1.5 text-right text-xs font-medium text-muted-foreground"
+                  title={rTeam}
                 >
-                  {r.name}
+                  {rTeam}
                 </div>
-                {authors.map((a) => {
-                  const pair = cellMap.get(`${r.id}-${a.id}`)
-                  const count = pair?.reviews_count ?? 0
+                {teamNames.map((aTeam) => {
+                  const cell = cellMap.get(`${rTeam}::${aTeam}`)
+                  const count = cell?.total ?? 0
                   const intensity = maxCount > 0 ? count / maxCount : 0
-                  const isSelf = r.id === a.id
-                  const isHovered = hoveredCell?.reviewer === r.name && hoveredCell?.author === a.name
-
-                  const isClickable = !isSelf && count > 0
+                  const isActive = activeFilter?.reviewerTeam === rTeam && activeFilter?.authorTeam === aTeam
 
                   return (
                     <div
-                      key={`c-${r.id}-${a.id}`}
+                      key={`c-${rTeam}-${aTeam}`}
                       className={cn(
-                        'relative flex items-center justify-center rounded-sm text-[10px] font-medium transition-all',
-                        isSelf ? 'bg-muted/50 cursor-default' : count > 0 ? 'cursor-pointer hover:ring-2 hover:ring-primary/50' : 'cursor-default hover:ring-1 hover:ring-foreground/20',
-                        isHovered && 'ring-2 ring-primary'
+                        'flex flex-col items-center justify-center rounded-md text-xs font-medium transition-all cursor-pointer',
+                        'hover:ring-2 hover:ring-primary/50',
+                        isActive && 'ring-2 ring-primary',
+                        count === 0 && 'hover:ring-1 hover:ring-foreground/20'
                       )}
-                      onClick={isClickable ? () => onCellClick(r.id, a.id) : undefined}
                       style={{
-                        backgroundColor: isSelf
-                          ? undefined
-                          : count > 0
-                            ? `hsl(var(--primary) / ${0.1 + intensity * 0.7})`
-                            : undefined,
-                        minHeight: '32px',
+                        backgroundColor: count > 0
+                          ? `hsl(var(--primary) / ${0.08 + intensity * 0.72})`
+                          : undefined,
+                        minHeight: '48px',
                       }}
-                      onMouseEnter={() => setHoveredCell({ reviewer: r.name, author: a.name })}
-                      onMouseLeave={() => setHoveredCell(null)}
-                      title={
-                        isSelf
-                          ? 'Self'
-                          : pair
-                            ? `${r.name} → ${a.name}: ${count} reviews (${pair.approvals} approved, ${pair.changes_requested} changes requested)`
-                            : `${r.name} → ${a.name}: 0 reviews`
-                      }
+                      onClick={() => onCellClick(rTeam, aTeam)}
+                      title={`${rTeam} reviewing ${aTeam}: ${count} reviews${cell ? ` (${cell.approvals} approved, ${cell.changes_requested} changes requested)` : ''}`}
                     >
-                      {isSelf ? (
-                        <span className="text-muted-foreground/40">—</span>
-                      ) : count > 0 ? (
+                      {count > 0 ? (
                         <span className={cn(
                           intensity > 0.5 ? 'text-primary-foreground' : 'text-foreground'
                         )}>
                           {count}
                         </span>
-                      ) : null}
+                      ) : (
+                        <span className="text-muted-foreground/30">0</span>
+                      )}
                     </div>
                   )
                 })}
-              </Fragment>
+              </>
             ))}
           </div>
         </div>
@@ -202,11 +279,228 @@ function HeatmapGrid({ matrix, onCellClick }: { matrix: CollaborationPair[]; onC
   )
 }
 
-// --- Insights Panel ---
+// --- Pairs Table ---
+
+type SortField = 'reviewer_name' | 'author_name' | 'reviews_count' | 'approvals' | 'changes_requested'
+
+function PairsTable({
+  matrix,
+  teamFilter,
+  sortField,
+  sortAsc,
+  currentPage,
+  searchQuery,
+  onSortToggle,
+  onPageChange,
+  onSearchChange,
+  onPairClick,
+  onPairNavigate,
+}: {
+  matrix: CollaborationPair[]
+  teamFilter: { reviewerTeam: string; authorTeam: string } | null
+  sortField: SortField
+  sortAsc: boolean
+  currentPage: number
+  searchQuery: string
+  onSortToggle: (field: SortField) => void
+  onPageChange: (page: number) => void
+  onSearchChange: (query: string) => void
+  onPairClick: (reviewerId: number, authorId: number) => void
+  onPairNavigate: (reviewerId: number, authorId: number) => void
+}) {
+  const { rows, totalCount, totalPages } = useMemo(() => {
+    let filtered = matrix
+
+    // Team pair filter from heatmap
+    if (teamFilter) {
+      filtered = filtered.filter((p) => {
+        const rTeam = p.reviewer_team ?? 'Unassigned'
+        const aTeam = p.author_team ?? 'Unassigned'
+        return rTeam === teamFilter.reviewerTeam && aTeam === teamFilter.authorTeam
+      })
+    }
+
+    // Text search
+    if (searchQuery) {
+      const q = searchQuery.toLowerCase()
+      filtered = filtered.filter(
+        (p) => p.reviewer_name.toLowerCase().includes(q) || p.author_name.toLowerCase().includes(q)
+      )
+    }
+
+    // Sort
+    const sorted = [...filtered].sort((a, b) => {
+      let cmp = 0
+      switch (sortField) {
+        case 'reviewer_name':
+          cmp = a.reviewer_name.localeCompare(b.reviewer_name)
+          break
+        case 'author_name':
+          cmp = a.author_name.localeCompare(b.author_name)
+          break
+        case 'reviews_count':
+          cmp = a.reviews_count - b.reviews_count
+          break
+        case 'approvals':
+          cmp = a.approvals - b.approvals
+          break
+        case 'changes_requested':
+          cmp = a.changes_requested - b.changes_requested
+          break
+      }
+      return sortAsc ? cmp : -cmp
+    })
+
+    const total = sorted.length
+    const pages = Math.max(1, Math.ceil(total / PAGE_SIZE))
+    const start = (currentPage - 1) * PAGE_SIZE
+    const pageRows = sorted.slice(start, start + PAGE_SIZE)
+
+    return { rows: pageRows, totalCount: total, totalPages: pages }
+  }, [matrix, teamFilter, searchQuery, sortField, sortAsc, currentPage])
+
+  const startIdx = (currentPage - 1) * PAGE_SIZE + 1
+  const endIdx = Math.min(currentPage * PAGE_SIZE, totalCount)
+
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex items-center justify-between">
+          <div>
+            <CardTitle className="text-base">Review Pairs</CardTitle>
+            <p className="text-xs text-muted-foreground">
+              All reviewer-author pairs.{' '}
+              {teamFilter && (
+                <button
+                  type="button"
+                  className="text-primary hover:underline"
+                  onClick={() => onSearchChange('')}
+                >
+                  Filtered by {teamFilter.reviewerTeam} → {teamFilter.authorTeam}
+                </button>
+              )}
+            </p>
+          </div>
+          <Input
+            placeholder="Search by name..."
+            value={searchQuery}
+            onChange={(e) => onSearchChange(e.target.value)}
+            className="max-w-xs text-sm"
+          />
+        </div>
+      </CardHeader>
+      <CardContent>
+        {rows.length === 0 ? (
+          <p className="text-sm text-muted-foreground py-4 text-center">No pairs match the current filters.</p>
+        ) : (
+          <>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <SortableHead field="reviewer_name" current={sortField} asc={sortAsc} onToggle={onSortToggle}>
+                    Reviewer
+                  </SortableHead>
+                  <SortableHead field="author_name" current={sortField} asc={sortAsc} onToggle={onSortToggle}>
+                    Author
+                  </SortableHead>
+                  <SortableHead field="reviews_count" current={sortField} asc={sortAsc} onToggle={onSortToggle}>
+                    Reviews
+                  </SortableHead>
+                  <SortableHead field="approvals" current={sortField} asc={sortAsc} onToggle={onSortToggle}>
+                    Approvals
+                  </SortableHead>
+                  <SortableHead field="changes_requested" current={sortField} asc={sortAsc} onToggle={onSortToggle}>
+                    Changes Req'd
+                  </SortableHead>
+                  <TableHead />
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {rows.map((pair) => (
+                  <TableRow key={`${pair.reviewer_id}-${pair.author_id}`}>
+                    <TableCell>
+                      <div className="flex items-center gap-2">
+                        <span className="font-medium">{pair.reviewer_name}</span>
+                        {pair.reviewer_team && (
+                          <Badge variant="outline" className="text-[10px] px-1 py-0">{pair.reviewer_team}</Badge>
+                        )}
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex items-center gap-2">
+                        <span className="font-medium">{pair.author_name}</span>
+                        {pair.author_team && (
+                          <Badge variant="outline" className="text-[10px] px-1 py-0">{pair.author_team}</Badge>
+                        )}
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      <button
+                        type="button"
+                        className="text-primary hover:underline font-medium"
+                        onClick={() => onPairClick(pair.reviewer_id, pair.author_id)}
+                      >
+                        {pair.reviews_count}
+                      </button>
+                    </TableCell>
+                    <TableCell>{pair.approvals}</TableCell>
+                    <TableCell>{pair.changes_requested}</TableCell>
+                    <TableCell>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="text-xs"
+                        onClick={() => onPairNavigate(pair.reviewer_id, pair.author_id)}
+                      >
+                        Detail &rarr;
+                      </Button>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+
+            {/* Pagination */}
+            {totalPages > 1 && (
+              <div className="flex items-center justify-between pt-4 text-sm text-muted-foreground">
+                <span>
+                  Showing {startIdx}–{endIdx} of {totalCount} pairs
+                </span>
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={currentPage <= 1}
+                    onClick={() => onPageChange(currentPage - 1)}
+                  >
+                    Previous
+                  </Button>
+                  <span>
+                    Page {currentPage} of {totalPages}
+                  </span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={currentPage >= totalPages}
+                    onClick={() => onPageChange(currentPage + 1)}
+                  >
+                    Next
+                  </Button>
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+// --- Insights Panel (Bus Factors, Silos, Isolated Developers) ---
 
 function InsightsPanel({ insights }: { insights: CollaborationInsights }) {
   return (
-    <div className="grid gap-4 sm:grid-cols-2">
+    <div className="grid gap-4 sm:grid-cols-3">
       {/* Bus Factors */}
       <Card>
         <CardHeader className="pb-2">
@@ -278,51 +572,6 @@ function InsightsPanel({ insights }: { insights: CollaborationInsights }) {
                   </Link>
                 </li>
               ))}
-            </ul>
-          )}
-        </CardContent>
-      </Card>
-
-      {/* Strongest Pairs */}
-      <Card>
-        <CardHeader className="pb-2">
-          <CardTitle className="text-sm font-medium text-muted-foreground">Strongest Pairs</CardTitle>
-          <p className="text-xs text-muted-foreground">Most active reviewer-author pairs</p>
-        </CardHeader>
-        <CardContent>
-          {insights.strongest_pairs.length === 0 ? (
-            <p className="text-sm text-muted-foreground">Not enough data.</p>
-          ) : (
-            <ul className="space-y-2">
-              {insights.strongest_pairs.map((pair) => {
-                // Check reciprocity: is there a reverse pair in strongest_pairs?
-                const reverse = insights.strongest_pairs.find(
-                  (p) => p.reviewer_id === pair.author_id && p.author_id === pair.reviewer_id
-                )
-                return (
-                  <li key={`${pair.reviewer_id}-${pair.author_id}`} className="flex items-center justify-between text-sm">
-                    <span>
-                      <span className="font-medium">{pair.reviewer_name}</span>
-                      <span className="text-muted-foreground">
-                        {reverse ? ' ↔ ' : ' → '}
-                      </span>
-                      <span className="font-medium">{pair.author_name}</span>
-                    </span>
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs text-muted-foreground">{pair.reviews_count} reviews</span>
-                      {reverse ? (
-                        <Badge variant="secondary" className="bg-emerald-500/10 text-emerald-600 text-[10px]">
-                          mutual
-                        </Badge>
-                      ) : (
-                        <Badge variant="secondary" className="bg-amber-500/10 text-amber-600 text-[10px]">
-                          one-way
-                        </Badge>
-                      )}
-                    </div>
-                  </li>
-                )
-              })}
             </ul>
           )}
         </CardContent>

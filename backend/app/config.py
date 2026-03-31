@@ -28,6 +28,10 @@ class Settings(BaseSettings):
     # AI (optional — only needed for AI analysis)
     anthropic_api_key: str = ""
 
+    # Logging
+    log_format: str = "console"  # "json" for production, "console" for dev
+    log_level: str = "INFO"  # DEBUG, INFO, WARNING, ERROR
+
     # Sync scheduling
     sync_interval_minutes: int = 15
     full_sync_cron_hour: int = 2

@@ -142,13 +142,29 @@ class TestRepoStats:
 
 
 class TestBenchmarks:
+    @pytest.fixture(autouse=True)
+    async def seed_groups(self, db_session):
+        from app.models.models import BenchmarkGroupConfig
+        group = BenchmarkGroupConfig(
+            group_key="ics",
+            display_name="IC Engineers",
+            display_order=1,
+            roles=["developer", "senior_developer", "lead", "architect", "intern"],
+            metrics=["prs_merged", "time_to_merge_h", "reviews_given"],
+            min_team_size=3,
+            is_default=True,
+        )
+        db_session.add(group)
+        await db_session.commit()
+
     @pytest.mark.asyncio
     async def test_benchmarks_minimal(self, client):
-        """With only the admin user, sample_size is 1 (admin exists)."""
+        """With only the admin user (role=lead), sample_size is 1."""
         resp = await client.get("/api/stats/benchmarks")
         assert resp.status_code == 200
         data = resp.json()
         assert data["sample_size"] >= 0
+        assert "group" in data
 
     @pytest.mark.asyncio
     async def test_benchmarks_with_data(

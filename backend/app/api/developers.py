@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from enum import Enum as PyEnum
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.auth import get_current_user, require_admin
@@ -10,13 +10,18 @@ from app.models.database import get_db
 from app.models.models import Developer
 from app.models.models import Issue, PullRequest
 from app.schemas.schemas import (
+    ActivitySummaryResponse,
     AppRole,
     AuthUser,
     DeactivationImpactResponse,
     DeveloperCreate,
     DeveloperResponse,
     DeveloperUpdateAdmin,
+    UnassignedRoleCountResponse,
 )
+from app.services.roles import validate_role_key
+from app.services.stats import get_activity_summary
+from app.services.teams import resolve_team
 
 router = APIRouter()
 
@@ -34,6 +39,20 @@ async def list_developers(
     stmt = stmt.order_by(Developer.display_name)
     result = await db.execute(stmt)
     return result.scalars().all()
+
+
+@router.get("/developers/unassigned-role-count", response_model=UnassignedRoleCountResponse)
+async def unassigned_role_count(
+    _: AuthUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    count = await db.scalar(
+        select(func.count()).select_from(Developer).where(
+            Developer.is_active.is_(True),
+            Developer.role.is_(None),
+        )
+    ) or 0
+    return UnassignedRoleCountResponse(count=count)
 
 
 @router.post(
@@ -65,8 +84,18 @@ async def create_developer(
             detail=f"Developer with github_username '{data.github_username}' already exists",
         )
 
+    if data.role and not await validate_role_key(db, data.role):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid role: '{data.role}'",
+        )
+
+    # Resolve team name (find or auto-create in teams table)
+    dev_data = data.model_dump()
+    dev_data["team"] = await resolve_team(db, dev_data.get("team"))
+
     now = datetime.now(timezone.utc)
-    dev = Developer(**data.model_dump(), created_at=now, updated_at=now)
+    dev = Developer(**dev_data, created_at=now, updated_at=now)
     db.add(dev)
     await db.commit()
     await db.refresh(dev)
@@ -87,6 +116,23 @@ async def get_developer(
     return dev
 
 
+@router.get(
+    "/developers/{developer_id}/activity-summary",
+    response_model=ActivitySummaryResponse,
+)
+async def developer_activity_summary(
+    developer_id: int,
+    user: AuthUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    if user.app_role != AppRole.admin and user.developer_id != developer_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    dev = await db.get(Developer, developer_id)
+    if not dev:
+        raise HTTPException(status_code=404, detail="Developer not found")
+    return await get_activity_summary(db, developer_id)
+
+
 @router.patch("/developers/{developer_id}", response_model=DeveloperResponse)
 async def update_developer(
     developer_id: int,
@@ -99,6 +145,16 @@ async def update_developer(
         raise HTTPException(status_code=404, detail="Developer not found")
 
     updates = data.model_dump(exclude_unset=True)
+    if "role" in updates and updates["role"] is not None:
+        if not await validate_role_key(db, updates["role"]):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid role: '{updates['role']}'",
+            )
+    # Resolve team name if provided
+    if "team" in updates and updates["team"] is not None:
+        updates["team"] = await resolve_team(db, updates["team"])
+
     for field, value in updates.items():
         setattr(dev, field, value.value if isinstance(value, PyEnum) else value)
     dev.updated_at = datetime.now(timezone.utc)

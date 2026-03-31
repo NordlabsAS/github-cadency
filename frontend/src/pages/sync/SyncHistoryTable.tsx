@@ -10,6 +10,7 @@ import {
 } from '@/components/ui/table'
 import { cn } from '@/lib/utils'
 import type { SyncEvent } from '@/utils/types'
+import { timeAgo, formatDuration } from '@/utils/format'
 
 interface SyncHistoryTableProps {
   events: SyncEvent[]
@@ -31,26 +32,6 @@ function statusLabel(status: string | null): string {
   return status ?? '-'
 }
 
-function timeAgo(dateStr: string | null): string {
-  if (!dateStr) return '-'
-  const seconds = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000)
-  if (seconds < 60) return `${seconds}s ago`
-  const minutes = Math.floor(seconds / 60)
-  if (minutes < 60) return `${minutes}m ago`
-  const hours = Math.floor(minutes / 60)
-  if (hours < 24) return `${hours}h ago`
-  const days = Math.floor(hours / 24)
-  return `${days}d ago`
-}
-
-function formatDuration(seconds: number | null): string {
-  if (seconds == null) return '-'
-  if (seconds < 60) return `${seconds}s`
-  const minutes = Math.floor(seconds / 60)
-  const secs = seconds % 60
-  return `${minutes}m ${secs}s`
-}
-
 export default function SyncHistoryTable({ events }: SyncHistoryTableProps) {
   const navigate = useNavigate()
 
@@ -59,7 +40,7 @@ export default function SyncHistoryTable({ events }: SyncHistoryTableProps) {
       <Table>
         <TableHeader>
           <TableRow>
-            <TableHead>Type</TableHead>
+            <TableHead>Scope</TableHead>
             <TableHead>Status</TableHead>
             <TableHead>Progress</TableHead>
             <TableHead>PRs</TableHead>
@@ -88,8 +69,15 @@ export default function SyncHistoryTable({ events }: SyncHistoryTableProps) {
               >
                 <TableCell>
                   <div className="flex items-center gap-1.5">
-                    <Badge variant="outline">{event.sync_type}</Badge>
-                    {event.resumed_from_id && (
+                    <span className="text-sm truncate max-w-[200px]" title={event.sync_scope ?? event.sync_type ?? ''}>
+                      {event.sync_scope ?? event.sync_type ?? '-'}
+                    </span>
+                    {event.triggered_by && (
+                      <Badge variant="secondary" className="text-[10px] px-1.5 py-0 shrink-0">
+                        {event.triggered_by === 'scheduled' ? 'Auto' : event.triggered_by === 'auto_resume' ? 'Resumed' : 'Manual'}
+                      </Badge>
+                    )}
+                    {!event.triggered_by && event.resumed_from_id && (
                       <span className="text-xs text-muted-foreground" title={`Resumed from #${event.resumed_from_id}`}>
                         &#x21bb;
                       </span>

@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
-import { apiFetch } from '@/utils/api'
+import { ApiError, apiFetch } from '@/utils/api'
 import type { AIAnalysis, AIAnalyzeRequest, OneOnOnePrepRequest, TeamHealthRequest } from '@/utils/types'
 
 export function useAIHistory() {
@@ -31,7 +31,7 @@ export function useRunAnalysis() {
       toast.success(result.reused ? 'Showing cached result' : 'Analysis complete')
     },
     onError: (err: Error) =>
-      toast.error(err.message?.includes('429') ? 'Monthly AI budget exceeded' : 'Analysis failed'),
+      toast.error(err instanceof ApiError && err.status === 429 ? 'Monthly AI budget exceeded' : 'Analysis failed'),
   })
 }
 
@@ -48,7 +48,7 @@ export function useRunOneOnOnePrep() {
       toast.success(result.reused ? 'Showing cached result' : '1:1 prep brief generated')
     },
     onError: (err: Error) =>
-      toast.error(err.message?.includes('429') ? 'Monthly AI budget exceeded' : 'Failed to generate 1:1 prep'),
+      toast.error(err instanceof ApiError && err.status === 429 ? 'Monthly AI budget exceeded' : 'Failed to generate 1:1 prep'),
   })
 }
 
@@ -65,6 +65,6 @@ export function useRunTeamHealth() {
       toast.success(result.reused ? 'Showing cached result' : 'Team health check generated')
     },
     onError: (err: Error) =>
-      toast.error(err.message?.includes('429') ? 'Monthly AI budget exceeded' : 'Failed to generate team health check'),
+      toast.error(err instanceof ApiError && err.status === 429 ? 'Monthly AI budget exceeded' : 'Failed to generate team health check'),
   })
 }

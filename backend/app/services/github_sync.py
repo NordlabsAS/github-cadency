@@ -1,5 +1,4 @@
 import asyncio
-import logging
 import re
 import time
 from dataclasses import dataclass, field
@@ -13,6 +12,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.logging import get_logger
 from app.models.database import AsyncSessionLocal
 from app.models.models import (
     Deployment,
@@ -29,7 +29,7 @@ from app.models.models import (
     SyncEvent,
 )
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 GITHUB_API = "https://api.github.com"
 
@@ -175,7 +175,7 @@ class SyncContext:
     db: AsyncSession
     client: httpx.AsyncClient
     sync_event: SyncEvent
-    sync_logger: logging.Logger = field(default_factory=lambda: logger)
+    sync_logger: object = field(default_factory=lambda: logger)
     rate_limit_wait_total: int = 0
 
 
@@ -346,7 +346,8 @@ async def check_rate_limit(
             await ctx.db.commit()
 
         logger.warning(
-            "Rate limit low (%d remaining). Waiting %ds.", remaining, wait_seconds
+            "Rate limit low, waiting",
+            remaining=remaining, wait_seconds=wait_seconds, event_type="system.github_api",
         )
         if ctx:
             _add_log(ctx, "warn", f"Rate limit: {remaining} remaining, waiting {wait_seconds}s")
@@ -371,7 +372,7 @@ async def proactive_rate_check(
         )
         data = resp.json()
         remaining = data.get("resources", {}).get("core", {}).get("remaining", 5000)
-        ctx.sync_logger.info("Rate limit: %d remaining", remaining)
+        ctx.sync_logger.info("Rate limit check", remaining=remaining, event_type="system.github_api")
 
         if remaining < 200:
             reset_at = data.get("resources", {}).get("core", {}).get("reset", 0)
@@ -382,7 +383,7 @@ async def proactive_rate_check(
             ctx.rate_limit_wait_total += wait_seconds
             await asyncio.sleep(wait_seconds)
     except Exception as e:
-        ctx.sync_logger.warning("Proactive rate check failed: %s", e)
+        ctx.sync_logger.warning("Proactive rate check failed", error=str(e), event_type="system.github_api")
 
 
 # --- GitHub API Client ---
@@ -428,8 +429,9 @@ async def github_get(
             backoff = RETRY_BACKOFF[attempt]
             if ctx:
                 ctx.sync_logger.warning(
-                    "Retryable error on %s (attempt %d/%d), retrying in %ds: %s",
-                    path, attempt + 1, MAX_RETRIES + 1, backoff, last_exc,
+                    "Retryable error, retrying",
+                    path=path, attempt=attempt + 1, max_attempts=MAX_RETRIES + 1,
+                    backoff_seconds=backoff, error=str(last_exc), event_type="system.github_api",
                 )
             await asyncio.sleep(backoff)
 
@@ -490,7 +492,7 @@ async def _fetch_user_profile(
         resp = await github_get(client, f"/users/{login}", ctx=ctx)
         return resp.json()
     except Exception:
-        logger.warning("Failed to fetch profile for %s", login)
+        logger.warning("Failed to fetch profile", login=login, event_type="system.github_api")
         return None
 
 
@@ -532,7 +534,7 @@ async def resolve_author(
         if not dev.is_active:
             dev.is_active = True
             await db.flush()
-            logger.warning("Auto-reactivated inactive developer: %s (id=%d)", github_username, dev.id)
+            logger.warning("Auto-reactivated inactive developer", github_username=github_username, developer_id=dev.id, event_type="system.sync")
             if ctx:
                 _add_log(ctx, "warn", f"Auto-reactivated inactive developer '{github_username}' — appeared in GitHub activity")
         return dev.id
@@ -562,7 +564,7 @@ async def resolve_author(
         _apply_profile_to_developer(dev, profile)
     db.add(dev)
     await db.flush()
-    logger.info("Auto-created developer: %s (id=%d)", github_username, dev.id)
+    logger.info("Auto-created developer", github_username=github_username, developer_id=dev.id, event_type="system.sync")
     return dev.id
 
 
@@ -599,7 +601,7 @@ async def sync_org_contributors(
         if existing_dev is not None:
             if not existing_dev.is_active:
                 existing_dev.is_active = True
-                logger.warning("Auto-reactivated inactive developer: %s (id=%d)", login, existing_dev.id)
+                logger.warning("Auto-reactivated inactive developer", login=login, developer_id=existing_dev.id, event_type="system.sync")
                 if ctx:
                     _add_log(ctx, "warn", f"Auto-reactivated inactive developer '{login}' — found in org members")
             continue
@@ -625,7 +627,7 @@ async def sync_org_contributors(
 
     if ctx:
         _add_log(ctx, "info", f"Org members: {len(members_data)} found, {created} new developers created")
-    logger.info("sync_org_contributors: %d members, %d created", len(members_data), created)
+    logger.info("sync_org_contributors complete", members=len(members_data), created=created, event_type="system.sync")
     return created
 
 
@@ -702,9 +704,35 @@ async def backfill_author_links(db: AsyncSession) -> dict[str, int]:
     )
     issue_count = issue_result.rowcount
 
+    # Backfill issues.creator_id
+    creator_subq = (
+        select(Developer.id)
+        .where(Developer.github_username == Issue.creator_github_username)
+        .correlate(Issue)
+        .scalar_subquery()
+    )
+    creator_result = await db.execute(
+        update(Issue)
+        .where(
+            Issue.creator_id.is_(None),
+            Issue.creator_github_username.isnot(None),
+            select(Developer.id)
+            .where(Developer.github_username == Issue.creator_github_username)
+            .correlate(Issue)
+            .exists(),
+        )
+        .values(creator_id=creator_subq)
+    )
+    creator_count = creator_result.rowcount
+
     await db.flush()
-    counts = {"pull_requests": pr_count, "pr_reviews": review_count, "issues": issue_count}
-    logger.info("backfill_author_links: %s", counts)
+    counts = {
+        "pull_requests": pr_count,
+        "pr_reviews": review_count,
+        "issues_assignee": issue_count,
+        "issues_creator": creator_count,
+    }
+    logger.info("backfill_author_links complete", event_type="system.sync", **counts)
     return counts
 
 
@@ -720,7 +748,7 @@ async def run_contributor_sync() -> SyncEvent:
             select(SyncEvent).where(SyncEvent.status == "started").limit(1)
         )
         if active_result.scalar_one_or_none():
-            logger.warning("Skipping contributor sync — another sync is in progress")
+            logger.warning("Skipping contributor sync — another sync is in progress", event_type="system.sync")
             raise RuntimeError("A sync is already in progress")
 
         sync_event = SyncEvent(
@@ -740,7 +768,7 @@ async def run_contributor_sync() -> SyncEvent:
         db.add(sync_event)
         await db.commit()
 
-        sync_log = logger.getChild(f"sync.{sync_event.id}")
+        sync_log = logger.bind(sync_id=sync_event.id)
         ctx = SyncContext(
             db=db, client=None, sync_event=sync_event, sync_logger=sync_log,  # type: ignore[arg-type]
         )
@@ -949,7 +977,7 @@ async def upsert_pull_request(
                     detail["merged_at"].replace("Z", "+00:00")
                 )
         except httpx.HTTPStatusError:
-            logger.warning("Failed to fetch detail for PR #%d", pr.number)
+            logger.warning("Failed to fetch detail for PR", pr_number=pr.number, event_type="system.github_api")
 
     # Compute time_to_merge_s
     if pr.merged_at and pr.created_at:
@@ -1248,6 +1276,10 @@ async def upsert_issue(
     issue.labels = [l["name"] for l in issue_data.get("labels", [])]
     issue.html_url = issue_data.get("html_url")
 
+    # GitHub issue type (available when repo has issue types enabled)
+    type_obj = issue_data.get("type")
+    issue.issue_type = type_obj.get("name") if isinstance(type_obj, dict) else None
+
     assignee = issue_data.get("assignee") or {}
     assignee_login = assignee.get("login")
     issue.assignee_github_username = assignee_login
@@ -1259,7 +1291,12 @@ async def upsert_issue(
     issue.body_length = len(body)
     issue.has_checklist = bool(re.search(r'- \[[ xX]\]', body))
     issue.state_reason = issue_data.get("state_reason")
-    issue.creator_github_username = issue_data.get("user", {}).get("login")
+    creator_user = issue_data.get("user") or {}
+    creator_login = creator_user.get("login")
+    issue.creator_github_username = creator_login
+    issue.creator_id = await resolve_author(
+        db, creator_login, user_data=creator_user if creator_login else None, client=client
+    )
 
     milestone = issue_data.get("milestone") or {}
     issue.milestone_title = milestone.get("title")
@@ -1739,6 +1776,10 @@ async def sync_repo(
     prs_skipped = 0
     issues_upserted = 0
     issues_skipped = 0
+
+    # Load classification rules once for this repo sync
+    from app.services.work_categories import classify_work_item_with_rules, get_all_rules
+    classification_rules = await get_all_rules(db)
     warnings: list[str] = []
 
     # Pre-load existing PR updated_at timestamps for smart-skip
@@ -1811,6 +1852,12 @@ async def sync_repo(
         prs_upserted += 1
         processed_count = prs_upserted + prs_skipped
 
+        # Classify work category (skip manual overrides)
+        if pr.work_category_source != "manual":
+            cat, src = classify_work_item_with_rules(pr.labels, pr.title, classification_rules)
+            pr.work_category = cat
+            pr.work_category_source = src if src else None
+
         # Fetch reviews for this PR
         reviews_data = await github_get_paginated(
             client, f"/repos/{repo.full_name}/pulls/{pr.number}/reviews", ctx=ctx
@@ -1863,8 +1910,9 @@ async def sync_repo(
                 warn_msg = f"check_runs PR#{pr.number}: {e}"
                 warnings.append(warn_msg)
                 ctx.sync_logger.warning(
-                    "Failed to fetch check runs for PR #%d (sha=%s): %s",
-                    pr.number, pr.head_sha, e,
+                    "Failed to fetch check runs for PR",
+                    pr_number=pr.number, head_sha=pr.head_sha, error=str(e),
+                    event_type="system.github_api",
                 )
 
         # Update progress counter
@@ -1937,8 +1985,17 @@ async def sync_repo(
                 sync_event.current_repo_issues_done = issues_upserted + issues_skipped
                 continue
 
-        await upsert_issue(db, issue_data, repo, client=client)
+        issue = await upsert_issue(db, issue_data, repo, client=client)
         issues_upserted += 1
+
+        # Classify work category (skip manual overrides)
+        if issue.work_category_source != "manual":
+            cat, src = classify_work_item_with_rules(
+                issue.labels, issue.title, classification_rules, issue_type=issue.issue_type,
+            )
+            issue.work_category = cat
+            issue.work_category_source = src if src else None
+
         sync_event.current_repo_issues_done = issues_upserted + issues_skipped
         if issues_upserted % PROGRESS_COMMIT_INTERVAL == 0:
             await db.commit()
@@ -1987,7 +2044,7 @@ async def sync_repo(
     except Exception as e:
         warn_msg = f"repo_tree: {e}"
         warnings.append(warn_msg)
-        ctx.sync_logger.warning("sync_repo_tree failed for %s: %s", repo.full_name, e)
+        ctx.sync_logger.warning("sync_repo_tree failed", repo=repo.full_name, error=str(e), event_type="system.sync")
 
     # --- Deployments ---
     sync_event.current_step = "fetching_deployments"
@@ -1999,7 +2056,7 @@ async def sync_repo(
     except Exception as e:
         warn_msg = f"deployments: {e}"
         warnings.append(warn_msg)
-        ctx.sync_logger.warning("sync_deployments failed for %s: %s", repo.full_name, e)
+        ctx.sync_logger.warning("sync_deployments failed", repo=repo.full_name, error=str(e), event_type="system.sync")
 
     repo.last_synced_at = datetime.now(timezone.utc)
     return prs_upserted, issues_upserted, warnings, prs_skipped, issues_skipped
@@ -2031,6 +2088,9 @@ async def run_sync(
     repo_ids: list[int] | None = None,
     since_override: datetime | None = None,
     resumed_from_id: int | None = None,
+    triggered_by: str | None = None,
+    sync_scope: str | None = None,
+    sync_event_id: int | None = None,
 ) -> SyncEvent:
     """Run a full or incremental sync across repos.
 
@@ -2039,57 +2099,68 @@ async def run_sync(
         repo_ids: specific repo IDs to sync (None = all tracked)
         since_override: override per-repo last_synced_at with this date
         resumed_from_id: ID of the SyncEvent this resumes from
+        triggered_by: "manual", "scheduled", or "auto_resume"
+        sync_scope: descriptive label for what was synced
+        sync_event_id: ID of a pre-created SyncEvent (skips creation if provided)
     """
     async with AsyncSessionLocal() as db:
-        # Concurrency guard: advisory lock prevents TOCTOU race between
-        # the "is another sync running?" check and the INSERT.
-        # Lock key 73796e63 = crc32('devpulse_sync') — arbitrary constant.
-        SYNC_ADVISORY_LOCK_KEY = 1937337955  # noqa: N806
-        try:
-            await db.execute(sa.text("SELECT pg_advisory_lock(:key)"), {"key": SYNC_ADVISORY_LOCK_KEY})
-        except Exception:
-            # SQLite (tests) doesn't support advisory locks — fall through to app-level check
-            pass
+        if sync_event_id:
+            # Use pre-created SyncEvent (created by the API endpoint for instant UI feedback)
+            sync_event = await db.get(SyncEvent, sync_event_id)
+            if not sync_event or sync_event.status != "started":
+                raise RuntimeError(f"SyncEvent {sync_event_id} not found or not in started state")
+        else:
+            # Concurrency guard: advisory lock prevents TOCTOU race between
+            # the "is another sync running?" check and the INSERT.
+            # Lock key 73796e63 = crc32('devpulse_sync') — arbitrary constant.
+            SYNC_ADVISORY_LOCK_KEY = 1937337955  # noqa: N806
+            try:
+                await db.execute(sa.text("SELECT pg_advisory_lock(:key)"), {"key": SYNC_ADVISORY_LOCK_KEY})
+            except Exception:
+                # SQLite (tests) doesn't support advisory locks — fall through to app-level check
+                pass
 
-        active_result = await db.execute(
-            select(SyncEvent).where(SyncEvent.status == "started").limit(1)
-        )
-        if active_result.scalar_one_or_none():
-            # Release advisory lock before raising
+            active_result = await db.execute(
+                select(SyncEvent).where(SyncEvent.status == "started").limit(1)
+            )
+            if active_result.scalar_one_or_none():
+                # Release advisory lock before raising
+                try:
+                    await db.execute(sa.text("SELECT pg_advisory_unlock(:key)"), {"key": SYNC_ADVISORY_LOCK_KEY})
+                except Exception:
+                    pass
+                logger.warning("Skipping sync — another sync is already in progress", event_type="system.sync")
+                raise RuntimeError("A sync is already in progress")
+
+            sync_event = SyncEvent(
+                sync_type=sync_type,
+                status="started",
+                started_at=datetime.now(timezone.utc),
+                repos_synced=0,
+                prs_upserted=0,
+                issues_upserted=0,
+                errors=[],
+                repo_ids=repo_ids,
+                since_override=since_override,
+                resumed_from_id=resumed_from_id,
+                repos_completed=[],
+                repos_failed=[],
+                log_summary=[],
+                is_resumable=False,
+                rate_limit_wait_s=0,
+                triggered_by=triggered_by,
+                sync_scope=sync_scope,
+            )
+            db.add(sync_event)
+            await db.commit()
+
+            # Release advisory lock — the committed SyncEvent row now guards concurrency
             try:
                 await db.execute(sa.text("SELECT pg_advisory_unlock(:key)"), {"key": SYNC_ADVISORY_LOCK_KEY})
             except Exception:
                 pass
-            logger.warning("Skipping sync — another sync is already in progress")
-            raise RuntimeError("A sync is already in progress")
 
-        sync_event = SyncEvent(
-            sync_type=sync_type,
-            status="started",
-            started_at=datetime.now(timezone.utc),
-            repos_synced=0,
-            prs_upserted=0,
-            issues_upserted=0,
-            errors=[],
-            repo_ids=repo_ids,
-            since_override=since_override,
-            resumed_from_id=resumed_from_id,
-            repos_completed=[],
-            repos_failed=[],
-            log_summary=[],
-            is_resumable=False,
-            rate_limit_wait_s=0,
-        )
-        db.add(sync_event)
-        await db.commit()
-
-        # Release advisory lock — the committed SyncEvent row now guards concurrency
-        try:
-            await db.execute(sa.text("SELECT pg_advisory_unlock(:key)"), {"key": SYNC_ADVISORY_LOCK_KEY})
-        except Exception:
-            pass
-
-        sync_log = logger.getChild(f"sync.{sync_event.id}")
+        sync_log = logger.bind(sync_id=sync_event.id)
         ctx = SyncContext(
             db=db, client=None, sync_event=sync_event, sync_logger=sync_log  # type: ignore[arg-type]
         )
@@ -2131,7 +2202,7 @@ async def run_sync(
                     await sync_org_contributors(db, client, ctx=ctx)
                     await db.commit()
                 except Exception as e:
-                    ctx.sync_logger.warning("sync_org_contributors failed: %s", e)
+                    ctx.sync_logger.warning("sync_org_contributors failed", error=str(e), event_type="system.sync")
                     _add_log(ctx, "warn", f"Contributor sync failed: {e}")
                     _append_jsonb(
                         sync_event, "errors",
@@ -2240,7 +2311,7 @@ async def run_sync(
                         _add_log(ctx, "info", f"Backfilled {total_backfilled} author links")
                     await db.commit()
                 except Exception as e:
-                    ctx.sync_logger.warning("backfill_author_links failed: %s", e)
+                    ctx.sync_logger.warning("backfill_author_links failed", error=str(e), event_type="system.sync")
 
                 # Recompute collaboration scores
                 try:
@@ -2262,9 +2333,7 @@ async def run_sync(
                         f"Collaboration scores recomputed: {pair_count} pairs",
                     )
                 except Exception as e:
-                    ctx.sync_logger.warning(
-                        "Collaboration score recomputation failed: %s", e
-                    )
+                    ctx.sync_logger.warning("Collaboration score recomputation failed", error=str(e), event_type="system.sync")
 
                 # Determine final status
                 if cancelled:
@@ -2287,7 +2356,7 @@ async def run_sync(
                     from app.services.slack import send_sync_notification
                     await send_sync_notification(db, sync_event)
                 except Exception as e:
-                    ctx.sync_logger.warning("Slack sync notification failed: %s", e)
+                    ctx.sync_logger.warning("Slack sync notification failed", error=str(e), event_type="system.slack")
 
         except SyncCancelled:
             sync_log.info("Sync cancelled at top level")

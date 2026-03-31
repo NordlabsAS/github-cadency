@@ -1,6 +1,6 @@
 ---
 purpose: "Routing, component hierarchy, state management, hooks, design system, error/loading patterns"
-last-updated: "2026-03-29"
+last-updated: "2026-03-31"
 related:
   - docs/architecture/OVERVIEW.md
   - docs/architecture/API-DESIGN.md
@@ -18,24 +18,28 @@ All routes defined in `frontend/src/App.tsx`.
 | `/auth/callback` | `AuthCallback` | None | Captures JWT from OAuth redirect |
 | `/` | `Dashboard` | Admin | Developers redirect to own `/team/:id` |
 | `/executive` | `ExecutiveDashboard` | Admin | |
-| `/team` | `TeamRegistry` | Admin | Active/Inactive toggle, deactivate/reactivate, DeactivateDialog, inactive-conflict reactivation on create |
-| `/team/:id` | `DeveloperDetail` | Any | Shows "Inactive" badge when `is_active=false`. Includes RelationshipsCard (org hierarchy) and WorksWithSection (top collaborators) |
+| `/team` | Redirect to `/admin/team` | — | |
+| `/admin/team` | `TeamRegistry` | Admin | Active/Inactive toggle, deactivate/reactivate, DeactivateDialog, inactive-conflict reactivation on create |
+| `/team/:id` | `DeveloperDetail` | Any | Shows "Inactive" badge when `is_active=false`. Includes RelationshipsCard (org hierarchy), WorksWithSection (top collaborators), ActivitySummaryCard (lifetime stats + work breakdown, own/admin only), EditProfileDialog (admin gear icon), DeactivateDialog (from edit dialog) |
 | `/goals` | `Goals` | Any | |
 | `/insights/workload` | `WorkloadOverview` | Admin | SidebarLayout |
-| `/insights/collaboration` | `CollaborationMatrix` | Admin | SidebarLayout |
+| `/insights/collaboration` | `CollaborationMatrix` | Admin | SidebarLayout | Team-level heatmap + sortable/paginated pairs table, replaces N×N dev heatmap |
 | `/insights/benchmarks` | `Benchmarks` | Admin | SidebarLayout |
 | `/insights/issue-quality` | `IssueQuality` | Admin | SidebarLayout |
+| `/insights/issue-linkage` | `IssueLinkage` | Admin | SidebarLayout | Per-developer PR-to-issue linkage rates, attention callout, sortable table with rate bars |
 | `/insights/code-churn` | `CodeChurn` | Admin | SidebarLayout |
-| `/insights/ci-cd` | `CICDInsights` | Admin | SidebarLayout |
+| `/insights/cicd` | `CIInsights` | Admin | SidebarLayout |
 | `/insights/dora` | `DORAMetrics` | Admin | SidebarLayout |
-| `/insights/investment` | `Investment` | Admin | SidebarLayout |
+| `/insights/investment` | `Investment` | Admin | SidebarLayout | Clickable donut charts, inline category preview, custom tooltips |
+| `/insights/investment/:category` | `InvestmentCategory` | Admin | SidebarLayout | Paginated item table with recategorization dropdowns |
 | `/insights/org-chart` | `OrgChart` | Admin | SidebarLayout |
-| `/admin/repos` | `Repos` | Admin | SidebarLayout |
+| `/admin/repos` | `Repos` | Admin | SidebarLayout | Summary strip, search/filter/sort, table/card toggle, health indicators, deep links to insights |
 | `/admin/sync` | `SyncPage` | Admin | SidebarLayout |
 | `/admin/sync/:id` | `SyncDetailPage` | Admin | SidebarLayout |
 | `/admin/ai` | `AIAnalysis` | Admin | SidebarLayout |
 | `/admin/ai/settings` | `AISettingsPage` | Admin | SidebarLayout |
 | `/admin/slack` | `SlackSettingsPage` | Admin | SidebarLayout |
+| `/admin/work-categories` | `WorkCategoriesPage` | Admin | SidebarLayout | Categories table, classification rules table, batch reclassify |
 
 Bare `/insights` and `/admin` redirect to first sub-page. `ProtectedRoute` checks for `devpulse_token` in localStorage.
 
@@ -54,8 +58,8 @@ App
                      └─ Suspense (fallback: PageSkeleton)
                         └─ ErrorBoundary (global fallback)
                            ├─ ErrorBoundary → Dashboard / ExecutiveDashboard / DeveloperDetail / Goals (per-page)
-                           ├─ SidebarLayout (insights) → ErrorBoundary → 9 lazy sub-pages
-                           └─ SidebarLayout (admin) → ErrorBoundary → 7 lazy sub-pages
+                           ├─ SidebarLayout (insights) → ErrorBoundary → 11 lazy sub-pages
+                           └─ SidebarLayout (admin) → ErrorBoundary → 8 lazy sub-pages
 ```
 
 All page components are lazy-loaded via `React.lazy()`. Layout, SidebarLayout, and hooks are eagerly loaded.
@@ -124,6 +128,7 @@ Single key: `devpulse_token` (JWT). Written by `AuthCallback`, read by `apiFetch
 |------|----------|-------------------|
 | `useDevelopers(team, isActive)` | `GET /developers` | `['developers', team, isActive]` |
 | `useDeveloper(id)` | `GET /developers/:id` | `['developer', id]` |
+| `useActivitySummary(id)` | `GET /developers/:id/activity-summary` | `['developer', id, 'activity-summary']`. 60s staleTime |
 | `useDeactivationImpact(id, enabled)` | `GET /developers/:id/deactivation-impact` | `['developer', id, 'deactivation-impact']` |
 | `useCreateDeveloper()` | `POST /developers` | Invalidates `['developers']`. `onError` in TeamRegistry catches `ApiError` with `detail.code === 'inactive_exists'` to show reactivation prompt |
 | `useUpdateDeveloper(id)` | `PATCH /developers/:id` | Invalidates `['developers']`, `['developer', id]` |
@@ -141,10 +146,14 @@ Single key: `devpulse_token` (JWT). Written by `AuthCallback`, read by `apiFetch
 | `useRiskSummary(...)` | `GET /stats/risk-summary` | `['risk-summary', ...]` |
 | `useCodeChurn(repoId, from, to)` | `GET /stats/repo/:id/churn` | `['code-churn', ...]` |
 | `useWorkAllocation(team, from, to, useAi)` | `GET /stats/work-allocation` | `['work-allocation', ...]` |
+| `useWorkAllocationItems(cat, type, from, to, page, size)` | `GET /stats/work-allocation/items` | `['work-allocation-items', ...]` |
+| `useRecategorizeItem()` | `PATCH /stats/work-allocation/items/:type/:id/category` | Mutation; invalidates `work-allocation` + `work-allocation-items` |
 | `useCIStats(from, to, repoId)` | `GET /stats/ci` | `['ci-stats', ...]` |
 | `useDoraMetrics(from, to, repoId)` | `GET /stats/dora` | `['dora-metrics', ...]` |
 | `useAllDeveloperStats(ids, from, to)` | Parallel `GET /stats/developer/:id` | Shared with `useDeveloperStats` |
+| `useReposSummary(from, to)` | `GET /stats/repos/summary` | `['repos-summary', ...]`, staleTime 60s |
 | `useIssueCreatorStats(team, from, to)` | `GET /stats/issues/creators` | `['issue-creator-stats', ...]` |
+| `useIssueLinkageByDeveloper(team, from, to)` | `GET /stats/issue-linkage/developers` | `['issue-linkage-developers', ...]` |
 
 ### Sync
 
@@ -161,6 +170,8 @@ Single key: `devpulse_token` (JWT). Written by `AuthCallback`, read by `apiFetch
 | `useCancelSync()` | `POST /sync/cancel` | |
 | `useForceStopSync()` | `POST /sync/force-stop` | |
 | `useSyncContributors()` | `POST /sync/contributors` | |
+| `useSyncSchedule()` | `GET /sync/schedule` | staleTime 60s |
+| `useUpdateSyncSchedule()` | `PATCH /sync/schedule` | Sets cache, invalidates status |
 
 ### AI
 
@@ -197,6 +208,17 @@ Single key: `devpulse_token` (JWT). Written by `AuthCallback`, read by `apiFetch
 | `useOrgTree(team?)` | `GET /org-tree` | Full org hierarchy tree |
 | `useWorksWith(devId, dateFrom?, dateTo?)` | `GET /developers/:id/works-with` | Top collaborators with multi-signal scores |
 
+### Roles (`hooks/useRoles.ts`)
+
+| Hook | Endpoint | Notes |
+|------|----------|-------|
+| `useRoles()` | `GET /roles` | All role definitions. 5min staleTime. Used by TeamRegistry role picker. |
+| `useCreateRole()` | `POST /roles` | Admin only. Invalidates `['roles']` cache. |
+| `useUpdateRole()` | `PATCH /roles/:roleKey` | Admin only. Invalidates `['roles']` cache. |
+| `useDeleteRole()` | `DELETE /roles/:roleKey` | Admin only. Invalidates `['roles']` cache. |
+
+`TeamRegistry` role picker fetches roles from `useRoles()` and groups them by `contribution_category` using `<optgroup>` with labels: Code Contributors, Issue Contributors, Non-Contributors, System. Role display names come from the API (not hardcoded).
+
 ### Slack Integration (`hooks/useSlack.ts`)
 
 | Hook | Endpoint | Notes |
@@ -212,17 +234,64 @@ Single key: `devpulse_token` (JWT). Written by `AuthCallback`, read by `apiFetch
 
 `SlackPreferencesSection`: Renders on DeveloperDetail for the user's own profile. Shows Slack user ID input and per-notification-type toggles.
 
+### Teams (`hooks/useTeams.ts`)
+
+| Hook | Endpoint | Notes |
+|------|----------|-------|
+| `useTeams()` | `GET /teams` | All team definitions. 5min staleTime. |
+| `useCreateTeam()` | `POST /teams` | Admin only. Invalidates `['teams']` cache. |
+| `useUpdateTeam()` | `PATCH /teams/:id` | Admin only. Invalidates `['teams']` + `['developers']`. |
+| `useDeleteTeam()` | `DELETE /teams/:id` | Admin only. Invalidates `['teams']` cache. |
+
+`TeamCombobox` (`components/TeamCombobox.tsx`): Searchable combobox for team selection. Supports "create new team by typing" (shows `+Create "..."` when no match). Used by developer create/edit forms. `allowEmpty` prop for filter contexts.
+
+### Work Categories (`hooks/useWorkCategories.ts`)
+
+| Hook | Endpoint | Notes |
+|------|----------|-------|
+| `useWorkCategories()` | `GET /work-categories` | All categories. 5min staleTime. |
+| `useCreateWorkCategory()` | `POST /work-categories` | Admin only. |
+| `useUpdateWorkCategory()` | `PATCH /work-categories/:key` | Admin only. |
+| `useDeleteWorkCategory()` | `DELETE /work-categories/:key` | Admin only. Non-default only. |
+| `useWorkCategoryRules()` | `GET /work-categories/rules` | All rules. 5min staleTime. |
+| `useCreateWorkCategoryRule()` | `POST /work-categories/rules` | Admin only. Validates regex. |
+| `useUpdateWorkCategoryRule()` | `PATCH /work-categories/rules/:id` | Admin only. |
+| `useDeleteWorkCategoryRule()` | `DELETE /work-categories/rules/:id` | Admin only. |
+| `useReclassify()` | `POST /work-categories/reclassify` | Admin only. Batch reclassify. |
+| `useScanSuggestions()` | `POST /work-categories/suggestions` | Admin only. Returns uncovered labels/issue types with usage counts and suggested categories. |
+| `useBulkCreateRules()` | `POST /work-categories/rules/bulk` | Admin only. Creates multiple rules in one transaction. Invalidates `['work-category-rules']`. |
+| `useCategoryConfig()` | Derived from `useWorkCategories()` | Replaces static `CATEGORY_CONFIG`. Returns `{ config, order }` with `FALLBACK_CATEGORY_CONFIG` while loading. |
+
+`WorkCategoriesPage` (`/admin/work-categories`): Four-panel admin page — categories table (color swatch, CRUD, `exclude_from_stats` toggle), classification rules table (priority/match-type badge/CRUD), GitHub suggestions card (scan synced data for uncovered labels/issue types, review-and-approve flow with per-row editable category dropdown, approve/dismiss per row, bulk "Approve All"), and batch reclassify card. `SuggestionsCard` component manages local state for scanned results — dismissed items are not persisted (reappear on next scan). Approved suggestions create rules with priority 45 (labels) or 55 (issue types). Pattern matches `AISettingsPage`.
+
 ## API Integration (`utils/api.ts`)
 
 `apiFetch(path, options?)`: wraps `fetch`, prepends `/api`, injects Bearer token. On 401: clears token, redirects to `/login`. Other errors: throws `ApiError(status, detail)` where `detail` is parsed JSON (`body.detail ?? body`) or raw text fallback.
 
 `ApiError` class (`utils/api.ts`): extends `Error` with `status: number` and `detail: any`. Callers can pattern-match on structured error responses (e.g., `err instanceof ApiError && err.detail?.code === 'inactive_exists'` for deactivation conflict handling).
 
+## Error Logging (`utils/logger.ts`)
+
+Structured frontend logger that batches errors and ships them to the backend via `POST /api/logs/ingest` (no auth).
+
+**Levels:**
+- `logger.error(message, context?)` / `logger.warn(message, context?)` — shipped to backend, also logged to console
+- `logger.info()` / `logger.debug()` — console-only, never shipped
+
+**Batching:** Entries buffered in memory, flushed every 5s or when 10 entries accumulate. Uses `navigator.sendBeacon()` on page unload for reliability.
+
+**Global error capture:** `initLogger()` (called in `main.tsx`) registers `window.onerror` and `window.onunhandledrejection` handlers.
+
+**Integration points:**
+- `ErrorBoundary.tsx` — calls `logger.error()` with error message, stack, and component stack
+- `api.ts` — calls `logger.error()` on non-401 API failures with status, path, and detail
+- Backend emits these as structlog entries with `source="frontend"` and `event_type="frontend.error"`, queryable in Loki alongside backend logs
+
 ## Design System
 
 ### shadcn/ui (`components/ui/`)
 
-19 primitives: accordion, badge, button, calendar, card, checkbox, dialog, input, label, popover, progress, select, separator, skeleton, switch, table, tabs, textarea, tooltip. Base-nova style, neutral base color, CSS variables, Lucide icons.
+20 primitives: accordion, badge, button, calendar, card, checkbox, dialog, input, label, popover, progress, select, separator, sheet, skeleton, switch, table, tabs, textarea, tooltip. Base-nova style, neutral base color, CSS variables, Lucide icons. Note: `tooltip.tsx` uses `@base-ui/react/tooltip` (not `@radix-ui/react-tooltip`) and has a `"use client"` directive (Next.js convention, no-op in Vite).
 
 ### Charts (`components/charts/`)
 
@@ -234,6 +303,7 @@ All Recharts 3 with `ResponsiveContainer`:
 | `PercentileBar` | Custom HTML | 4-band horizontal bar, inverts for lowerIsBetter |
 | `ReviewQualityDonut` | PieChart (donut) | Score overlaid in center |
 | `GoalSparkline` | LineChart (120x32) | Target as ReferenceLine |
+| `DeploymentTimeline` | Custom | Deployment history visualization |
 
 ### Toast Notifications
 
@@ -260,7 +330,9 @@ All Recharts 3 with `ResponsiveContainer`:
 | ~~High~~ | ~~Error isolation~~ | ~~Single global `ErrorBoundary` -- any page crash takes down entire UI~~ — **Resolved:** Per-route ErrorBoundary wrappers isolate failures by section |
 | ~~Medium~~ | ~~Bug~~ | ~~`useCIStats` -- `repoId` filter never appended to query string~~ — **Resolved:** Builds `URLSearchParams` directly |
 | ~~Medium~~ | ~~React rules~~ | ~~`CostEstimateLine` calls mutation inside `useState` initializer~~ — **Resolved:** Replaced with `useEffect` |
-| Medium | Error handling | Some older callers still detect status codes via `error.message.includes('409')` instead of using `ApiError.status` |
+| ~~Medium~~ | ~~Error handling~~ | ~~String-based status code detection (`error.message.includes('409')`)~~ — **Fixed**: All hooks now use `error instanceof ApiError && error.status === N` |
+| ~~Medium~~ | ~~Duplication~~ | ~~`timeAgo`, `formatDuration` duplicated across 7+ files~~ — **Fixed**: Extracted to `utils/format.ts` |
+| Medium | Unused hooks | `useCreateRole`, `useUpdateRole`, `useDeleteRole` in `useRoles.ts` are implemented but no admin UI for role CRUD exists — hooks ready, route not wired |
 | ~~Medium~~ | ~~Performance~~ | ~~No lazy loading -- all 30+ page components bundled in initial download~~ — **Resolved:** All pages use `React.lazy()` with `Suspense` fallback |
 | ~~Medium~~ | ~~Duplication~~ | ~~`AlertStrip` and `SortableHead` copy-pasted between Dashboard and WorkloadOverview~~ — **Resolved:** Extracted to `components/AlertStrip.tsx` and `components/SortableHead.tsx` |
 | ~~Low~~ | ~~Duplication~~ | ~~`CATEGORY_CONFIG` / `CATEGORY_ORDER` duplicated in ExecutiveDashboard and Investment~~ — **Resolved:** Extracted to `utils/categoryConfig.ts` |
@@ -268,3 +340,4 @@ All Recharts 3 with `ResponsiveContainer`:
 | Low | Dead code | `SyncStatus.tsx` imports non-existent `useTriggerSync` -- orphaned file |
 | Low | Cache key | `useToggleTracking` invalidates non-existent `['sync-repos']` key |
 | Low | Error UX | Non-JSON error bodies (e.g., HTML 502) produce unreadable toast messages |
+| Low | Design system | `tooltip.tsx` has `"use client"` directive (Next.js, meaningless in Vite) — copied from Next.js template |

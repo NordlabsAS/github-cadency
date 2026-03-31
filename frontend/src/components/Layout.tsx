@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, type ReactNode } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { useDateRange } from '@/hooks/useDateRange'
 import { useAuth } from '@/hooks/useAuth'
+import { useUnassignedRoleCount } from '@/hooks/useStats'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import DateRangePicker from '@/components/DateRangePicker'
@@ -36,6 +37,7 @@ const adminNavItems: NavEntry[] = [
       { to: '/admin/ai', label: 'AI Analysis' },
       { to: '/admin/ai/settings', label: 'AI Settings' },
       { to: '/admin/slack', label: 'Slack' },
+      { to: '/admin/work-categories', label: 'Work Categories' },
     ],
   },
 ]
@@ -50,7 +52,7 @@ function isNavActive(to: string, pathname: string): boolean {
   return pathname === to || pathname.startsWith(to + '/')
 }
 
-function NavDropdown({ group, pathname }: { group: NavGroup; pathname: string }) {
+function NavDropdown({ group, pathname, badges }: { group: NavGroup; pathname: string; badges?: Record<string, number> }) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
   const isActive = group.children.some((c) => pathname === c.to || pathname.startsWith(c.to + '/'))
@@ -103,6 +105,11 @@ function NavDropdown({ group, pathname }: { group: NavGroup; pathname: string })
               )}
             >
               {item.label}
+              {badges?.[item.to] ? (
+                <span className="ml-1.5 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-medium text-white">
+                  {badges[item.to]}
+                </span>
+              ) : null}
             </Link>
           ))}
         </div>
@@ -115,6 +122,10 @@ export default function Layout({ children }: { children: ReactNode }) {
   const location = useLocation()
   const { dateFrom, dateTo, setDateFrom, setDateTo } = useDateRange()
   const { user, isAdmin, logout } = useAuth()
+  const { data: unassignedData } = useUnassignedRoleCount()
+  const adminBadges = unassignedData?.count
+    ? { '/admin/team': unassignedData.count }
+    : undefined
 
   const navItems: NavEntry[] = isAdmin
     ? adminNavItems
@@ -133,7 +144,7 @@ export default function Layout({ children }: { children: ReactNode }) {
           <nav className="flex items-center gap-1">
             {navItems.map((entry) =>
               isGroup(entry) ? (
-                <NavDropdown key={entry.label} group={entry} pathname={location.pathname} />
+                <NavDropdown key={entry.label} group={entry} pathname={location.pathname} badges={entry.label === 'Admin' ? adminBadges : undefined} />
               ) : (
                 <Link
                   key={entry.to}

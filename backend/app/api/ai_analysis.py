@@ -20,6 +20,7 @@ from app.services.ai_analysis import run_analysis, run_one_on_one_prep, run_team
 from app.services.exceptions import AIBudgetExceededError, AIFeatureDisabledError
 from app.services.ai_settings import (
     build_settings_response,
+    estimate_analysis_cost,
     get_ai_settings,
     get_usage_summary,
     update_ai_settings,
@@ -68,73 +69,8 @@ async def estimate_cost(
     db: AsyncSession = Depends(get_db),
 ):
     """Estimate token usage and cost without calling Claude."""
-    from datetime import datetime, timedelta, timezone
-
-    from app.services.ai_settings import compute_cost as calc_cost, get_ai_settings
-
-    ai_settings = await get_ai_settings(db)
-
-    # Parse dates with defaults
-    now = datetime.now(timezone.utc)
-    df = datetime.fromisoformat(date_from) if date_from else now - timedelta(days=30)
-    dt = datetime.fromisoformat(date_to) if date_to else now
-
-    est_input = 0
-    est_output = 0
-    data_items = 0
-    note = ""
-
-    if feature == "general_analysis":
-        from app.services.ai_analysis import _gather_scope_texts
-
-        if scope_type and scope_id:
-            items, _ = await _gather_scope_texts(db, scope_type, scope_id, df, dt)
-            data_items = len(items)
-            # Rough estimate: each item ~125 tokens avg (500 chars / 4)
-            est_input = data_items * 125 + 150  # +150 for system prompt
-            est_output = 2000
-            note = f"Based on {data_items} data items in scope"
-        else:
-            note = "Provide scope_type and scope_id for accurate estimate"
-
-    elif feature == "one_on_one_prep":
-        est_input = 5000
-        est_output = 3000
-        data_items = 1
-        note = "Fixed estimate based on typical 1:1 context size"
-
-    elif feature == "team_health":
-        from app.models.models import Developer
-        from sqlalchemy import func as sqlfunc
-
-        dev_count_q = select(sqlfunc.count()).select_from(Developer).where(Developer.is_active.is_(True))
-        dev_count = (await db.execute(dev_count_q)).scalar_one()
-        est_input = dev_count * 200 + 3000
-        est_output = 3000
-        data_items = dev_count
-        note = f"Based on {dev_count} active developers"
-
-    elif feature == "work_categorization":
-        from app.models.models import Issue, PullRequest
-
-        # Count items that would be classified as unknown
-        est_input = 200 * 10 + 60  # max batch size * avg title tokens + system
-        est_output = 200 * 5
-        data_items = 200
-        note = "Max estimate (200 items per batch)"
-
-    cost = calc_cost(
-        est_input, est_output,
-        ai_settings.input_token_price_per_million,
-        ai_settings.output_token_price_per_million,
-    )
-
-    return AICostEstimate(
-        estimated_input_tokens=est_input,
-        estimated_output_tokens=est_output,
-        estimated_cost_usd=round(cost, 4),
-        data_items=data_items,
-        note=note,
+    return await estimate_analysis_cost(
+        db, feature, scope_type, scope_id, date_from, date_to,
     )
 
 

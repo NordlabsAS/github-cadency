@@ -1,3 +1,5 @@
+import { logger } from '@/utils/logger'
+
 const BASE_URL = '/api'
 
 export class ApiError extends Error {
@@ -39,6 +41,11 @@ export async function apiFetch<T>(
     } catch {
       detail = await res.text()
     }
+    logger.error('API request failed', {
+      status: res.status,
+      path,
+      detail: typeof detail === 'string' ? detail : detail?.message ?? String(detail),
+    })
     throw new ApiError(res.status, detail)
   }
 

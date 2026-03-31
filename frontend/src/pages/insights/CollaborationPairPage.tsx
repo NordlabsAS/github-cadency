@@ -13,7 +13,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
 import { ArrowLeft, ArrowRight, ExternalLink } from 'lucide-react'
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useId } from 'react'
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from 'recharts'
 import type { CollaborationPairDetail } from '@/utils/types'
 

@@ -90,7 +90,9 @@ export default function SyncProgressView({ sync, compact }: SyncProgressViewProp
         <CardTitle className="flex items-center gap-2">
           <Loader2 className="h-4 w-4 animate-spin text-primary" />
           Sync In Progress
-          <Badge variant="outline" className="ml-auto">{sync.sync_type}</Badge>
+          <span className="ml-auto text-sm font-normal text-muted-foreground">
+            {sync.sync_scope ?? sync.sync_type}
+          </span>
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">

@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 
 from sqlalchemy import (
     BigInteger,
@@ -35,7 +35,9 @@ class Developer(Base):
     specialty: Mapped[str | None] = mapped_column(String(255))
     location: Mapped[str | None] = mapped_column(String(255))
     timezone: Mapped[str | None] = mapped_column(String(50))
-    team: Mapped[str | None] = mapped_column(String(255))
+    team: Mapped[str | None] = mapped_column(
+        String(255), ForeignKey("teams.name", onupdate="CASCADE", ondelete="SET NULL")
+    )
     app_role: Mapped[str] = mapped_column(String(20), nullable=False, default="developer", server_default="developer")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     avatar_url: Mapped[str | None] = mapped_column(Text)
@@ -50,7 +52,12 @@ class Developer(Base):
 
     pull_requests: Mapped[list["PullRequest"]] = relationship(back_populates="author")
     reviews: Mapped[list["PRReview"]] = relationship(back_populates="reviewer")
-    assigned_issues: Mapped[list["Issue"]] = relationship(back_populates="assignee")
+    assigned_issues: Mapped[list["Issue"]] = relationship(
+        back_populates="assignee", foreign_keys="Issue.assignee_id"
+    )
+    created_issues: Mapped[list["Issue"]] = relationship(
+        back_populates="creator", foreign_keys="Issue.creator_id"
+    )
     goals: Mapped[list["DeveloperGoal"]] = relationship(back_populates="developer")
     relationships_as_source: Mapped[list["DeveloperRelationship"]] = relationship(
         back_populates="source", foreign_keys="DeveloperRelationship.source_id"
@@ -139,7 +146,10 @@ class PullRequest(Base):
     reverted_pr_number: Mapped[int | None] = mapped_column(Integer)
     html_url: Mapped[str | None] = mapped_column(Text)
     head_sha: Mapped[str | None] = mapped_column(String(40))
-    work_category: Mapped[str | None] = mapped_column(String(20))
+    work_category: Mapped[str | None] = mapped_column(
+        String(50), ForeignKey("work_categories.category_key", ondelete="SET NULL")
+    )
+    work_category_source: Mapped[str | None] = mapped_column(String(50))
     author_github_username: Mapped[str | None] = mapped_column(String(255))
 
     repo: Mapped["Repository"] = relationship(back_populates="pull_requests")
@@ -179,6 +189,9 @@ class PRReview(Base):
 
 class PRReviewComment(Base):
     __tablename__ = "pr_review_comments"
+    __table_args__ = (
+        Index("ix_pr_review_comment_pr_id", "pr_id"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     github_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False)
@@ -263,6 +276,7 @@ class Issue(Base):
         UniqueConstraint("repo_id", "number", name="uq_issue_repo_number"),
         Index("ix_issue_state", "state"),
         Index("ix_issue_assignee_id", "assignee_id"),
+        Index("ix_issue_creator_id", "creator_id"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -270,6 +284,7 @@ class Issue(Base):
     repo_id: Mapped[int] = mapped_column(ForeignKey("repositories.id"), nullable=False)
     assignee_id: Mapped[int | None] = mapped_column(ForeignKey("developers.id"))
     assignee_github_username: Mapped[str | None] = mapped_column(String(255))
+    creator_id: Mapped[int | None] = mapped_column(ForeignKey("developers.id"))
     number: Mapped[int] = mapped_column(Integer, nullable=False)
     title: Mapped[str | None] = mapped_column(Text)
     body: Mapped[str | None] = mapped_column(Text)
@@ -288,15 +303,27 @@ class Issue(Base):
     milestone_title: Mapped[str | None] = mapped_column(String(255))
     milestone_due_on: Mapped[datetime | None] = mapped_column(Date)
     reopen_count: Mapped[int] = mapped_column(Integer, server_default="0")
-    work_category: Mapped[str | None] = mapped_column(String(20))
+    issue_type: Mapped[str | None] = mapped_column(String(100))
+    work_category: Mapped[str | None] = mapped_column(
+        String(50), ForeignKey("work_categories.category_key", ondelete="SET NULL")
+    )
+    work_category_source: Mapped[str | None] = mapped_column(String(50))
 
     repo: Mapped["Repository"] = relationship(back_populates="issues")
-    assignee: Mapped["Developer | None"] = relationship(back_populates="assigned_issues")
+    assignee: Mapped["Developer | None"] = relationship(
+        back_populates="assigned_issues", foreign_keys=[assignee_id]
+    )
+    creator: Mapped["Developer | None"] = relationship(
+        back_populates="created_issues", foreign_keys=[creator_id]
+    )
     comments: Mapped[list["IssueComment"]] = relationship(back_populates="issue")
 
 
 class IssueComment(Base):
     __tablename__ = "issue_comments"
+    __table_args__ = (
+        Index("ix_issue_comment_issue_id", "issue_id"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     github_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False)
@@ -360,6 +387,8 @@ class SyncEvent(Base):
     rate_limit_wait_s: Mapped[int] = mapped_column(
         Integer, server_default="0", default=0
     )
+    triggered_by: Mapped[str | None] = mapped_column(String(50))
+    sync_scope: Mapped[str | None] = mapped_column(String(255))
 
 
 class AIAnalysis(Base):
@@ -407,7 +436,7 @@ class DeveloperGoal(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=datetime.utcnow, server_default=func.now()
     )
-    target_date: Mapped[datetime | None] = mapped_column(Date)
+    target_date: Mapped[date | None] = mapped_column(Date)
     achieved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     notes: Mapped[str | None] = mapped_column(Text)
     created_by: Mapped[str | None] = mapped_column(
@@ -490,6 +519,9 @@ class AISettings(Base):
 
 class AIUsageLog(Base):
     __tablename__ = "ai_usage_log"
+    __table_args__ = (
+        Index("ix_ai_usage_log_created_at", "created_at"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     feature: Mapped[str] = mapped_column(String(50), nullable=False)
@@ -584,6 +616,45 @@ class DeveloperCollaborationScore(Base):
     )
 
 
+class SyncScheduleConfig(Base):
+    """Singleton (id=1) sync schedule configuration."""
+    __tablename__ = "sync_schedule_config"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    auto_sync_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default="true"
+    )
+    incremental_interval_minutes: Mapped[int] = mapped_column(
+        Integer, default=15, server_default="15"
+    )
+    full_sync_cron_hour: Mapped[int] = mapped_column(
+        Integer, default=2, server_default="2"
+    )
+    updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), onupdate=datetime.utcnow, server_default=func.now()
+    )
+
+
+class BenchmarkGroupConfig(Base):
+    """Admin-configurable benchmark peer group definitions."""
+    __tablename__ = "benchmark_group_config"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    group_key: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
+    display_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    display_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    roles: Mapped[list] = mapped_column(JSONB, nullable=False)
+    metrics: Mapped[list] = mapped_column(JSONB, nullable=False)
+    min_team_size: Mapped[int] = mapped_column(Integer, nullable=False, default=3, server_default="3")
+    is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, server_default=func.now()
+    )
+
+
 class SlackConfig(Base):
     """Singleton (id=1) global Slack integration configuration."""
     __tablename__ = "slack_config"
@@ -630,7 +701,7 @@ class SlackUserSettings(Base):
         DateTime(timezone=True), server_default=func.now()
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
+        DateTime(timezone=True), server_default=func.now(), onupdate=datetime.utcnow
     )
 
 
@@ -654,4 +725,81 @@ class NotificationLog(Base):
     payload: Mapped[dict | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class Team(Base):
+    """Canonical team list. Developer.team stores team name (validated against this table)."""
+    __tablename__ = "teams"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+    display_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, server_default=func.now()
+    )
+
+
+class WorkCategory(Base):
+    """Admin-configurable work category definitions (feature, bugfix, epic, etc.)."""
+    __tablename__ = "work_categories"
+
+    category_key: Mapped[str] = mapped_column(String(50), primary_key=True)
+    display_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    color: Mapped[str] = mapped_column(String(7), nullable=False)
+    exclude_from_stats: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    display_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, server_default=func.now()
+    )
+
+    rules: Mapped[list["WorkCategoryRule"]] = relationship(back_populates="category", cascade="all, delete-orphan")
+
+
+class WorkCategoryRule(Base):
+    """Admin-configurable rules for classifying PRs/issues into work categories."""
+    __tablename__ = "work_category_rules"
+    __table_args__ = (
+        Index("ix_work_category_rules_priority", "priority"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    match_type: Mapped[str] = mapped_column(String(30), nullable=False)  # label, title_regex, prefix, issue_type
+    match_value: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    case_sensitive: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    category_key: Mapped[str] = mapped_column(String(50), ForeignKey("work_categories.category_key"), nullable=False)
+    priority: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, server_default=func.now()
+    )
+
+    category: Mapped["WorkCategory"] = relationship(back_populates="rules")
+
+
+class RoleDefinition(Base):
+    """Admin-configurable role definitions linked to fixed contribution categories."""
+    __tablename__ = "role_definitions"
+
+    role_key: Mapped[str] = mapped_column(String(50), primary_key=True)
+    display_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    contribution_category: Mapped[str] = mapped_column(String(30), nullable=False)
+    display_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, server_default=func.now()
     )

@@ -15,7 +15,7 @@ Every authenticated request checks `developers.is_active` in the database. Deact
 - `admin` — full access to all endpoints
 - `developer` — read-only access to own stats, profile, goals, and repo stats
 
-**Public endpoints** (no auth required): `GET /api/health`, `POST /api/webhooks/github`, `GET /api/auth/login`, `GET /api/auth/callback`
+**Public endpoints** (no auth required): `GET /api/health`, `POST /api/webhooks/github`, `GET /api/auth/login`, `GET /api/auth/callback`, `POST /api/logs/ingest`
 
 ### Access Control Summary
 
@@ -34,12 +34,15 @@ Every authenticated request checks `developers.is_active` in the database. Deact
 | **Org tree** (`/api/org-tree`) | Yes | No (403) |
 | **Over-tagged / communication scores** (`/api/stats/over-tagged`, `/api/stats/communication-scores`) | Yes | No (403) |
 | **Developers CRUD** (`/api/developers/*`) | Full access | GET own profile only |
+| **Activity summary** (`/api/developers/{id}/activity-summary`) | Any ID | Own ID only |
+| **Roles** (`/api/roles`) | Full CRUD | GET (list) only |
 | **Goals** (`/api/goals/*`) | Full access | GET own goals, POST/PATCH self-goals |
 | **Goal progress** (`/api/goals/{id}/progress`) | Any goal | Own goals only |
 | **Sync** (`/api/sync/*`) | Yes | No (403) |
 | **AI Analysis** (`/api/ai/*`) | Yes | No (403) |
 | **Slack config/test/history** (`/api/slack/config`, `/test`, `/notifications`) | Yes | No (403) |
 | **Slack user settings** (`/api/slack/user-settings`) | Own + any (admin) | Own only |
+| **Log ingestion** (`/api/logs/ingest`) | Public | Public |
 
 Date parameters accept ISO 8601 format: `2026-01-01T00:00:00Z`. When `date_from`/`date_to` are omitted, defaults to the last 30 days.
 
@@ -138,11 +141,12 @@ Create a developer. **Admin only.**
 }
 ```
 
-`role` values: `developer`, `senior_developer`, `lead`, `architect`, `devops`, `qa`, `intern`
+`role` must be a valid `role_key` from `GET /api/roles`. 13 default roles are seeded (see [Roles](#roles) section). Returns `400` if the role doesn't exist.
 
 **Response:** `201 Created` — `DeveloperResponse`
 
 **Errors:**
+- `400 Bad Request` if `role` is not a valid role_key
 - `409 Conflict` if `github_username` exists and is active (plain string detail)
 - `409 Conflict` if `github_username` exists but is inactive (structured detail for reactivation prompt):
 ```json
@@ -189,6 +193,38 @@ Draft PRs are excluded from `open_prs` and `open_branches`. Branches are derived
 
 **Errors:** `404 Not Found`
 
+### GET /api/developers/{developer_id}/activity-summary
+
+Returns all-time (lifetime) activity statistics for a developer, useful for identifying junk/duplicate accounts or understanding overall contribution patterns. No date range filtering — always returns totals across all synced data. **Admin or own profile.**
+
+**Response:** `200 OK`
+```json
+{
+  "prs_authored": 142,
+  "prs_merged": 128,
+  "prs_open": 3,
+  "reviews_given": 310,
+  "issues_created": 45,
+  "issues_assigned": 67,
+  "repos_touched": 8,
+  "first_activity": "2024-03-15T09:22:00Z",
+  "last_activity": "2026-03-28T14:10:00Z",
+  "work_categories": {
+    "feature": 72,
+    "bugfix": 38,
+    "tech_debt": 12,
+    "ops": 4,
+    "unknown": 2
+  }
+}
+```
+
+`repos_touched` counts distinct repositories where the developer authored PRs or submitted reviews. `first_activity` / `last_activity` are the earliest/latest timestamps across authored PRs and submitted reviews. `work_categories` shows the breakdown of merged PRs by work category (feature/bugfix/tech_debt/ops/unknown), using stored `work_category` when available and falling back to label/title-based classification via `classify_work_item()`.
+
+A developer with zero activity returns all zeros, null dates, and an empty `work_categories` object.
+
+**Errors:** `403 Forbidden` (non-admin viewing another developer), `404 Not Found`
+
 ### DELETE /api/developers/{developer_id}
 
 Soft-delete: sets `is_active = false`. **Admin only.** Deactivated developers cannot log in via OAuth.
@@ -196,6 +232,94 @@ Soft-delete: sets `is_active = false`. **Admin only.** Deactivated developers ca
 Mechanically identical to `PATCH { is_active: false }` — both set `is_active = false`. The convention is to use `PATCH` for standard deactivation (goes through `DeactivateDialog` with the impact check) and `DELETE` for removing junk/system accounts.
 
 **Response:** `204 No Content`
+
+---
+
+## Roles
+
+Role definitions are admin-configurable. Each role maps to a fixed **contribution category** that controls how the role participates in statistics:
+
+| Category | Stats behavior |
+|----------|---------------|
+| `code_contributor` | Included in PR/review benchmarks and percentile calculations |
+| `issue_contributor` | Excluded from code benchmarks; included in issue creator stats |
+| `non_contributor` | Excluded from all benchmarks |
+| `system` | Excluded from everything |
+
+13 default roles are seeded by migration. Admins can create additional custom roles.
+
+### GET /api/roles
+
+List all role definitions, ordered by `display_order`. **Any authenticated user.**
+
+**Response:** `200 OK`
+```json
+[
+  {
+    "role_key": "developer",
+    "display_name": "Developer",
+    "contribution_category": "code_contributor",
+    "display_order": 1,
+    "is_default": true
+  },
+  {
+    "role_key": "product_manager",
+    "display_name": "Product Manager",
+    "contribution_category": "issue_contributor",
+    "display_order": 8,
+    "is_default": true
+  }
+]
+```
+
+### POST /api/roles
+
+Create a custom role definition. **Admin only.**
+
+**Request body:**
+```json
+{
+  "role_key": "data_scientist",
+  "display_name": "Data Scientist",
+  "contribution_category": "code_contributor"
+}
+```
+
+`role_key` must be lowercase alphanumeric with underscores, 2-49 chars, starting with a letter.
+
+**Response:** `201 Created` — returns the created `RoleDefinition`.
+
+**Errors:**
+- `409` — role_key already exists or invalid format
+
+### PATCH /api/roles/{role_key}
+
+Update a role definition (display name, contribution category, display order). **Admin only.**
+
+**Request body:** (all fields optional)
+```json
+{
+  "display_name": "Senior Data Scientist",
+  "contribution_category": "issue_contributor",
+  "display_order": 14
+}
+```
+
+**Response:** `200 OK` — returns the updated `RoleDefinition`.
+
+**Errors:**
+- `404` — role_key not found
+
+### DELETE /api/roles/{role_key}
+
+Delete a custom role definition. **Admin only.**
+
+Cannot delete default roles (`is_default = true`) or roles currently assigned to any developer.
+
+**Response:** `204 No Content`
+
+**Errors:**
+- `409` — role is a default role, or role is still assigned to developers
 
 ---
 
@@ -252,6 +376,8 @@ Developer metrics for a date range. **Developers can only access their own stats
   "self_merge_rate": 20.0,
   "prs_reverted": 0,
   "reverts_authored": 0,
+  "prs_linked_to_issue": 8,
+  "issue_linkage_rate": 0.6667,
   "comment_type_distribution": {
     "nit": 8,
     "blocker": 2,
@@ -265,6 +391,10 @@ Developer metrics for a date range. **Developers can only access their own stats
   "blocker_catch_rate": 0.125
 }
 ```
+
+**Issue linkage fields:**
+- `prs_linked_to_issue` — count of PRs authored by this developer that contain closing keywords (`Closes #N`, `Fixes #N`, etc.) linking them to issues
+- `issue_linkage_rate` — fraction of PRs linked to issues (`prs_linked_to_issue / prs_opened`). `null` if no PRs opened
 
 **Comment type fields:**
 - `comment_type_distribution` — counts of review comments by type (as reviewer). Types: `nit`, `blocker`, `architectural`, `question`, `praise`, `suggestion`, `general`. Empty `{}` if no comments.
@@ -317,6 +447,48 @@ Team-wide aggregate metrics. **Admin only.**
   "revert_rate": 2.5
 }
 ```
+
+### GET /api/stats/repos/summary
+
+Batch per-repo metrics for all tracked repositories. Returns current-period and previous-period values for trend computation. Uses efficient GROUP BY queries (6 total, not per-repo).
+
+| Query Param | Type | Default | Description |
+|-------------|------|---------|-------------|
+| `date_from` | datetime | 30 days ago | Period start |
+| `date_to` | datetime | now | Period end |
+
+**Response:** `200 OK` — `RepoSummaryItem[]`
+```json
+[
+  {
+    "repo_id": 1,
+    "total_prs": 34,
+    "total_merged": 28,
+    "total_issues": 15,
+    "total_reviews": 72,
+    "avg_time_to_merge_hours": 8.4,
+    "last_pr_date": "2026-03-28T14:30:00Z",
+    "prev_total_prs": 30,
+    "prev_total_merged": 25,
+    "prev_avg_time_to_merge_hours": 9.1
+  }
+]
+```
+
+| Field | Description |
+|-------|-------------|
+| `repo_id` | Repository ID |
+| `total_prs` | PRs created in current period |
+| `total_merged` | PRs merged in current period |
+| `total_issues` | Issues created in current period |
+| `total_reviews` | Reviews submitted in current period |
+| `avg_time_to_merge_hours` | Average merge time for merged PRs in current period (null if no merges) |
+| `last_pr_date` | Most recent PR created_at in current period (null if no PRs) |
+| `prev_total_prs` | PRs created in previous period (same duration, shifted back) |
+| `prev_total_merged` | PRs merged in previous period |
+| `prev_avg_time_to_merge_hours` | Average merge time in previous period (null if no merges) |
+
+Only tracked repos are included. Previous period = `[date_from - period_length, date_from]`. Repos with no activity in either period still appear in the response with zero/null values. Auth: any authenticated user (not admin-only).
 
 ### GET /api/stats/repo/{repo_id}
 
@@ -389,32 +561,113 @@ File-level code churn analysis for a repository. Identifies hotspot files (frequ
 | `total_files_changed` | Distinct files modified by PRs in the period |
 | `tree_truncated` | `true` if GitHub truncated the tree response (>100K entries) |
 
+### GET /api/stats/benchmark-groups
+
+List all configured benchmark peer groups. **Admin only.**
+
+**Response:** `200 OK`
+```json
+[
+  {
+    "group_key": "ics",
+    "display_name": "IC Engineers",
+    "display_order": 1,
+    "roles": ["developer", "senior_developer", "architect", "intern"],
+    "metrics": ["prs_merged", "time_to_merge_h", "time_to_first_review_h", "time_to_approve_h", "time_after_approve_h", "additions_per_pr", "review_rounds"],
+    "min_team_size": 3,
+    "is_default": true
+  }
+]
+```
+
+### PATCH /api/stats/benchmark-groups/{group_key}
+
+Update a benchmark group's configuration. **Admin only.** All fields optional.
+
+**Request body:**
+```json
+{
+  "display_name": "Senior Engineers",
+  "roles": ["senior_developer", "architect"],
+  "metrics": ["prs_merged", "time_to_merge_h"],
+  "min_team_size": 2
+}
+```
+
+**Response:** `200 OK` — Updated `BenchmarkGroupResponse`.
+**Errors:** `400` if role names not found in `role_definitions` table, invalid metric keys, or empty metrics list.
+
 ### GET /api/stats/benchmarks
 
-Team percentile bands (p25/p50/p75) across all active developers. **Admin only.**
+Role-based peer group benchmarks with per-developer metrics, percentile bands, and team comparison. **Admin only.**
 
 | Query Param | Type | Default | Description |
 |-------------|------|---------|-------------|
+| `group` | string | first group by display_order | Benchmark group key (e.g., `ics`, `leads`, `qa`) |
+| `team` | string | - | Filter developers by team name |
 | `date_from` | datetime | 30 days ago | Period start |
 | `date_to` | datetime | now | Period end |
-| `team` | string | - | Filter by team |
 
 **Response:** `200 OK`
 ```json
 {
+  "group": {
+    "group_key": "ics",
+    "display_name": "IC Engineers",
+    "display_order": 1,
+    "roles": ["developer", "senior_developer", "architect", "intern"],
+    "metrics": ["prs_merged", "time_to_merge_h", "reviews_given"],
+    "min_team_size": 3,
+    "is_default": true
+  },
   "period_start": "2026-02-26T00:00:00Z",
   "period_end": "2026-03-28T00:00:00Z",
-  "sample_size": 15,
+  "sample_size": 12,
   "team": null,
   "metrics": {
-    "time_to_merge_h": { "p25": 8.5, "p50": 16.2, "p75": 28.0 },
-    "time_to_first_review_h": { "p25": 1.2, "p50": 3.8, "p75": 8.5 },
     "prs_merged": { "p25": 3.0, "p50": 7.0, "p75": 12.0 },
-    "review_turnaround_h": { "p25": 2.0, "p50": 5.5, "p75": 12.0 },
-    "reviews_given": { "p25": 4.0, "p50": 10.0, "p75": 18.0 },
-    "additions_per_pr": { "p25": 50.0, "p50": 150.0, "p75": 400.0 }
-  }
+    "time_to_merge_h": { "p25": 8.5, "p50": 16.2, "p75": 28.0 },
+    "reviews_given": { "p25": 4.0, "p50": 10.0, "p75": 18.0 }
+  },
+  "metric_info": [
+    { "key": "prs_merged", "label": "PRs Merged", "lower_is_better": false, "unit": "count" },
+    { "key": "time_to_merge_h", "label": "Time to Merge", "lower_is_better": true, "unit": "hours" },
+    { "key": "reviews_given", "label": "Reviews Given", "lower_is_better": false, "unit": "count" }
+  ],
+  "developers": [
+    {
+      "developer_id": 1,
+      "display_name": "Alice",
+      "avatar_url": "https://avatars.githubusercontent.com/u/1",
+      "team": "backend",
+      "role": "senior_developer",
+      "metrics": {
+        "prs_merged": { "value": 10.0, "percentile_band": "p50_to_p75" },
+        "time_to_merge_h": { "value": 12.5, "percentile_band": "p50_to_p75" },
+        "reviews_given": { "value": 15.0, "percentile_band": "p50_to_p75" }
+      }
+    }
+  ],
+  "team_comparison": [
+    { "team": "backend", "sample_size": 5, "metrics": { "prs_merged": 8.0, "time_to_merge_h": 14.0, "reviews_given": 12.0 } },
+    { "team": "frontend", "sample_size": 4, "metrics": { "prs_merged": 6.0, "time_to_merge_h": 20.0, "reviews_given": 8.0 } }
+  ]
 }
+```
+
+**Notes:**
+- Developers with `role=system_account` or `role=NULL` are excluded from all groups.
+- `team_comparison` is `null` when a specific team is filtered, or fewer than 2 teams meet `min_team_size`.
+- Percentile bands: `below_p25`, `p25_to_p50`, `p50_to_p75`, `above_p75`. For lower-is-better metrics, `above_p75` means "best" (lowest value).
+- Available metric keys: `prs_merged`, `time_to_merge_h`, `time_to_first_review_h`, `time_to_approve_h`, `time_after_approve_h`, `reviews_given`, `review_turnaround_h`, `additions_per_pr`, `review_rounds`, `review_quality_score`, `changes_requested_rate`, `blocker_catch_rate`, `issues_closed`, `prs_merged_bugfix`.
+
+### GET /api/developers/unassigned-role-count
+
+Count of active developers with no role assigned. **Any authenticated user.**
+
+**Response:** `200 OK`
+```json
+{ "count": 7 }
 ```
 
 ### GET /api/stats/developer/{developer_id}/trends
@@ -732,6 +985,67 @@ Issue-to-PR linkage statistics via closing keywords parsed from PR bodies. Shows
 | `avg_prs_per_issue` | Average PRs per linked issue (`null` if no linked issues) |
 | `issues_with_multiple_prs` | Issues linked to 2+ PRs (may indicate scope was too large) |
 | `prs_without_linked_issues` | PRs in the date range that don't reference any issue (undocumented work) |
+
+---
+
+### GET /api/stats/issue-linkage/developers
+
+Per-developer PR-to-issue linkage breakdown. Shows each developer's linkage rate and flags those below the attention threshold. **Admin only.**
+
+| Query Param | Type | Default | Description |
+|-------------|------|---------|-------------|
+| `date_from` | datetime | 30 days ago | Start of date range (ISO 8601) |
+| `date_to` | datetime | now | End of date range (ISO 8601) |
+| `team` | string | - | Filter by team |
+
+**Response:** `200 OK`
+```json
+{
+  "developers": [
+    {
+      "developer_id": 5,
+      "github_username": "alice",
+      "display_name": "Alice Chen",
+      "team": "backend",
+      "prs_total": 12,
+      "prs_linked": 2,
+      "linkage_rate": 0.1667
+    },
+    {
+      "developer_id": 3,
+      "github_username": "bob",
+      "display_name": "Bob Smith",
+      "team": "platform",
+      "prs_total": 8,
+      "prs_linked": 7,
+      "linkage_rate": 0.875
+    }
+  ],
+  "team_average_rate": 0.45,
+  "attention_threshold": 0.2,
+  "attention_developers": [
+    {
+      "developer_id": 5,
+      "github_username": "alice",
+      "display_name": "Alice Chen",
+      "team": "backend",
+      "prs_total": 12,
+      "prs_linked": 2,
+      "linkage_rate": 0.1667
+    }
+  ]
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `developers` | All active developers with at least 1 PR, sorted by `linkage_rate` ascending (worst first) |
+| `team_average_rate` | Overall linkage rate across all developers in the result set |
+| `attention_threshold` | Rate threshold below which developers are flagged (default `0.2` = 20%) |
+| `attention_developers` | Subset of `developers` with `linkage_rate < attention_threshold` |
+| `linkage_rate` | Fraction of the developer's PRs that contain closing keywords (0.0–1.0) |
+
+Only developers with at least 1 PR in the date range are included. Linkage is determined by the same closing keyword regex as `GET /stats/issue-linkage`.
 
 ---
 
@@ -1186,6 +1500,369 @@ All four DORA metrics: deployment frequency, change lead time, change failure ra
 
 ---
 
+## Work Allocation
+
+Classifies merged PRs and created issues into work categories: `feature`, `bugfix`, `tech_debt`, `ops`, `unknown`. Classification uses a 3-tier pipeline: GitHub labels → title keyword regex → optional AI (Claude API). Manual overrides are authoritative and never re-classified.
+
+### GET /api/stats/work-allocation
+
+**Access:** Admin only
+
+Get aggregate work allocation breakdown for the selected period.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `team` | string | No | Filter by team name |
+| `date_from` | datetime | No | Start of period (default: 30 days ago) |
+| `date_to` | datetime | No | End of period (default: now) |
+| `use_ai` | bool | No | Enable AI classification for unknown items (default: false) |
+
+**Response:** `200 OK`
+```json
+{
+  "period_start": "2026-03-01T00:00:00Z",
+  "period_end": "2026-03-30T00:00:00Z",
+  "period_type": "weekly",
+  "pr_allocation": [
+    { "category": "feature", "count": 15, "additions": 2400, "deletions": 300, "pct_of_total": 50.0 },
+    { "category": "bugfix", "count": 8, "additions": 500, "deletions": 200, "pct_of_total": 26.7 }
+  ],
+  "issue_allocation": [
+    { "category": "bugfix", "count": 12, "pct_of_total": 40.0 }
+  ],
+  "developer_breakdown": [
+    {
+      "developer_id": 1,
+      "github_username": "dev1",
+      "display_name": "Developer One",
+      "team": "platform",
+      "pr_categories": { "feature": 5, "bugfix": 3 },
+      "issue_categories": { "bugfix": 2 },
+      "total_prs": 8,
+      "total_issues": 2
+    }
+  ],
+  "trend": [
+    {
+      "period_start": "2026-03-01T00:00:00Z",
+      "period_end": "2026-03-07T00:00:00Z",
+      "period_label": "Mar 1",
+      "pr_categories": { "feature": 4, "bugfix": 2 },
+      "issue_categories": { "bugfix": 3 }
+    }
+  ],
+  "unknown_pct": 10.0,
+  "ai_classified_count": 0,
+  "total_prs": 30,
+  "total_issues": 30
+}
+```
+
+### GET /api/stats/work-allocation/items
+
+**Access:** Any authenticated user
+
+Get paginated list of PRs/issues for a specific work category. Used for drill-down from the Investment charts.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `category` | string | Yes | One of: `feature`, `bugfix`, `tech_debt`, `ops`, `unknown` |
+| `type` | string | No | Filter by item type: `all` (default), `pr`, `issue` |
+| `date_from` | datetime | No | Start of period (default: 30 days ago) |
+| `date_to` | datetime | No | End of period (default: now) |
+| `page` | int | No | Page number (default: 1, min: 1) |
+| `page_size` | int | No | Items per page (default: 20, min: 1, max: 100) |
+
+**Response:** `200 OK`
+```json
+{
+  "items": [
+    {
+      "id": 123,
+      "type": "pr",
+      "number": 45,
+      "title": "Add dashboard widget",
+      "labels": ["feature"],
+      "repo_name": "backend",
+      "author_name": "Developer One",
+      "author_id": 1,
+      "html_url": "https://github.com/org/backend/pull/45",
+      "category": "feature",
+      "category_source": "label",
+      "merged_at": "2026-03-15T10:30:00Z",
+      "created_at": null,
+      "additions": 200,
+      "deletions": 50
+    }
+  ],
+  "total": 15,
+  "page": 1,
+  "page_size": 20
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `type` | `"pr"` or `"issue"` |
+| `category_source` | How the category was determined: `"label"` (GitHub label match), `"title"` (title keyword match), `"ai"` (Claude classification), `"manual"` (user override), `"cross_ref"` (inherited from linked issue), or `"unknown"` (no match) |
+| `merged_at` | Set for PRs, `null` for issues |
+| `created_at` | Set for issues, `null` for PRs |
+| `additions`/`deletions` | Set for PRs, `null` for issues |
+
+### PATCH /api/stats/work-allocation/items/{item_type}/{item_id}/category
+
+**Access:** Any authenticated user
+
+Recategorize a PR or issue. Sets `work_category_source` to `"manual"`, which is authoritative and never overwritten by re-sync or AI reclassification.
+
+| Path Parameter | Type | Description |
+|----------------|------|-------------|
+| `item_type` | string | `"pr"` or `"issue"` |
+| `item_id` | int | Database ID of the item |
+
+**Request body:**
+```json
+{
+  "category": "bugfix"
+}
+```
+
+| Field | Type | Required | Validation |
+|-------|------|----------|------------|
+| `category` | string | Yes | Must be one of: `feature`, `bugfix`, `tech_debt`, `ops`. Cannot be `unknown`. |
+
+**Response:** `200 OK` — returns the updated `WorkAllocationItem` (same schema as items in the list endpoint).
+
+**Error responses:**
+- `400` — invalid `item_type` (not `pr`/`issue`), invalid category, or item not found
+- `422` — category is `unknown` or not in valid set
+
+---
+
+## Work Categories
+
+**Access:** Read endpoints are available to any authenticated user. All mutation endpoints require admin role.
+
+### GET /api/work-categories
+
+List all work category definitions, ordered by `display_order`.
+
+**Response:** `200 OK`
+```json
+[
+  {
+    "category_key": "feature",
+    "display_name": "Feature",
+    "description": "New functionality or enhancements that add user-facing value.",
+    "color": "#3b82f6",
+    "exclude_from_stats": false,
+    "display_order": 1,
+    "is_default": true
+  }
+]
+```
+
+### POST /api/work-categories
+
+Create a new work category. **Admin only.**
+
+**Request body:**
+```json
+{
+  "category_key": "security",
+  "display_name": "Security",
+  "description": "Security-related fixes and hardening work.",
+  "color": "#dc2626",
+  "exclude_from_stats": false
+}
+```
+
+| Field | Type | Required | Validation |
+|-------|------|----------|------------|
+| `category_key` | string | Yes | Lowercase alphanumeric + underscores, 2-49 chars, starts with letter |
+| `display_name` | string | Yes | |
+| `description` | string | No | |
+| `color` | string | Yes | Hex color like `#3b82f6` |
+| `exclude_from_stats` | bool | No | Default `false` |
+
+**Response:** `201 Created` — returns the created `WorkCategoryResponse`.
+
+**Error responses:**
+- `409` — duplicate key, invalid key format, or invalid color
+
+### PATCH /api/work-categories/{category_key}
+
+Update a work category. **Admin only.**
+
+**Request body:** Any subset of `display_name`, `description`, `color`, `exclude_from_stats`, `display_order`.
+
+**Response:** `200 OK` — returns the updated category.
+
+**Error responses:**
+- `404` — category not found
+- `409` — cannot exclude `unknown` from stats, invalid color
+
+### DELETE /api/work-categories/{category_key}
+
+Delete a work category. **Admin only.** Cannot delete default categories or categories with assigned items.
+
+**Response:** `204 No Content`
+
+**Error responses:**
+- `404` — category not found
+- `409` — default category or has assigned PRs/issues
+
+### GET /api/work-categories/rules
+
+List all classification rules, ordered by `priority` ascending.
+
+**Response:** `200 OK`
+```json
+[
+  {
+    "id": 1,
+    "match_type": "label",
+    "match_value": "bug",
+    "description": null,
+    "case_sensitive": false,
+    "category_key": "bugfix",
+    "priority": 10
+  }
+]
+```
+
+### POST /api/work-categories/rules
+
+Create a classification rule. **Admin only.**
+
+**Request body:**
+```json
+{
+  "match_type": "label",
+  "match_value": "epic",
+  "description": "Maps GitHub 'epic' label to feature category.",
+  "case_sensitive": false,
+  "category_key": "feature",
+  "priority": 50
+}
+```
+
+| Field | Type | Required | Validation |
+|-------|------|----------|------------|
+| `match_type` | string | Yes | One of: `label`, `issue_type`, `title_regex`, `prefix` |
+| `match_value` | string | Yes | For `title_regex`: must be valid regex |
+| `description` | string | No | |
+| `case_sensitive` | bool | No | Default `false` |
+| `category_key` | string | Yes | Must reference existing category |
+| `priority` | int | Yes | Lower = evaluated first |
+
+**Response:** `201 Created` — returns the created rule.
+
+**Error responses:**
+- `409` — invalid match_type, invalid regex, or nonexistent category
+
+### PATCH /api/work-categories/rules/{rule_id}
+
+Update a classification rule. **Admin only.**
+
+**Request body:** Any subset of rule fields.
+
+**Response:** `200 OK` — returns the updated rule.
+
+### DELETE /api/work-categories/rules/{rule_id}
+
+Delete a classification rule. **Admin only.**
+
+**Response:** `204 No Content`
+
+### POST /api/work-categories/rules/bulk
+
+Create multiple classification rules in one transaction. **Admin only.** Used by the suggestions approve flow.
+
+**Request body:**
+```json
+{
+  "rules": [
+    {
+      "match_type": "label",
+      "match_value": "priority-high",
+      "category_key": "feature",
+      "priority": 45,
+      "case_sensitive": false,
+      "description": null
+    },
+    {
+      "match_type": "issue_type",
+      "match_value": "Epic",
+      "category_key": "feature",
+      "priority": 55,
+      "case_sensitive": false,
+      "description": null
+    }
+  ]
+}
+```
+
+**Response:** `201 Created`
+```json
+{
+  "created": 2
+}
+```
+
+**Error responses:**
+- `409` — any rule has invalid match_type, invalid regex, or nonexistent category (entire batch rejected)
+
+### POST /api/work-categories/suggestions
+
+Scan synced GitHub data for labels and issue types not covered by any existing rule. Returns suggestions sorted by usage count descending. **Admin only.**
+
+**Request body:** None
+
+**Response:** `200 OK`
+```json
+[
+  {
+    "match_type": "label",
+    "match_value": "priority-high",
+    "suggested_category": "unknown",
+    "usage_count": 47
+  },
+  {
+    "match_type": "issue_type",
+    "match_value": "Epic",
+    "suggested_category": "unknown",
+    "usage_count": 12
+  }
+]
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `match_type` | string | `"label"` or `"issue_type"` |
+| `match_value` | string | The label name or issue type string from GitHub |
+| `suggested_category` | string | Best-guess category key based on keyword matching. Falls back to `"unknown"`. |
+| `usage_count` | int | Number of PRs + issues using this label/type |
+
+Category suggestions use keyword substring matching: labels containing "bug"/"defect"/"hotfix" → `bugfix`, "feature"/"enhancement" → `feature`, "refactor"/"chore"/"deps" → `tech_debt`, "infra"/"deploy"/"docs" → `ops`, etc.
+
+### POST /api/work-categories/reclassify
+
+Reclassify all non-manual PRs and issues using current rules. **Admin only.**
+
+**Request body:** None
+
+**Response:** `200 OK`
+```json
+{
+  "prs_updated": 142,
+  "issues_updated": 87,
+  "duration_s": 1.23
+}
+```
+
+---
+
 ## Developer Goals
 
 **Access:** Admin has full CRUD. Developers can view their own goals, create self-goals via `/goals/self`, and update their own self-created goals.
@@ -1312,7 +1989,8 @@ Start a new sync. Supports full or incremental, optional repo filtering and time
 {
   "sync_type": "incremental",
   "repo_ids": [1, 2, 3],
-  "since": "2026-01-01T00:00:00Z"
+  "since": "2026-01-01T00:00:00Z",
+  "sync_scope": "3 repos · 30 days"
 }
 ```
 
@@ -1321,6 +1999,7 @@ Start a new sync. Supports full or incremental, optional repo filtering and time
 | `sync_type` | `"full"` \| `"incremental"` | `"incremental"` | Full re-syncs all data; incremental fetches since each repo's `last_synced_at`. Note: `"contributors"` is also a valid sync_type (created by `POST /sync/contributors`), but not accepted here. |
 | `repo_ids` | `int[]` \| `null` | `null` | Specific repo IDs to sync. `null` = all tracked repos |
 | `since` | `datetime` \| `null` | `null` | Override per-repo `last_synced_at` with a uniform date |
+| `sync_scope` | `string` \| `null` | `null` | Human-readable description of what is being synced (e.g., "3 repos · 30 days"). Stored on the SyncEvent for display in history. |
 
 **Response:** `202 Accepted`
 ```json
@@ -1420,6 +2099,8 @@ Get the current sync state: active sync (if any), last completed sync, and summa
     "cancel_requested": false,
     "is_resumable": false,
     "resumed_from_id": null,
+    "triggered_by": "scheduled",
+    "sync_scope": "All tracked repos · incremental",
     "started_at": "2026-03-28T10:30:00Z",
     "completed_at": null,
     "duration_s": null
@@ -1428,9 +2109,57 @@ Get the current sync state: active sync (if any), last completed sync, and summa
   "tracked_repos_count": 42,
   "total_repos_count": 50,
   "last_successful_sync": "2026-03-27T10:30:00Z",
-  "last_sync_duration_s": 1234
+  "last_sync_duration_s": 1234,
+  "schedule": {
+    "auto_sync_enabled": true,
+    "incremental_interval_minutes": 15,
+    "full_sync_cron_hour": 2,
+    "updated_at": "2026-03-28T10:00:00Z"
+  }
 }
 ```
+
+### GET /api/sync/schedule
+
+Get the sync schedule configuration (auto-sync toggle, intervals).
+
+**Response:** `200 OK` — `SyncScheduleConfigResponse`
+```json
+{
+  "auto_sync_enabled": true,
+  "incremental_interval_minutes": 15,
+  "full_sync_cron_hour": 2,
+  "updated_at": "2026-03-28T10:00:00Z"
+}
+```
+
+Returns defaults (`true`, `15`, `2`) if no config row exists yet.
+
+### PATCH /api/sync/schedule
+
+Update the sync schedule configuration. Changes take effect immediately — APScheduler jobs are rescheduled live.
+
+**Request Body:** `SyncScheduleConfigUpdate` — all fields optional
+```json
+{
+  "auto_sync_enabled": false,
+  "incremental_interval_minutes": 30,
+  "full_sync_cron_hour": 4
+}
+```
+
+| Field | Type | Constraints | Description |
+|-------|------|-------------|-------------|
+| `auto_sync_enabled` | `bool` | | Enable/disable automatic background syncing |
+| `incremental_interval_minutes` | `int` | >= 5 | Minutes between incremental syncs |
+| `full_sync_cron_hour` | `int` | 0-23 | Hour (server time) for nightly full sync |
+
+**Response:** `200 OK` — `SyncScheduleConfigResponse` (updated values)
+
+**Errors:**
+- `400` — interval < 5 or hour outside 0-23
+
+---
 
 ### POST /api/sync/discover-repos
 
@@ -1507,6 +2236,8 @@ Each event includes:
 - `is_resumable` — `true` if sync can be resumed via `POST /sync/resume/{id}`
 - `resumed_from_id` — links to the original interrupted sync event
 - `rate_limit_wait_s` — total seconds spent waiting for GitHub rate limits
+- `triggered_by` — origin of the sync: `"manual"`, `"scheduled"`, or `"auto_resume"` (null for old events)
+- `sync_scope` — human-readable description (e.g., "3 repos · 30 days", "All tracked repos · nightly full resync") (null for old events)
 
 ### Structured Error Objects
 
@@ -2244,3 +2975,46 @@ Update the current user's Slack notification preferences. **Any authenticated us
 Get any developer's Slack notification preferences. **Admin only.**
 
 **Response:** `200 OK` — same shape as user-settings GET.
+
+---
+
+## Log Ingestion
+
+Frontend error log ingestion. **No authentication required** — frontend errors can happen before/during auth. Rate-limited to 50 entries per request.
+
+### POST /api/logs/ingest
+
+Receive a batch of frontend log entries and emit them through the backend structlog pipeline (appearing in Loki alongside backend logs).
+
+**Request body:**
+
+```json
+{
+  "entries": [
+    {
+      "level": "error",
+      "message": "Failed to load dashboard",
+      "event_type": "frontend.error",
+      "context": {"component": "Dashboard", "status": 500},
+      "timestamp": "2026-03-31T12:00:00.000Z",
+      "url": "http://localhost:3001/",
+      "user_agent": "Mozilla/5.0 ..."
+    }
+  ]
+}
+```
+
+| Field | Type | Required | Default | Notes |
+|-------|------|----------|---------|-------|
+| `entries` | `FrontendLogEntry[]` | Yes | — | Max 50 entries processed per request |
+| `entries[].level` | `"warn" \| "error"` | No | `"error"` | Maps to structlog warning/error level |
+| `entries[].message` | `string` | Yes | — | Log message |
+| `entries[].event_type` | `string` | No | `"frontend.error"` | Loki label for filtering |
+| `entries[].context` | `object \| null` | No | `null` | Arbitrary key-value context (spread into structlog fields) |
+| `entries[].timestamp` | `string \| null` | No | `null` | ISO 8601 timestamp from the frontend |
+| `entries[].url` | `string \| null` | No | `null` | Page URL where the error occurred |
+| `entries[].user_agent` | `string \| null` | No | `null` | Browser user agent |
+
+**Response:** `204 No Content`
+
+Entries beyond the first 50 are silently dropped. All `context` keys are spread as top-level fields in the structlog output. Each entry is tagged with `source="frontend"` for Loki filtering.

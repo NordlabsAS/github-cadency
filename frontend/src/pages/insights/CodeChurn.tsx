@@ -1,4 +1,5 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { useDateRange } from '@/hooks/useDateRange'
 import { useCodeChurn } from '@/hooks/useStats'
 import { useRepos } from '@/hooks/useSync'
@@ -35,12 +36,24 @@ function churnLevel(frequency: number): { label: string; color: string } {
 export default function CodeChurn() {
   const { dateFrom, dateTo } = useDateRange()
   const { data: repos } = useRepos()
-  const [selectedRepoId, setSelectedRepoId] = useState<number | null>(null)
+  const [searchParams] = useSearchParams()
+  const [selectedRepoId, setSelectedRepoId] = useState<number | null>(
+    Number(searchParams.get('repo_id')) || null,
+  )
 
   const trackedRepos = useMemo(
     () => (repos ?? []).filter((r) => r.is_tracked),
     [repos],
   )
+
+  // Validate URL-sourced repo_id exists in tracked list once repos load
+  useEffect(() => {
+    if (trackedRepos.length > 0 && selectedRepoId != null) {
+      if (!trackedRepos.some((r) => r.id === selectedRepoId)) {
+        setSelectedRepoId(null)
+      }
+    }
+  }, [trackedRepos, selectedRepoId])
 
   // Auto-select first repo if none selected
   const effectiveRepoId = selectedRepoId ?? trackedRepos[0]?.id ?? null

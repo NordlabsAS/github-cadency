@@ -1,0 +1,43 @@
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+
+common:
+  ring:
+    instance_addr: 127.0.0.1
+    kvstore:
+      store: inmemory
+  replication_factor: 1
+  path_prefix: /loki
+
+schema_config:
+  configs:
+    - from: "2024-01-01"
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+storage_config:
+  filesystem:
+    directory: /loki/chunks
+
+limits_config:
+  retention_period: 2160h  # 90 days
+  max_label_names_per_series: 30
+  max_label_value_length: 2048
+  ingestion_rate_mb: 10
+  ingestion_burst_size_mb: 20
+
+compactor:
+  working_directory: /loki/compactor
+  compaction_interval: 10m
+  retention_enabled: true
+  retention_delete_delay: 2h
+  delete_request_store: filesystem
+
+querier:
+  max_concurrent: 10

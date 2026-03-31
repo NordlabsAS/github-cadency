@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { useDateRange } from '@/hooks/useDateRange'
 import { useCIStats } from '@/hooks/useStats'
 import { useRepos } from '@/hooks/useSync'
@@ -27,7 +28,10 @@ function formatDuration(seconds: number): string {
 export default function CIInsights() {
   const { dateFrom, dateTo } = useDateRange()
   const { data: repos } = useRepos()
-  const [selectedRepoId, setSelectedRepoId] = useState<number | null>(null)
+  const [searchParams] = useSearchParams()
+  const [selectedRepoId, setSelectedRepoId] = useState<number | null>(
+    Number(searchParams.get('repo_id')) || null,
+  )
 
   const trackedRepos = useMemo(
     () => (repos ?? []).filter((r) => r.is_tracked),

@@ -44,10 +44,6 @@ export default function StepConfirm({
       <CardContent className="space-y-4">
         <div className="space-y-2 text-sm">
           <div className="flex justify-between">
-            <span className="text-muted-foreground">Sync Type</span>
-            <Badge variant="outline">{syncType}</Badge>
-          </div>
-          <div className="flex justify-between">
             <span className="text-muted-foreground">Repositories</span>
             <span className="font-medium">{selectedRepos.length} repos</span>
           </div>
@@ -57,6 +53,10 @@ export default function StepConfirm({
               {timeRangeLabels[timeRange]}
               {timeRange === 'custom' && customDate ? ` (${customDate})` : ''}
             </span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-muted-foreground">Mode</span>
+            <span className="font-medium">{syncType === 'incremental' ? 'Incremental (since last sync)' : 'Full fetch'}</span>
           </div>
         </div>
 

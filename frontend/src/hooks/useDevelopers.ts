@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { apiFetch } from '@/utils/api'
-import type { DeactivationImpact, Developer, DeveloperCreate, DeveloperUpdate } from '@/utils/types'
+import type { ActivitySummary, DeactivationImpact, Developer, DeveloperCreate, DeveloperUpdate } from '@/utils/types'
 
 export function useDevelopers(team?: string, isActive = true) {
   const params = new URLSearchParams()
@@ -64,6 +64,15 @@ export function useDeleteDeveloper() {
       toast.success('Developer removed')
     },
     onError: () => toast.error('Failed to remove developer'),
+  })
+}
+
+export function useActivitySummary(id: number) {
+  return useQuery<ActivitySummary>({
+    queryKey: ['developer', id, 'activity-summary'],
+    queryFn: () => apiFetch(`/developers/${id}/activity-summary`),
+    enabled: !!id,
+    staleTime: 60_000,
   })
 }
 

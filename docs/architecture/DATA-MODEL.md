@@ -1,6 +1,6 @@
 ---
 purpose: "ER diagram, all tables and relationships, FK decisions, JSONB structures, migration patterns"
-last-updated: "2026-03-29"
+last-updated: "2026-03-31"
 related:
   - docs/architecture/OVERVIEW.md
   - docs/architecture/SERVICE-LAYER.md
@@ -16,6 +16,7 @@ erDiagram
     developers ||--o{ pull_requests : "authors"
     developers ||--o{ pr_reviews : "reviews"
     developers ||--o{ issues : "assigned to"
+    developers ||--o{ issues : "created by"
     developers ||--o{ developer_goals : "has goals"
     developers ||--o{ developer_relationships : "source (reports to)"
     developers ||--o{ developer_relationships : "target (managed by)"
@@ -42,6 +43,10 @@ erDiagram
 
     ai_settings ||--|| ai_settings : "singleton id=1"
     ai_analyses }o--o| ai_analyses : "reused from (soft ref)"
+
+    work_categories ||--o{ work_category_rules : "has rules"
+    work_categories ||--o{ pull_requests : "categorizes (no FK)"
+    work_categories ||--o{ issues : "categorizes (no FK)"
 ```
 
 ## Tables
@@ -125,7 +130,8 @@ PRs with pre-computed cycle times and issue linkage.
 | `reverted_pr_number` | Integer | YES | | |
 | `html_url` | Text | YES | | |
 | `head_sha` | String(40) | YES | | For check-run lookups |
-| `work_category` | String(20) | YES | | AI or rule-based |
+| `work_category` | String(50) | YES | | Values: feature, bugfix, tech_debt, ops, unknown (admin-extensible). Widened to 50 by migration 030. |
+| `work_category_source` | String(20) | YES | | Classification provenance: label, title, prefix, ai, manual, cross_ref |
 | `author_github_username` | String(255) | YES | | For backfill |
 
 **Indexes:** `ix_pr_author_created` on (author_id, created_at)
@@ -215,6 +221,7 @@ Issues with close-time computation and quality scoring.
 | `repo_id` | Integer | NO | FK -> repositories | |
 | `assignee_id` | Integer | YES | FK -> developers | Nullable, backfilled |
 | `assignee_github_username` | String(255) | YES | | For backfill |
+| `creator_id` | Integer | YES | FK -> developers | Resolved at sync time via `resolve_author()` |
 | `number` | Integer | NO | | |
 | `title/body` | Text | YES | | |
 | `state` | String(20) | YES | | |
@@ -230,7 +237,8 @@ Issues with close-time computation and quality scoring.
 | `milestone_title` | String(255) | YES | | |
 | `milestone_due_on` | Date | YES | | |
 | `reopen_count` | Integer | NO | | Default 0 |
-| `work_category` | String(20) | YES | | |
+| `work_category` | String(50) | YES | | Values: feature, bugfix, tech_debt, ops, unknown (admin-extensible). Widened to 50 by migration 030. |
+| `work_category_source` | String(20) | YES | | Classification provenance: label, title, prefix, ai, manual, cross_ref |
 
 ### `issue_comments`
 
@@ -271,6 +279,20 @@ Sync run audit log with granular progress tracking.
 | `cancel_requested` | Boolean | NO | | Default False |
 | `log_summary` | JSONB | YES | | `list[dict]` capped at 500 |
 | `rate_limit_wait_s` | Integer | NO | | Default 0 |
+| `triggered_by` | String(50) | YES | | `"manual"`, `"scheduled"`, `"auto_resume"` |
+| `sync_scope` | String(255) | YES | | Human-readable label, e.g., "3 repos · 30 days" |
+
+### `sync_schedule_config`
+
+Singleton (id=1) auto-sync schedule configuration. Loaded on startup, live-updated via `PATCH /sync/schedule`.
+
+| Column | Type | Nullable | Key | Notes |
+|--------|------|----------|-----|-------|
+| `id` | Integer | NO | PK | Always 1 |
+| `auto_sync_enabled` | Boolean | NO | | Default True |
+| `incremental_interval_minutes` | Integer | NO | | Default 15, min 5 |
+| `full_sync_cron_hour` | Integer | NO | | Default 2 (0-23) |
+| `updated_at` | DateTime(tz) | YES | | Auto-updated on change |
 
 ### `ai_analyses`
 
@@ -460,6 +482,94 @@ Audit trail for all Slack notifications sent by DevPulse.
 | `payload` | JSONB | YES | | Message content for debugging |
 | `created_at` | DateTime(tz) | NO | now() | INDEX |
 
+### `benchmark_group_config`
+
+Admin-configurable peer group definitions for benchmarks.
+
+| Column | Type | Null | Default | Notes |
+|--------|------|------|---------|-------|
+| `id` | Integer PK | NO | | |
+| `group_key` | String(50) | NO | | UNIQUE. e.g., "ics", "leads", "devops", "qa" |
+| `display_name` | String(100) | NO | | |
+| `display_order` | Integer | NO | 0 | |
+| `roles` | JSONB | NO | | `list[str]` — role_keys included in this group |
+| `metrics` | JSONB | NO | | `list[str]` — metric keys from `BENCHMARK_METRICS` registry |
+| `min_team_size` | Integer | NO | 3 | Minimum developers for team comparison |
+| `is_default` | Boolean | NO | false | Seeded groups — cannot be deleted |
+| `created_at` | DateTime(tz) | NO | now() | |
+| `updated_at` | DateTime(tz) | NO | now() | |
+
+4 default groups seeded: IC Engineers, Engineering Leads, DevOps, QA Engineers.
+
+### `role_definitions`
+
+Admin-configurable role definitions. Each role maps to a fixed `contribution_category` that controls how the role participates in statistics.
+
+| Column | Type | Null | Default | Notes |
+|--------|------|------|---------|-------|
+| `role_key` | String(50) PK | NO | | e.g., "developer", "product_manager" |
+| `display_name` | String(100) | NO | | Human-readable label |
+| `contribution_category` | String(30) | NO | | `code_contributor`, `issue_contributor`, `non_contributor`, `system` |
+| `display_order` | Integer | NO | 0 | For UI ordering |
+| `is_default` | Boolean | NO | false | Seeded roles — cannot be deleted |
+| `created_at` | DateTime(tz) | NO | now() | |
+| `updated_at` | DateTime(tz) | NO | now() | |
+
+15 default roles seeded by migrations 027 and 029:
+
+| Category | Roles |
+|----------|-------|
+| `code_contributor` | developer, senior_developer, lead, architect, devops, senior_devops, qa, intern |
+| `issue_contributor` | product_manager, product_owner, engineering_manager, scrum_master |
+| `non_contributor` | designer, other |
+| `system` | system_account |
+
+`developers.role` (String(50)) references `role_definitions.role_key` — validated at the API layer, not via DB FK constraint.
+
+### `teams`
+
+Canonical team name registry. `Developer.team` stores team names as free-text strings; `teams.name` provides the authoritative set. No FK from `developers.team` to `teams.name` — consistency enforced by service logic (`resolve_team()`) only.
+
+| Column | Type | Nullable | Key | Notes |
+|--------|------|----------|-----|-------|
+| `id` | Integer | NO | PK | |
+| `name` | String(100) | NO | UNIQUE | Canonical team name |
+| `display_order` | Integer | NO | | Default 0 |
+| `created_at` | DateTime(tz) | NO | | |
+| `updated_at` | DateTime(tz) | NO | | |
+
+### `work_categories`
+
+Admin-configurable work category definitions. 5 defaults seeded: feature, bugfix, tech_debt, ops, unknown.
+
+| Column | Type | Nullable | Key | Notes |
+|--------|------|----------|-----|-------|
+| `category_key` | String(50) | NO | PK | e.g., "feature", "bugfix" |
+| `display_name` | String(100) | NO | | Human-readable label |
+| `color` | String(7) | NO | | Hex color (e.g., "#3B82F6") |
+| `exclude_from_stats` | Boolean | NO | | Default false |
+| `display_order` | Integer | NO | | For UI ordering |
+| `is_default` | Boolean | NO | | Seeded categories — cannot be deleted |
+| `created_at` | DateTime(tz) | NO | | |
+| `updated_at` | DateTime(tz) | NO | | |
+
+### `work_category_rules`
+
+Admin-configurable classification rules evaluated by priority. 31 defaults seeded (27 label + 4 title_regex).
+
+| Column | Type | Nullable | Key | Notes |
+|--------|------|----------|-----|-------|
+| `id` | Integer | NO | PK | |
+| `match_type` | String(20) | NO | | `label`, `title_regex`, or `prefix` |
+| `match_value` | String(255) | NO | | Label name, regex pattern, or prefix |
+| `case_sensitive` | Boolean | NO | | Default false |
+| `category_key` | String(50) | NO | FK → work_categories | Target category |
+| `priority` | Integer | NO | INDEX | Lower = evaluated first |
+| `created_at` | DateTime(tz) | NO | | |
+| `updated_at` | DateTime(tz) | NO | | |
+
+`pull_requests.work_category` and `issues.work_category` reference `work_categories.category_key` but have no FK constraint — service-layer enforcement only.
+
 ## Design Decisions
 
 ### Nullable Author/Reviewer/Assignee FKs
@@ -493,9 +603,11 @@ Stats are PR-level only to stay within GitHub API rate limits.
 
 ## Migration Patterns
 
-22 migrations from `000_initial_schema` through `022_add_indexes_constraints_jsonb_fix`. The chain has two merge points (004 and 007) where parallel feature branches were reconciled.
+31 migrations from `000_initial_schema` through `030_add_work_categories_and_rules`. The chain has two merge points (004 and 007) where parallel feature branches were reconciled.
 
 `000_initial_schema` is the root migration (`down_revision = None`). It creates the 10 base tables (`developers`, `repositories`, `pull_requests`, `pr_reviews`, `pr_review_comments`, `issues`, `issue_comments`, `sync_events`, `ai_analyses`, `developer_goals`) with their original columns. All subsequent migrations are additive from this base. `alembic upgrade head` is self-contained on a blank database.
+
+Recent migrations (023-030): `benchmark_group_config` table + 4 seeded groups (023), `work_category_source` columns on PRs and issues (024), `sync_schedule_config` singleton (025), `triggered_by` and `sync_scope` on sync_events (026), `role_definitions` table + 13 seeded roles + `issues.creator_id` FK (027), missing indexes on `issue_comments.issue_id` and `pr_review_comments.pr_id` (028), `teams` table + 2 new seeded roles (`senior_devops`, `other`) (029), `work_categories` + `work_category_rules` tables with seed data + widen `work_category` columns to String(50) (030).
 
 Convention: additive migrations only (ADD COLUMN, CREATE TABLE). No destructive DDL.
 
@@ -505,14 +617,21 @@ Convention: additive migrations only (ADD COLUMN, CREATE TABLE). No destructive 
 |----------|------|-------------|
 | ~~High~~ | ~~Migrations~~ | ~~No `000_initial_schema` migration~~ — **Resolved:** `000_initial_schema.py` now creates all base tables |
 | ~~Medium~~ | ~~Indexes~~ | ~~Missing indexes on frequently-filtered columns~~ — **Resolved:** Migration 022 adds indexes on `pull_requests.state/merged_at/repo_id`, `pr_reviews.pr_id/submitted_at`, `issues.state/assignee_id`, `sync_events.status` |
-| Medium | Types | `developers.skills` ORM annotation is `dict` but actual data is `list[str]` |
-| Medium | Types | `issues.labels` ORM annotation is `dict` but should be `list` (matches `pull_requests.labels`) |
+| ~~Medium~~ | ~~Types~~ | ~~`developers.skills` ORM annotation is `dict`~~ — **Fixed:** Now `Mapped[list | None]` |
+| ~~Medium~~ | ~~Types~~ | ~~`issues.labels` ORM annotation is `dict`~~ — **Fixed:** Now `Mapped[list | None]` |
+| ~~Medium~~ | ~~Schema drift~~ | ~~`work_category` columns widened to String(50) in DB (migration 030) but ORM still declares String(20)~~ — **Fixed:** ORM updated to String(50) |
+| Medium | Integrity | No FK from `developers.team` to `teams.name` or from `pull_requests.work_category` / `issues.work_category` to `work_categories.category_key` — service-layer enforcement only; direct SQL bypasses validation |
 | Medium | Integrity | `ai_analyses.reused_from_id` is a plain Integer, not a FK -- no referential integrity |
-| Medium | Schema drift | `ai_usage_log.created_at` index exists in migration 013 but not in ORM model |
+| ~~Medium~~ | ~~Schema drift~~ | ~~`ai_usage_log.created_at` index in migration but not ORM~~ — **Fixed:** Added to `AIUsageLog.__table_args__` |
+| ~~Medium~~ | ~~Schema drift~~ | ~~`ix_issue_creator_id` index in migration 027 but not ORM~~ — **Fixed:** Added to `Issue.__table_args__` |
+| ~~Medium~~ | ~~Missing index~~ | ~~`issue_comments.issue_id` has no index~~ — **Fixed:** Migration 028 + ORM `__table_args__` |
+| ~~Medium~~ | ~~Missing index~~ | ~~`pr_review_comments.pr_id` has no index~~ — **Fixed:** Migration 028 + ORM `__table_args__` |
 | ~~Medium~~ | ~~Schema drift~~ | ~~`sync_events.repo_ids` declared as `sa.JSON()` in migration 015 but `JSONB` in ORM model~~ — **Resolved:** Migration 022 converts to JSONB |
 | ~~Medium~~ | ~~Consistency~~ | ~~`pull_requests.github_id` and `issues.github_id` lack `unique=True`~~ — **Resolved:** Migration 022 adds unique constraints (`uq_pr_github_id`, `uq_issue_github_id`) |
 | Low | Defaults | Several non-nullable columns (`developers.is_active`, `developers.created_at`, `developer_goals.target_direction`, all `developer_collaboration_scores` float columns) use Python-only defaults with no `server_default` -- rows inserted outside SQLAlchemy get NULL |
 | Low | Timestamps | `datetime.utcnow` (deprecated in Python 3.12+) used as column default instead of `func.now()` |
+| ~~Low~~ | ~~Types~~ | ~~`DeveloperGoal.target_date` ORM annotation is `Mapped[datetime | None]` but column is `Date`~~ — **Fixed:** Now `Mapped[date | None]` |
+| ~~Low~~ | ~~Timestamps~~ | ~~`SlackUserSettings.updated_at` missing `onupdate`~~ — **Fixed:** Added `onupdate=datetime.utcnow` |
 | Low | ORM | `developer_collaboration_scores` has FK columns but no `relationship()` declarations -- cannot use ORM joins |
 | Low | ORM | `sync_events.resumed_from_id` FK exists at DB level but has no ORM relationship |
 | Low | Missing links | `pr_review_comments` and `issue_comments` have no `author_id` FK -- no developer attribution |

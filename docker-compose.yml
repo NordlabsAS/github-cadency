@@ -23,12 +23,18 @@ services:
       - .env
     environment:
       DATABASE_URL: postgresql+asyncpg://devpulse:devpulse@db:5432/devpulse
+      LOG_FORMAT: json
     volumes:
       - ./backend:/app
       - ./github-app.pem:/app/github-app.pem:ro
     depends_on:
       db:
         condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   frontend:
     build: ./frontend
@@ -43,5 +49,67 @@ services:
     depends_on:
       - backend
 
+  # --- Observability stack (opt-in: docker compose --profile logging up) ---
+
+  loki:
+    image: grafana/loki:3.4.2
+    profiles: ["logging"]
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./infrastructure/loki-config.yml:/etc/loki/local-config.yaml
+      - loki-data:/loki
+    command: -config.file=/etc/loki/local-config.yaml
+
+  promtail:
+    image: grafana/promtail:3.4.2
+    profiles: ["logging"]
+    volumes:
+      - ./infrastructure/promtail-config.yml:/etc/promtail/config.yml
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command: -config.file=/etc/promtail/config.yml
+    depends_on:
+      - loki
+
+  grafana:
+    image: grafana/grafana:11.6.0
+    profiles: ["logging"]
+    ports:
+      - "3002:3000"
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    volumes:
+      - ./infrastructure/grafana/provisioning:/etc/grafana/provisioning
+      - ./infrastructure/grafana/dashboards:/var/lib/grafana/dashboards
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - loki
+      - prometheus
+
+  prometheus:
+    image: prom/prometheus:v3.2.1
+    profiles: ["logging"]
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./infrastructure/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.51.0
+    profiles: ["logging"]
+    ports:
+      - "8080:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /sys:/sys:ro
+      - /var/lib/docker:/var/lib/docker:ro
+    privileged: true
+
 volumes:
   pgdata:
+  loki-data:
+  grafana-data:
+  prometheus-data:

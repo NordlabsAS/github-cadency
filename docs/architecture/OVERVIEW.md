@@ -1,6 +1,6 @@
 ---
 purpose: "High-level architecture, deployment topology, invariants, and component map"
-last-updated: "2026-03-29"
+last-updated: "2026-03-31"
 related:
   - docs/architecture/DATA-MODEL.md
   - docs/architecture/API-DESIGN.md
@@ -44,19 +44,20 @@ See [CLAUDE.md](../../CLAUDE.md) for the full tech stack reference. Key componen
 | GitHub | REST API via httpx, GitHub App auth (JWT + installation tokens) |
 | AI | Anthropic Claude API (claude-sonnet-4-0), on-demand only |
 | Slack | slack_sdk AsyncWebClient, bot token stored in DB |
+| Logging | structlog (JSON prod / console dev), Loki + Promtail + Grafana (opt-in Docker profile) |
 | Scheduling | APScheduler AsyncIOScheduler (in-process, FastAPI lifespan) |
 
 ## Deployment Topology
 
-Docker Compose runs three containers: `backend` (:8000), `frontend` (:3001 proxying to :5173), `db` (:5432). The frontend Vite dev server proxies `/api/*` to the backend. No reverse proxy, message queue, or external cache.
+Docker Compose runs three containers: `backend` (:8000), `frontend` (:3001 proxying to :5173), `db` (:5432). The frontend Vite dev server proxies `/api/*` to the backend. No reverse proxy, message queue, or external cache. An optional observability stack (Loki, Promtail, Grafana, Prometheus, cAdvisor) is available via `docker compose --profile logging up`.
 
 ## Component Map
 
 | Component | Docs |
 |-----------|------|
-| 21 database tables, JSONB columns, nullable FK pattern | [DATA-MODEL.md](DATA-MODEL.md) |
-| 9 API routers, auth model, error handling | [API-DESIGN.md](API-DESIGN.md) |
-| 11 services: sync, stats, collaboration, enhanced collaboration, relationships, risk, goals, AI, work categorization, AI settings, Slack | [SERVICE-LAYER.md](SERVICE-LAYER.md) |
+| 27 database tables, JSONB columns, nullable FK pattern | [DATA-MODEL.md](DATA-MODEL.md) |
+| 12 API routers, auth model, error handling | [API-DESIGN.md](API-DESIGN.md) |
+| 16 services: sync, stats, collaboration, enhanced collaboration, relationships, roles, risk, goals, AI, work categorization, work categories, AI settings, Slack, teams, exceptions, utils | [SERVICE-LAYER.md](SERVICE-LAYER.md) |
 | React pages, hooks, state management, design system | [FRONTEND.md](FRONTEND.md) |
 | End-to-end flows: sync, webhooks, stats, AI, auth, goals | [DATA-FLOWS.md](DATA-FLOWS.md) |
 
@@ -64,10 +65,11 @@ Docker Compose runs three containers: `backend` (:8000), `frontend` (:3001 proxy
 
 ```
 backend/app/
-├── api/           # 8 routers (thin delegation to services)
-├── models/        # database.py (engine, sessions), models.py (18 ORM models)
+├── api/           # 12 routers (thin delegation to services)
+├── models/        # database.py (engine, sessions), models.py (27 ORM models)
 ├── schemas/       # schemas.py (70+ Pydantic models, enums)
-├── services/      # 10 service modules (all business logic)
+├── services/      # 14 service modules (all business logic)
+├── logging/       # structlog setup, request correlation middleware, get_logger()
 ├── config.py      # pydantic-settings (env vars)
 └── main.py        # App factory, CORS, router registration, APScheduler lifespan
 ```
@@ -96,11 +98,14 @@ See [DATA-FLOWS.md](DATA-FLOWS.md) for step-by-step traces with `file:function` 
 
 | Severity | Area | Description |
 |----------|------|-------------|
+| ~~High~~ | ~~AI~~ | ~~`ai_analysis.py` imports `get_benchmarks` but was renamed to `get_benchmarks_v2`~~ — **Fixed**: Updated imports to `get_benchmarks_v2` |
 | ~~High~~ | ~~Migrations~~ | ~~No initial migration~~ — **Fixed**: `000_initial_schema.py` added |
 | ~~High~~ | ~~Auth~~ | ~~No JWT revocation -- deactivated users retain access for up to 7 days~~ — **Fixed**: `get_current_user()` checks `developers.is_active` on every request |
 | Medium | Sync | Auto-reactivation in sync can undo manual deactivation if the developer appears in GitHub activity or org members (warning log only) |
-| Medium | Sync | TOCTOU race on sync start -- three optimistic reads without DB-level locking |
-| Medium | Stats | N+1 query pattern in benchmarks -- ~9 queries per developer in Python loop |
-| Medium | Frontend | Single global ErrorBoundary -- any page crash takes down the entire UI |
+| Medium | Sync | `scheduled_sync()` calls `await run_sync(...)` directly, blocking other APScheduler jobs (Slack checks) for the duration of the sync |
+| ~~Medium~~ | ~~Sync~~ | ~~TOCTOU race on sync start -- three optimistic reads without DB-level locking~~ — **Fixed**: PostgreSQL advisory lock wraps check+insert |
+| ~~Medium~~ | ~~Stats~~ | ~~N+1 query pattern in benchmarks -- ~9 queries per developer in Python loop~~ — **Fixed**: Rewritten as batch GROUP BY queries |
+| ~~Medium~~ | ~~Frontend~~ | ~~Single global ErrorBoundary -- any page crash takes down the entire UI~~ — **Fixed**: Per-route ErrorBoundary wrappers isolate failures by section |
 | ~~Medium~~ | ~~API~~ | ~~Latent `NameError` in `sync.py` -- uses `httpx.HTTPStatusError` without importing `httpx`~~ — **Fixed**: `import httpx` added |
 | Low | Services | `_default_range()` duplicated in 5 service files |
+| ~~Low~~ | ~~Frontend~~ | ~~`timeAgo`, `formatDuration` duplicated across 7+ page files~~ — **Fixed**: Extracted to `utils/format.ts` |

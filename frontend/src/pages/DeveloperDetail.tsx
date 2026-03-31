@@ -1,25 +1,30 @@
 import { useParams } from 'react-router-dom'
-import { useDeveloper } from '@/hooks/useDevelopers'
+import { useDeveloper, useActivitySummary, useUpdateDeveloper } from '@/hooks/useDevelopers'
 import { useDeveloperStats, useDeveloperTrends } from '@/hooks/useStats'
 import { useDateRange } from '@/hooks/useDateRange'
 import { useRunAnalysis, useRunOneOnOnePrep, useAIHistory } from '@/hooks/useAI'
 import { useAuth } from '@/hooks/useAuth'
+import { useRoles } from '@/hooks/useRoles'
+import TeamCombobox from '@/components/TeamCombobox'
 import {
   useGoals,
   useGoalProgress,
   useUpdateSelfGoal,
 } from '@/hooks/useGoals'
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
-import { HelpCircle } from 'lucide-react'
+import { HelpCircle, Settings } from 'lucide-react'
 import RelationshipsCard from '@/components/RelationshipsCard'
 import WorksWithSection from '@/components/WorksWithSection'
 import SlackPreferencesSection from '@/components/SlackPreferencesSection'
+import DeactivateDialog from '@/components/DeactivateDialog'
 import ErrorCard from '@/components/ErrorCard'
 import StatCardSkeleton from '@/components/StatCardSkeleton'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import {
   Dialog,
   DialogContent,
@@ -36,8 +41,10 @@ import ReviewQualityDonut from '@/components/charts/ReviewQualityDonut'
 import GoalSparkline from '@/components/charts/GoalSparkline'
 import GoalCreateDialog, { metricKeyLabels } from '@/components/GoalCreateDialog'
 import AnalysisResultRenderer from '@/components/ai/AnalysisResultRenderer'
-import { useState } from 'react'
-import type { TrendPeriod, GoalResponse } from '@/utils/types'
+import { FALLBACK_CATEGORY_CONFIG, FALLBACK_CATEGORY_ORDER } from '@/utils/categoryConfig'
+import { useCategoryConfig } from '@/hooks/useWorkCategories'
+import { useState, useEffect } from 'react'
+import type { TrendPeriod, GoalResponse, Developer, DeveloperUpdate, RoleDefinition } from '@/utils/types'
 
 const trendCharts: {
   title: string
@@ -116,6 +123,313 @@ const percentileLabels: Record<string, { label: string; lowerIsBetter: boolean; 
   time_after_approve_h: { label: 'Time After Approve', lowerIsBetter: true, format: (v: number) => `${v.toFixed(1)}h` },
 }
 
+function ActivitySummaryCard({ developerId }: { developerId: number }) {
+  const { data: summary, isLoading } = useActivitySummary(developerId)
+  const catConfig = useCategoryConfig()
+  const CATEGORY_CONFIG = catConfig?.config ?? FALLBACK_CATEGORY_CONFIG
+  const CATEGORY_ORDER = catConfig?.order ?? FALLBACK_CATEGORY_ORDER
+
+  if (isLoading) {
+    return (
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base">Lifetime Activity</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="grid gap-x-8 gap-y-2 sm:grid-cols-3">
+            {Array.from({ length: 6 }).map((_, i) => (
+              <Skeleton key={i} className="h-5 w-32" />
+            ))}
+          </div>
+        </CardContent>
+      </Card>
+    )
+  }
+
+  if (!summary) return null
+
+  const totalCat = Object.values(summary.work_categories).reduce((a, b) => a + b, 0)
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-base">Lifetime Activity</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="grid gap-x-8 gap-y-2 sm:grid-cols-3">
+          <div className="flex justify-between text-sm">
+            <span className="text-muted-foreground">PRs Authored</span>
+            <span className="font-medium">{summary.prs_authored} <span className="text-muted-foreground font-normal">({summary.prs_merged} merged, {summary.prs_open} open)</span></span>
+          </div>
+          <div className="flex justify-between text-sm">
+            <span className="text-muted-foreground">Reviews Given</span>
+            <span className="font-medium">{summary.reviews_given}</span>
+          </div>
+          <div className="flex justify-between text-sm">
+            <span className="text-muted-foreground">Repos Touched</span>
+            <span className="font-medium">{summary.repos_touched}</span>
+          </div>
+          <div className="flex justify-between text-sm">
+            <span className="text-muted-foreground">Issues Created</span>
+            <span className="font-medium">{summary.issues_created}</span>
+          </div>
+          <div className="flex justify-between text-sm">
+            <span className="text-muted-foreground">Issues Assigned</span>
+            <span className="font-medium">{summary.issues_assigned}</span>
+          </div>
+          <div className="flex justify-between text-sm">
+            <span className="text-muted-foreground">Active Since</span>
+            <span className="font-medium">
+              {summary.first_activity
+                ? new Date(summary.first_activity).toLocaleDateString()
+                : 'No activity'}
+            </span>
+          </div>
+          {summary.last_activity && (
+            <div className="flex justify-between text-sm">
+              <span className="text-muted-foreground">Last Active</span>
+              <span className="font-medium">{new Date(summary.last_activity).toLocaleDateString()}</span>
+            </div>
+          )}
+        </div>
+
+        {/* Work category breakdown bar */}
+        {totalCat > 0 && (
+          <div className="space-y-2">
+            <p className="text-sm text-muted-foreground">Work Breakdown (merged PRs)</p>
+            <div className="flex h-3 w-full overflow-hidden rounded-full">
+              {CATEGORY_ORDER.map((cat) => {
+                const count = summary.work_categories[cat] ?? 0
+                if (count === 0) return null
+                const pct = (count / totalCat) * 100
+                return (
+                  <Tooltip key={cat}>
+                    <TooltipTrigger asChild>
+                      <div
+                        className="h-full transition-all"
+                        style={{ width: `${pct}%`, backgroundColor: CATEGORY_CONFIG[cat].color }}
+                      />
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      {CATEGORY_CONFIG[cat].label}: {count} ({pct.toFixed(0)}%)
+                    </TooltipContent>
+                  </Tooltip>
+                )
+              })}
+            </div>
+            <div className="flex flex-wrap gap-3 text-xs">
+              {CATEGORY_ORDER.map((cat) => {
+                const count = summary.work_categories[cat] ?? 0
+                if (count === 0) return null
+                return (
+                  <div key={cat} className="flex items-center gap-1.5">
+                    <div
+                      className="h-2.5 w-2.5 rounded-full"
+                      style={{ backgroundColor: CATEGORY_CONFIG[cat].color }}
+                    />
+                    <span>{CATEGORY_CONFIG[cat].label}</span>
+                    <span className="text-muted-foreground">{count}</span>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+
+function EditProfileDialog({
+  developer,
+  open,
+  onOpenChange,
+  onDeactivate,
+}: {
+  developer: Developer
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  onDeactivate: () => void
+}) {
+  const { data: roles } = useRoles()
+  const updateDev = useUpdateDeveloper(developer.id)
+
+  const [form, setForm] = useState({
+    display_name: developer.display_name,
+    email: developer.email ?? '',
+    role: developer.role ?? '',
+    team: developer.team ?? '',
+    office: developer.office ?? '',
+    skills: developer.skills?.join(', ') ?? '',
+    location: developer.location ?? '',
+    timezone: developer.timezone ?? '',
+  })
+
+  useEffect(() => {
+    if (open) {
+      setForm({
+        display_name: developer.display_name,
+        email: developer.email ?? '',
+        role: developer.role ?? '',
+        team: developer.team ?? '',
+        office: developer.office ?? '',
+        skills: developer.skills?.join(', ') ?? '',
+        location: developer.location ?? '',
+        timezone: developer.timezone ?? '',
+      })
+    }
+  }, [open, developer])
+
+  const rolesByCategory = (roles ?? []).reduce<Record<string, RoleDefinition[]>>((acc, r) => {
+    const cat = r.contribution_category
+    ;(acc[cat] ??= []).push(r)
+    return acc
+  }, {})
+
+  const categoryLabels: Record<string, string> = {
+    code_contributor: 'Code Contributors',
+    issue_contributor: 'Issue Contributors',
+    non_contributor: 'Non-Contributors',
+    system: 'System',
+  }
+
+  function handleSave() {
+    const data: DeveloperUpdate = {
+      display_name: form.display_name,
+      email: form.email || null,
+      role: form.role || null,
+      team: form.team || null,
+      office: form.office || null,
+      skills: form.skills ? form.skills.split(',').map((s) => s.trim()).filter(Boolean) : null,
+      location: form.location || null,
+      timezone: form.timezone || null,
+    }
+    updateDev.mutate(data, { onSuccess: () => onOpenChange(false) })
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Edit {developer.display_name}</DialogTitle>
+        </DialogHeader>
+        <div className="grid gap-4 py-2">
+          <div className="grid gap-1.5">
+            <Label htmlFor="edit-display-name">Display Name</Label>
+            <Input
+              id="edit-display-name"
+              value={form.display_name}
+              onChange={(e) => setForm({ ...form, display_name: e.target.value })}
+            />
+          </div>
+          <div className="grid gap-1.5">
+            <Label htmlFor="edit-email">Email</Label>
+            <Input
+              id="edit-email"
+              type="email"
+              value={form.email}
+              onChange={(e) => setForm({ ...form, email: e.target.value })}
+            />
+          </div>
+          <div className="grid gap-1.5">
+            <Label htmlFor="edit-role">Role</Label>
+            <select
+              id="edit-role"
+              className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              value={form.role}
+              onChange={(e) => setForm({ ...form, role: e.target.value })}
+            >
+              <option value="">No role</option>
+              {Object.entries(rolesByCategory).map(([cat, catRoles]) => (
+                <optgroup key={cat} label={categoryLabels[cat] ?? cat}>
+                  {catRoles.map((r) => (
+                    <option key={r.role_key} value={r.role_key}>{r.display_name}</option>
+                  ))}
+                </optgroup>
+              ))}
+            </select>
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div className="grid gap-1.5">
+              <Label htmlFor="edit-team">Team</Label>
+              <TeamCombobox
+                id="edit-team"
+                value={form.team}
+                onChange={(val) => setForm({ ...form, team: val })}
+              />
+            </div>
+            <div className="grid gap-1.5">
+              <Label htmlFor="edit-office">Office</Label>
+              <Input
+                id="edit-office"
+                value={form.office}
+                onChange={(e) => setForm({ ...form, office: e.target.value })}
+              />
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div className="grid gap-1.5">
+              <Label htmlFor="edit-location">Location</Label>
+              <Input
+                id="edit-location"
+                value={form.location}
+                onChange={(e) => setForm({ ...form, location: e.target.value })}
+              />
+            </div>
+            <div className="grid gap-1.5">
+              <Label htmlFor="edit-timezone">Timezone</Label>
+              <Input
+                id="edit-timezone"
+                placeholder="e.g. Europe/Oslo"
+                value={form.timezone}
+                onChange={(e) => setForm({ ...form, timezone: e.target.value })}
+              />
+            </div>
+          </div>
+          <div className="grid gap-1.5">
+            <Label htmlFor="edit-skills">Skills</Label>
+            <Input
+              id="edit-skills"
+              placeholder="Comma-separated"
+              value={form.skills}
+              onChange={(e) => setForm({ ...form, skills: e.target.value })}
+            />
+          </div>
+        </div>
+        <div className="flex items-center justify-between pt-2">
+          {developer.is_active ? (
+            <Button
+              variant="destructive"
+              size="sm"
+              onClick={() => {
+                onOpenChange(false)
+                onDeactivate()
+              }}
+            >
+              Deactivate
+            </Button>
+          ) : (
+            <div />
+          )}
+          <div className="flex gap-2">
+            <Button variant="outline" onClick={() => onOpenChange(false)}>
+              Cancel
+            </Button>
+            <Button
+              onClick={handleSave}
+              disabled={!form.display_name.trim() || updateDev.isPending}
+            >
+              {updateDev.isPending ? 'Saving...' : 'Save'}
+            </Button>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+
 export default function DeveloperDetail() {
   const { id } = useParams<{ id: string }>()
   const devId = Number(id)
@@ -129,9 +443,14 @@ export default function DeveloperDetail() {
   const { user, isAdmin } = useAuth()
   const { data: goals } = useGoals(devId)
   const updateSelfGoal = useUpdateSelfGoal()
+  const catConfig = useCategoryConfig()
+  const CATEGORY_CONFIG = catConfig?.config ?? FALLBACK_CATEGORY_CONFIG
+  const CATEGORY_ORDER = catConfig?.order ?? FALLBACK_CATEGORY_ORDER
   const [analysisType, setAnalysisType] = useState<'communication' | 'sentiment'>('communication')
   const [analyzeOpen, setAnalyzeOpen] = useState(false)
   const [prepOpen, setPrepOpen] = useState(false)
+  const [editOpen, setEditOpen] = useState(false)
+  const [deactivateOpen, setDeactivateOpen] = useState(false)
 
   const isOwnPage = user?.developer_id === devId
   const canCreateGoal = isAdmin || isOwnPage
@@ -175,11 +494,21 @@ export default function DeveloperDetail() {
                 {dev.display_name[0]}
               </div>
             )}
-            <div className="space-y-1">
+            <div className="flex-1 space-y-1">
               <div className="flex items-center gap-2">
                 <h1 className="text-2xl font-bold">{dev.display_name}</h1>
                 {!dev.is_active && (
                   <Badge variant="destructive" className="text-xs">Inactive</Badge>
+                )}
+                {isAdmin && (
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="ml-auto h-8 w-8"
+                    onClick={() => setEditOpen(true)}
+                  >
+                    <Settings className="h-4 w-4" />
+                  </Button>
                 )}
               </div>
               <p className="text-muted-foreground">@{dev.github_username}</p>
@@ -206,6 +535,26 @@ export default function DeveloperDetail() {
         </Card>
         <RelationshipsCard developerId={devId} />
       </div>
+
+      {/* Activity Summary — visible to admin or own page */}
+      {(isOwnPage || isAdmin) && <ActivitySummaryCard developerId={devId} />}
+
+      {/* Edit Profile Dialog (admin only) */}
+      {isAdmin && dev && (
+        <>
+          <EditProfileDialog
+            developer={dev}
+            open={editOpen}
+            onOpenChange={setEditOpen}
+            onDeactivate={() => setDeactivateOpen(true)}
+          />
+          <DeactivateDialog
+            developer={dev}
+            open={deactivateOpen}
+            onOpenChange={setDeactivateOpen}
+          />
+        </>
+      )}
 
       {/* Stats */}
       {stats && (
@@ -278,6 +627,12 @@ export default function DeveloperDetail() {
             title="Reverts Authored"
             value={stats.reverts_authored}
             tooltip="Revert PRs you created — a positive signal of quickly fixing problems"
+          />
+          <StatCard
+            title="Issue Linkage"
+            value={stats.issue_linkage_rate != null ? `${(stats.issue_linkage_rate * 100).toFixed(1)}%` : 'N/A'}
+            subtitle={`${stats.prs_linked_to_issue} of ${stats.prs_opened} PRs`}
+            tooltip="Percentage of your PRs that reference an issue via Closes/Fixes/Resolves keywords"
           />
         </div>
       )}

@@ -51,7 +51,8 @@ import { cn } from '@/lib/utils'
 import { riskLevelLabels, riskLevelStyles } from '@/utils/types'
 import type { WorkCategory, RiskLevel, DeveloperStatsWithPercentiles } from '@/utils/types'
 
-import { CATEGORY_CONFIG, CATEGORY_ORDER } from '@/utils/categoryConfig'
+import { FALLBACK_CATEGORY_CONFIG, FALLBACK_CATEGORY_ORDER } from '@/utils/categoryConfig'
+import { useCategoryConfig } from '@/hooks/useWorkCategories'
 
 const tooltipStyle = {
   backgroundColor: 'hsl(var(--card))',
@@ -115,6 +116,9 @@ export default function ExecutiveDashboard() {
     [dateFrom, dateTo],
   )
   const pieId = useId()
+  const catConfig = useCategoryConfig()
+  const CATEGORY_CONFIG = catConfig?.config ?? FALLBACK_CATEGORY_CONFIG
+  const CATEGORY_ORDER = catConfig?.order ?? FALLBACK_CATEGORY_ORDER
 
   // Data fetching — all in parallel, each section handles its own loading
   const { data: stats, isLoading: statsLoading, isError: statsError, refetch: refetchStats } = useTeamStats(undefined, dateFrom, dateTo)

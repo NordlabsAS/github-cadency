@@ -12,3 +12,4 @@ pyjwt==2.10.1
 python-multipart==0.0.20
 slack_sdk==3.34.0
 aiohttp==3.11.14
+structlog==25.1.0

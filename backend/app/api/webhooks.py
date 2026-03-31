@@ -1,12 +1,12 @@
 import hashlib
 import hmac
-import logging
 
 import httpx
 from fastapi import APIRouter, Header, HTTPException, Request, status
 from sqlalchemy import select
 
 from app.config import settings
+from app.logging import get_logger
 from app.models.database import AsyncSessionLocal
 from app.models.models import Issue, PullRequest, Repository
 from app.services.github_sync import (
@@ -21,7 +21,7 @@ from app.services.github_sync import (
     upsert_review_comment,
 )
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 router = APIRouter()
 
@@ -67,7 +67,7 @@ async def github_webhook(
 
                 await db.commit()
             except Exception:
-                logger.exception("Error processing webhook event %s", x_github_event)
+                logger.exception("Error processing webhook event", github_event=x_github_event, event_type="system.webhook")
                 await db.rollback()
                 raise
 

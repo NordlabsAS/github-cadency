@@ -9,6 +9,7 @@ import SyncProgressView from './SyncProgressView'
 import SyncErrorDetail from './SyncErrorDetail'
 import SyncLogViewer from './SyncLogViewer'
 import type { SyncEvent, SyncError } from '@/utils/types'
+import { formatDuration, formatDate } from '@/utils/format'
 
 function statusVariant(status: string | null) {
   switch (status) {
@@ -24,19 +25,6 @@ function statusVariant(status: string | null) {
 function statusLabel(status: string | null): string {
   if (status === 'completed_with_errors') return 'partial'
   return status ?? '-'
-}
-
-function formatDuration(seconds: number | null): string {
-  if (seconds == null) return '-'
-  if (seconds < 60) return `${seconds}s`
-  const minutes = Math.floor(seconds / 60)
-  const secs = seconds % 60
-  return `${minutes}m ${secs}s`
-}
-
-function formatDate(dateStr: string | null): string {
-  if (!dateStr) return '-'
-  return new Date(dateStr).toLocaleString()
 }
 
 function RepoStatusIcon({ status }: { status: string }) {
@@ -93,7 +81,12 @@ export default function SyncDetailPage() {
       <div className="flex items-center gap-3">
         <Link to="/admin/sync"><Button variant="ghost" size="sm"><ArrowLeft className="mr-2 h-4 w-4" /> Back</Button></Link>
         <h1 className="text-2xl font-bold">Sync #{event.id}</h1>
-        <Badge variant="outline">{event.sync_type}</Badge>
+        <span className="text-sm text-muted-foreground">{event.sync_scope ?? event.sync_type}</span>
+        {event.triggered_by && (
+          <Badge variant="secondary" className="text-xs">
+            {event.triggered_by === 'scheduled' ? 'Auto' : event.triggered_by === 'auto_resume' ? 'Resumed' : 'Manual'}
+          </Badge>
+        )}
         <Badge variant={statusVariant(event.status)}>{statusLabel(event.status)}</Badge>
         {event.resumed_from_id && (
           <Link to={`/admin/sync/${event.resumed_from_id}`}>

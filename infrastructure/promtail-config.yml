@@ -1,0 +1,41 @@
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  - job_name: docker
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 5s
+    relabel_configs:
+      # Keep only DevPulse backend and frontend containers
+      - source_labels: ['__meta_docker_container_name']
+        regex: '.*-(backend|frontend).*'
+        action: keep
+      - source_labels: ['__meta_docker_container_name']
+        regex: '/?(.*)'
+        target_label: container
+      - source_labels: ['__meta_docker_container_label_com_docker_compose_service']
+        target_label: service
+    pipeline_stages:
+      # Parse Docker JSON log wrapper
+      - docker: {}
+      # Parse structlog JSON payload
+      - json:
+          expressions:
+            level: level
+            event_type: event_type
+            request_id: request_id
+            event: event
+      # Promote to Loki labels for fast filtering
+      - labels:
+          level:
+          event_type:
+      # Note: request_id is NOT promoted to a label (high cardinality).
+      # Query it as a parsed JSON field: {service="backend"} | json | request_id="abc123"

@@ -1,13 +1,13 @@
 from datetime import datetime, timedelta, timezone
 
 import httpx
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.auth import require_admin
 from app.models.database import get_db
-from app.models.models import Issue, PullRequest, Repository, SyncEvent
+from app.models.models import Issue, PullRequest, Repository, SyncEvent, SyncScheduleConfig
 from app.config import validate_github_config
 from app.schemas.schemas import (
     PreflightCheck,
@@ -15,6 +15,8 @@ from app.schemas.schemas import (
     RepoResponse,
     RepoTrackUpdate,
     SyncEventResponse,
+    SyncScheduleConfigResponse,
+    SyncScheduleConfigUpdate,
     SyncStatusResponse,
     SyncTriggerRequest,
 )
@@ -44,13 +46,40 @@ async def start_sync(
     if active.scalar_one_or_none():
         raise HTTPException(409, "A sync is already in progress")
 
+    # Create SyncEvent immediately so the frontend sees it on the next status poll
+    sync_event = SyncEvent(
+        sync_type=request.sync_type,
+        status="started",
+        started_at=datetime.now(timezone.utc),
+        repos_synced=0,
+        prs_upserted=0,
+        issues_upserted=0,
+        errors=[],
+        repo_ids=request.repo_ids,
+        since_override=request.since,
+        repos_completed=[],
+        repos_failed=[],
+        log_summary=[],
+        is_resumable=False,
+        rate_limit_wait_s=0,
+        triggered_by="manual",
+        sync_scope=request.sync_scope,
+    )
+    db.add(sync_event)
+    await db.commit()
+    await db.refresh(sync_event)
+
     background_tasks.add_task(
         run_sync,
         request.sync_type,
         request.repo_ids,
         request.since,
+        None,  # resumed_from_id
+        "manual",  # triggered_by
+        request.sync_scope,  # sync_scope
+        sync_event.id,  # sync_event_id — use pre-created event
     )
-    return {"status": "accepted", "sync_type": request.sync_type}
+    return SyncEventResponse.model_validate(sync_event)
 
 
 @router.post("/sync/resume/{event_id}", status_code=202)
@@ -89,14 +118,41 @@ async def resume_sync(
     if not remaining:
         raise HTTPException(400, "No remaining repos to sync")
 
+    # Create SyncEvent immediately so the frontend sees it on the next status poll
+    sync_event = SyncEvent(
+        sync_type=original.sync_type or "incremental",
+        status="started",
+        started_at=datetime.now(timezone.utc),
+        repos_synced=0,
+        prs_upserted=0,
+        issues_upserted=0,
+        errors=[],
+        repo_ids=remaining,
+        since_override=original.since_override,
+        resumed_from_id=event_id,
+        repos_completed=[],
+        repos_failed=[],
+        log_summary=[],
+        is_resumable=False,
+        rate_limit_wait_s=0,
+        triggered_by="auto_resume",
+        sync_scope=original.sync_scope,
+    )
+    db.add(sync_event)
+    await db.commit()
+    await db.refresh(sync_event)
+
     background_tasks.add_task(
         run_sync,
         original.sync_type or "incremental",
         remaining,
         original.since_override,
         event_id,
+        "auto_resume",  # triggered_by
+        original.sync_scope,  # preserve original scope
+        sync_event.id,  # sync_event_id — use pre-created event
     )
-    return {"status": "accepted", "remaining_repos": len(remaining)}
+    return SyncEventResponse.model_validate(sync_event)
 
 
 @router.post("/sync/cancel", status_code=200)
@@ -160,10 +216,8 @@ async def force_stop_sync(db: AsyncSession = Depends(get_db)):
 # --- Sync Status ---
 
 
-@router.get("/sync/status", response_model=SyncStatusResponse)
-async def sync_status(db: AsyncSession = Depends(get_db)):
-    """Get current sync status: active sync + summary stats."""
-    # Active sync
+async def _build_sync_status(db: AsyncSession) -> SyncStatusResponse:
+    """Assemble sync status from DB queries."""
     active_result = await db.execute(
         select(SyncEvent)
         .where(SyncEvent.status == "started")
@@ -172,7 +226,6 @@ async def sync_status(db: AsyncSession = Depends(get_db)):
     )
     active_event = active_result.scalar_one_or_none()
 
-    # Last completed sync
     last_result = await db.execute(
         select(SyncEvent)
         .where(SyncEvent.status.in_(["completed", "completed_with_errors", "failed", "cancelled"]))
@@ -181,7 +234,6 @@ async def sync_status(db: AsyncSession = Depends(get_db)):
     )
     last_event = last_result.scalar_one_or_none()
 
-    # Repo counts
     tracked_count = await db.scalar(
         select(func.count()).select_from(Repository).where(
             Repository.is_tracked.is_(True)
@@ -191,7 +243,6 @@ async def sync_status(db: AsyncSession = Depends(get_db)):
         select(func.count()).select_from(Repository)
     ) or 0
 
-    # Last successful sync
     last_success_result = await db.execute(
         select(SyncEvent)
         .where(SyncEvent.status == "completed")
@@ -200,6 +251,9 @@ async def sync_status(db: AsyncSession = Depends(get_db)):
     )
     last_success = last_success_result.scalar_one_or_none()
 
+    schedule_row = await db.get(SyncScheduleConfig, 1)
+    schedule = SyncScheduleConfigResponse.model_validate(schedule_row) if schedule_row else SyncScheduleConfigResponse()
+
     return SyncStatusResponse(
         active_sync=active_event,
         last_completed=last_event,
@@ -207,7 +261,59 @@ async def sync_status(db: AsyncSession = Depends(get_db)):
         total_repos_count=total_count,
         last_successful_sync=last_success.completed_at if last_success else None,
         last_sync_duration_s=last_success.duration_s if last_success else None,
+        schedule=schedule,
     )
+
+
+@router.get("/sync/status", response_model=SyncStatusResponse)
+async def sync_status(db: AsyncSession = Depends(get_db)):
+    """Get current sync status: active sync + summary stats."""
+    return await _build_sync_status(db)
+
+
+# --- Schedule Config ---
+
+
+@router.get("/sync/schedule", response_model=SyncScheduleConfigResponse)
+async def get_schedule(db: AsyncSession = Depends(get_db)):
+    """Get the sync schedule configuration."""
+    row = await db.get(SyncScheduleConfig, 1)
+    if not row:
+        return SyncScheduleConfigResponse()
+    return row
+
+
+@router.patch("/sync/schedule", response_model=SyncScheduleConfigResponse)
+async def update_schedule(
+    data: SyncScheduleConfigUpdate,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Update sync schedule config and reschedule APScheduler jobs."""
+    row = await db.get(SyncScheduleConfig, 1)
+    if not row:
+        row = SyncScheduleConfig(id=1)
+        db.add(row)
+
+    if data.auto_sync_enabled is not None:
+        row.auto_sync_enabled = data.auto_sync_enabled
+    if data.incremental_interval_minutes is not None:
+        if data.incremental_interval_minutes < 5:
+            raise HTTPException(400, "Minimum interval is 5 minutes")
+        row.incremental_interval_minutes = data.incremental_interval_minutes
+    if data.full_sync_cron_hour is not None:
+        if not (0 <= data.full_sync_cron_hour <= 23):
+            raise HTTPException(400, "Hour must be 0-23")
+        row.full_sync_cron_hour = data.full_sync_cron_hour
+
+    await db.commit()
+    await db.refresh(row)
+
+    # Reschedule APScheduler jobs via app.state
+    from app.main import reschedule_sync_jobs
+    reschedule_sync_jobs(row, getattr(request.app.state, 'scheduler', None))
+
+    return row
 
 
 # --- Repo Management ---

@@ -274,12 +274,23 @@ async def get_works_with(
             DeveloperCollaborationScore.period_end >= date_from,
         )
         .order_by(DeveloperCollaborationScore.total_score.desc())
-        .limit(limit)
     )
     scores = result.scalars().all()
 
-    collaborators: list[WorksWithEntry] = []
+    # Deduplicate by other developer — keep highest total_score per collaborator
+    # (multiple rows can exist for the same pair with different period ranges)
+    best_by_other: dict[int, DeveloperCollaborationScore] = {}
     for s in scores:
+        other_id = s.developer_b_id if s.developer_a_id == developer_id else s.developer_a_id
+        existing = best_by_other.get(other_id)
+        if existing is None or s.total_score > existing.total_score:
+            best_by_other[other_id] = s
+
+    # Sort by total_score descending, apply limit after dedup
+    ranked = sorted(best_by_other.values(), key=lambda s: s.total_score, reverse=True)[:limit]
+
+    collaborators: list[WorksWithEntry] = []
+    for s in ranked:
         other_id = s.developer_b_id if s.developer_a_id == developer_id else s.developer_a_id
         dev = await db.get(Developer, other_id)
         if not dev or not dev.is_active:

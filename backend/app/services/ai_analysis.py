@@ -1,5 +1,4 @@
 import json
-import logging
 from datetime import datetime, timezone
 
 import anthropic
@@ -7,6 +6,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.logging import get_logger
 from app.models.models import (
     AIAnalysis,
     Developer,
@@ -17,7 +17,7 @@ from app.models.models import (
     PullRequest,
 )
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 MODEL = "claude-sonnet-4-0"
 MAX_ITEM_CHARS = 500
@@ -566,7 +566,7 @@ async def run_one_on_one_prep(
 
     from app.services.goals import get_goal_progress, list_goals
     from app.services.stats import (
-        get_benchmarks,
+        get_benchmarks_v2,
         get_developer_stats,
         get_developer_trends,
         get_issue_creator_stats,
@@ -581,7 +581,7 @@ async def run_one_on_one_prep(
     trends = await get_developer_trends(db, developer_id, periods=4, period_type="week")
 
     # 3. Team benchmarks for comparison
-    benchmarks = await get_benchmarks(db, team=dev.team, date_from=date_from, date_to=date_to)
+    benchmarks = await get_benchmarks_v2(db, team=dev.team, date_from=date_from, date_to=date_to)
 
     # 4. PRs merged/opened with titles
     prs = (
@@ -801,11 +801,11 @@ async def run_team_health(
             return reused
 
     from app.services.collaboration import get_collaboration
-    from app.services.stats import get_benchmarks, get_team_stats, get_workload
+    from app.services.stats import get_benchmarks_v2, get_team_stats, get_workload
 
     # 1. Team stats + benchmarks
     team_stats = await get_team_stats(db, team=team, date_from=date_from, date_to=date_to)
-    benchmarks = await get_benchmarks(db, team=team, date_from=date_from, date_to=date_to)
+    benchmarks = await get_benchmarks_v2(db, team=team, date_from=date_from, date_to=date_to)
 
     # 2. Workload balance (M4)
     workload = await get_workload(db, team=team, date_from=date_from, date_to=date_to)

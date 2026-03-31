@@ -2,6 +2,7 @@ import { useState, useContext, lazy, Suspense } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Toaster } from 'sonner'
+import { TooltipProvider } from '@/components/ui/tooltip'
 import { DateRangeContext, defaultFrom, defaultTo } from '@/hooks/useDateRange'
 import { AuthContext, useAuthProvider } from '@/hooks/useAuth'
 import ErrorBoundary from '@/components/ErrorBoundary'
@@ -30,10 +31,13 @@ const CodeChurn = lazy(() => import('@/pages/insights/CodeChurn'))
 const CIInsights = lazy(() => import('@/pages/insights/CIInsights'))
 const DoraMetrics = lazy(() => import('@/pages/insights/DoraMetrics'))
 const Investment = lazy(() => import('@/pages/insights/Investment'))
+const InvestmentCategory = lazy(() => import('@/pages/insights/InvestmentCategory'))
 const OrgChart = lazy(() => import('@/pages/insights/OrgChart'))
+const IssueLinkage = lazy(() => import('@/pages/insights/IssueLinkage'))
 const ExecutiveDashboard = lazy(() => import('@/pages/ExecutiveDashboard'))
 const AISettingsPage = lazy(() => import('@/pages/settings/AISettings'))
 const SlackSettingsPage = lazy(() => import('@/pages/settings/SlackSettings'))
+const WorkCategoriesPage = lazy(() => import('@/pages/settings/WorkCategories'))
 
 function PageSkeleton() {
   return (
@@ -49,6 +53,7 @@ const insightsSidebarItems: SidebarItem[] = [
   { to: '/insights/collaboration', label: 'Collaboration' },
   { to: '/insights/benchmarks', label: 'Benchmarks' },
   { to: '/insights/issue-quality', label: 'Issue Quality' },
+  { to: '/insights/issue-linkage', label: 'Issue Linkage' },
   { to: '/insights/code-churn', label: 'Code Churn' },
   { to: '/insights/cicd', label: 'CI/CD' },
   { to: '/insights/dora', label: 'DORA Metrics' },
@@ -63,6 +68,7 @@ const adminSidebarItems: SidebarItem[] = [
   { to: '/admin/ai', label: 'AI Analysis' },
   { to: '/admin/ai/settings', label: 'AI Settings' },
   { to: '/admin/slack', label: 'Slack' },
+  { to: '/admin/work-categories', label: 'Work Categories' },
 ]
 
 const queryClient = new QueryClient({
@@ -82,6 +88,11 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
   }
   if (auth?.isLoading) {
     return null
+  }
+  // Token exists but user failed to load (e.g., deleted from DB) — redirect to login
+  if (!auth?.user) {
+    localStorage.removeItem('devpulse_token')
+    return <Navigate to="/login" replace />
   }
   return <>{children}</>
 }
@@ -122,10 +133,12 @@ function AppRoutes() {
                                 <Route path="/collaboration/:reviewerId/:authorId" element={<CollaborationPairPage />} />
                                 <Route path="/benchmarks" element={<Benchmarks />} />
                                 <Route path="/issue-quality" element={<IssueQuality />} />
+                                <Route path="/issue-linkage" element={<IssueLinkage />} />
                                 <Route path="/code-churn" element={<CodeChurn />} />
                                 <Route path="/cicd" element={<CIInsights />} />
                                 <Route path="/dora" element={<DoraMetrics />} />
                                 <Route path="/investment" element={<Investment />} />
+                                <Route path="/investment/:category" element={<InvestmentCategory />} />
                                 <Route path="/org-chart" element={<OrgChart />} />
                                 <Route path="*" element={<Navigate to="/insights/workload" replace />} />
                               </Routes>
@@ -147,6 +160,7 @@ function AppRoutes() {
                                 <Route path="/ai" element={<AIAnalysis />} />
                                 <Route path="/ai/settings" element={<AISettingsPage />} />
                                 <Route path="/slack" element={<SlackSettingsPage />} />
+                                <Route path="/work-categories" element={<WorkCategoriesPage />} />
                                 <Route path="*" element={<Navigate to="/admin/team" replace />} />
                               </Routes>
                             </ErrorBoundary>
@@ -169,10 +183,12 @@ function AppRoutes() {
 export default function App() {
   return (
     <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
-        <AppRoutes />
-      </BrowserRouter>
-      <Toaster position="bottom-right" richColors duration={4000} />
+      <TooltipProvider>
+        <BrowserRouter>
+          <AppRoutes />
+        </BrowserRouter>
+        <Toaster position="bottom-right" richColors duration={4000} />
+      </TooltipProvider>
     </QueryClientProvider>
   )
 }

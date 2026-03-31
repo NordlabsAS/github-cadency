@@ -1,6 +1,6 @@
 ---
 purpose: "Service responsibilities, cross-service deps, async patterns, sync architecture, key algorithms"
-last-updated: "2026-03-29"
+last-updated: "2026-03-31"
 related:
   - docs/architecture/OVERVIEW.md
   - docs/architecture/API-DESIGN.md
@@ -14,16 +14,19 @@ related:
 
 | Service | File | LOC | Role |
 |---------|------|-----|------|
-| `github_sync` | `services/github_sync.py` | ~1860 | GitHub App auth, rate limiting, all upsert helpers, sync orchestration |
-| `stats` | `services/stats.py` | ~2500 | All metrics: developer, team, repo, benchmarks, trends, workload, CI, DORA |
+| `github_sync` | `services/github_sync.py` | ~2400 | GitHub App auth, rate limiting, all upsert helpers, sync orchestration |
+| `stats` | `services/stats.py` | ~3200 | All metrics: developer, team, repo, benchmarks v2 (15 metrics), trends, workload, CI, DORA, repos summary, issue linkage by developer |
 | `collaboration` | `services/collaboration.py` | ~200 | Collaboration matrix, silos, bus factors, isolation detection |
 | `risk` | `services/risk.py` | ~250 | PR risk scoring (pure function + async wrappers) |
 | `goals` | `services/goals.py` | ~250 | Goal CRUD, metric computation, auto-achievement |
 | `ai_analysis` | `services/ai_analysis.py` | ~800 | Claude API integration, 1:1 prep briefs, team health checks |
 | `ai_settings` | `services/ai_settings.py` | ~300 | AI feature toggles, budget tracking, cooldown, usage summary |
-| `work_category` | `services/work_category.py` | ~350 | Work categorization: label/title/AI classification |
+| `work_category` | `services/work_category.py` | ~750 | Work categorization: label/title/AI classification, item drill-down, manual recategorization |
 | `relationships` | `services/relationships.py` | ~180 | Developer relationship CRUD + org tree builder |
 | `enhanced_collaboration` | `services/enhanced_collaboration.py` | ~400 | Multi-signal collaboration scoring, works-with, over-tagged, communication scores |
+| `roles` | `services/roles.py` | ~110 | Role definition CRUD, contribution category lookup, role validation |
+| `work_categories` | `services/work_categories.py` | ~550 | Work category + rule CRUD, admin-configurable classification rules, batch reclassify, GitHub data suggestions scan, bulk rule create |
+| `teams` | `services/teams.py` | ~100 | Team registry CRUD, `resolve_team()` auto-create, `_validate_team_name()`, rename cascading |
 | `slack` | `services/slack.py` | ~350 | Slack config/user settings CRUD, notification senders (DM + channel), scheduled jobs |
 | `exceptions` | `services/exceptions.py` | ~25 | Custom service-layer exceptions (`AIFeatureDisabledError`, `AIBudgetExceededError`) |
 | `utils` | `services/utils.py` | ~15 | Shared utilities (`default_range` date defaulting) |
@@ -33,7 +36,7 @@ related:
 ```
 ai_analysis
   -> ai_settings  (guards: toggle, budget, cooldown, dedup)
-  -> stats         (get_developer_stats, get_developer_trends, get_benchmarks, get_team_stats, get_workload)
+  -> stats         (get_developer_stats, get_developer_trends, get_activity_summary, get_benchmarks_v2, get_team_stats, get_workload)
   -> goals         (list_goals, get_goal_progress)
   -> collaboration (get_collaboration)
 
@@ -41,16 +44,24 @@ work_category
   -> ai_settings  (check_feature_enabled, check_budget)
 
 github_sync
+  -> work_categories        (classify_work_item_with_rules, get_all_rules -- lazy import)
   -> enhanced_collaboration (post-sync recompute_collaboration_scores -- lazy import, non-blocking)
   -> slack                  (post-sync send_sync_notification -- lazy import, non-blocking)
 
 slack
   -> stats         (get_team_stats for weekly digest)
 
-stats            (standalone)
+stats
+  -> roles         (get_role_category_map for contribution-category-aware peer group filtering)
+
+developers (api/developers.py -- inline CRUD)
+  -> roles         (validate_role_key)
+  -> teams         (resolve_team -- auto-creates teams on developer create/update)
+
 collaboration    (standalone)
 enhanced_collaboration (standalone)
 relationships    (standalone)
+roles            (standalone)
 risk             (standalone)
 goals            (standalone)
 ai_settings
@@ -70,7 +81,7 @@ All cross-service imports are **deferred** (inside function bodies) to avoid cir
 
 ### Commit Patterns
 
-- **Read services** (`stats`, `collaboration`, `risk`): No commits
+- **Read services** (`stats`, `collaboration`, `risk`): No commits. `get_repos_summary()` uses GROUP BY batch queries across all tracked repos (6 queries total for current + previous period) rather than per-repo iteration.
 - **Write services** (`goals`, `ai_analysis`, `ai_settings`): Commit after mutations
 - **Sync service**: Per-repo commits + batch commits every 50 PRs + progress commits every 10 items
 
@@ -105,11 +116,27 @@ class SyncContext:
     db: AsyncSession
     client: httpx.AsyncClient
     sync_event: SyncEvent
-    sync_logger: logging.Logger
+    sync_logger: object  # structlog BoundLogger (duck-typed)
     rate_limit_wait_total: int = 0
 ```
 
 Threaded through the entire sync call chain as the primary state carrier.
+
+### Structured Logging
+
+All services use structlog via `from app.logging import get_logger`:
+
+```python
+from app.logging import get_logger
+logger = get_logger(__name__)
+logger.info("Sync complete", repos=5, event_type="system.sync")
+```
+
+Key conventions:
+- **Keyword args over format strings**: `logger.info("Found PRs", count=count)` not `logger.info("Found %d PRs", count)`
+- **`event_type` on every call**: Enables Loki label filtering (see CLAUDE.md for taxonomy)
+- **`str(e)` for exceptions**: `logger.error("Failed", error=str(e))` — structlog serializes the string, not the exception object
+- **`LoggingContextMiddleware`** auto-injects `request_id`, `method`, `path` via contextvars — no manual threading needed
 
 ### Per-Repo Processing Steps
 
@@ -216,9 +243,27 @@ Uses `statistics.quantiles(n=4)`. For lower-is-better metrics (in `_LOWER_IS_BET
 
 Simple OLS over N period buckets. Direction is polarity-aware: for lower-is-better metrics, a negative slope = "improving". Change < 5% = "stable".
 
-### Work Categorization (`classify_work_item`)
+### Work Categorization
 
-Three tiers: (1) label map (exact lowercase), (2) title regex patterns, (3) "unknown". Optional AI batch classification for unknowns via `ai_classify_batch()`.
+Two layers: **admin-configurable rules** (`work_categories` + `work_category_rules` tables, managed via `services/work_categories.py`) define what categories exist and how items are classified. **Runtime classification** (`services/work_category.py`) applies rules and computes allocation stats.
+
+**Classification cascade** (`classify_work_item_with_rules()` — pure function accepting pre-loaded rules):
+1. Label rules: exact match against PR/issue labels (case-insensitive by default)
+2. Title regex rules: regex match against title
+3. Title prefix rules: prefix match against title
+4. Cross-reference: PRs with "unknown" check `closes_issue_numbers` → adopt linked issue's category
+5. AI batch classification (optional, via `ai_classify_batch()`)
+6. Fallback: "unknown"
+
+Rules evaluated by `priority` (lower = first match wins). All rule definitions stored in `work_category_rules` table, admin-manageable via `GET/POST/PATCH/DELETE /work-categories/rules`. `POST /work-categories/rules/bulk` creates multiple rules in one transaction (used by suggestions approve flow). `POST /work-categories/reclassify` batch-reclassifies all non-manual items using current rules.
+
+**GitHub data suggestions:** `scan_suggestions()` queries distinct labels from `pull_requests.labels` + `issues.labels` (Python-side iteration for SQLite test compat) and distinct `issues.issue_type` values, cross-references against existing rules (case-insensitive for labels), and returns uncovered values with usage counts. Each suggestion includes a `suggested_category` from `_suggest_category()` — a keyword-based hint matcher using `_CATEGORY_HINTS` dict (substring matching against label/type names). No DB changes needed; all data already exists from sync.
+
+Classification provenance tracked via `work_category_source` column: `label`, `title`, `prefix`, `ai`, `manual`, `cross_ref`. Manual overrides (`source="manual"`) are authoritative — never overwritten by sync or reclassify.
+
+**Item drill-down:** `get_work_allocation_items()` fetches all PRs/issues for a date range, classifies each in Python (respecting manual overrides), filters by requested category, and paginates in-memory. Joins Repository and Developer for display names.
+
+**Recategorization:** `recategorize_item()` sets `work_category` and `work_category_source="manual"` on a PR or Issue by ID. Returns the updated item with repo/author info.
 
 ### Workload Score
 
@@ -234,9 +279,13 @@ Three tiers: (1) label map (exact lowercase), (2) title regex patterns, (3) "unk
 
 | Severity | Area | Description |
 |----------|------|-------------|
+| ~~High~~ | ~~AI~~ | ~~`ai_analysis.py` imports `get_benchmarks` (renamed to `get_benchmarks_v2`)~~ — **Fixed**: Updated imports |
 | ~~High~~ | ~~Boundaries~~ | ~~`ai_settings.check_feature_enabled` and `ai_analysis.run_*` raise `HTTPException` from service layer~~ — **Resolved:** Services now raise `AIFeatureDisabledError`/`AIBudgetExceededError` from `services/exceptions.py`; API routes catch and convert |
 | ~~Medium~~ | ~~Performance~~ | ~~`_compute_per_developer_metrics()` fires ~9 queries per developer~~ — **Resolved:** Rewritten as 4 batch GROUP BY queries |
 | ~~Medium~~ | ~~Sync~~ | ~~TOCTOU race on sync start without DB-level locking~~ — **Resolved:** PostgreSQL advisory lock wraps check+insert |
+| Medium | Sync | `scheduled_sync()` calls `await run_sync(...)` directly — long-running syncs block other APScheduler jobs (Slack scheduled checks) |
+| Medium | Sync | `github_get()` for check-runs (`/commits/{sha}/check-runs`) only processes the first page — silently truncates CI data for PRs with many checks |
 | Medium | Side effect | `get_goal_progress()` auto-achieves goals during what appears to be a read operation |
+| Medium | AI | `_call_claude_and_store()` (internal helper) does NOT apply feature/budget guards — any code calling it directly bypasses budget checks |
 | Low | DRY | `_default_range()` duplicated in 5 service files (stats, collaboration, risk, work_category, enhanced_collaboration) |
 | Low | AI data | Correlated subquery in `_gather_developer_texts()` for issue comment filtering |

@@ -1,34 +1,30 @@
 import { Card, CardContent } from '@/components/ui/card'
-import { Database, Clock, RefreshCw, BarChart3 } from 'lucide-react'
+import { Database, Clock, RefreshCw, BarChart3, Timer } from 'lucide-react'
 import type { SyncStatusResponse } from '@/utils/types'
+import { timeAgo, formatDuration } from '@/utils/format'
 
 interface SyncOverviewPanelProps {
   status: SyncStatusResponse
 }
 
-function timeAgo(dateStr: string | null): string {
-  if (!dateStr) return 'Never'
-  const seconds = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000)
-  if (seconds < 60) return `${seconds}s ago`
-  const minutes = Math.floor(seconds / 60)
-  if (minutes < 60) return `${minutes}m ago`
-  const hours = Math.floor(minutes / 60)
-  if (hours < 24) return `${hours}h ago`
-  const days = Math.floor(hours / 24)
-  return `${days}d ago`
-}
-
-function formatDuration(seconds: number | null): string {
-  if (seconds == null) return '-'
-  if (seconds < 60) return `${seconds}s`
-  const minutes = Math.floor(seconds / 60)
-  const secs = seconds % 60
-  return `${minutes}m ${secs}s`
+function formatNextSync(lastSync: string | null, intervalMinutes: number): string {
+  if (!lastSync) return `Every ${intervalMinutes}m`
+  const nextTime = new Date(lastSync).getTime() + intervalMinutes * 60_000
+  const remainingMs = nextTime - Date.now()
+  if (remainingMs <= 0) return 'Soon'
+  const minutes = Math.ceil(remainingMs / 60_000)
+  if (minutes >= 60) {
+    const hours = Math.floor(minutes / 60)
+    return `~${hours}h ${minutes % 60}m`
+  }
+  return `~${minutes}m`
 }
 
 export default function SyncOverviewPanel({ status }: SyncOverviewPanelProps) {
+  const schedule = status.schedule
+
   return (
-    <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+    <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
       <Card size="sm">
         <CardContent className="flex items-center gap-3">
           <Database className="h-4 w-4 text-muted-foreground" />
@@ -79,6 +75,29 @@ export default function SyncOverviewPanel({ status }: SyncOverviewPanelProps) {
                     : '-'}
             </div>
             <div className="text-xs text-muted-foreground">Last Status</div>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card size="sm">
+        <CardContent className="flex items-center gap-3">
+          <Timer className="h-4 w-4 text-muted-foreground" />
+          <div>
+            {schedule?.auto_sync_enabled ? (
+              <>
+                <div className="text-lg font-bold">
+                  {formatNextSync(status.last_successful_sync, schedule.incremental_interval_minutes)}
+                </div>
+                <div className="text-xs text-muted-foreground">
+                  Next sync (every {schedule.incremental_interval_minutes}m)
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="text-lg font-bold text-muted-foreground">Disabled</div>
+                <div className="text-xs text-muted-foreground">Auto-sync</div>
+              </>
+            )}
           </div>
         </CardContent>
       </Card>

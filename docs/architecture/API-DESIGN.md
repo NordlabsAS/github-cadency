@@ -1,6 +1,6 @@
 ---
 purpose: "Auth model, route patterns, schema conventions, error handling"
-last-updated: "2026-03-29"
+last-updated: "2026-03-31"
 related:
   - docs/architecture/OVERVIEW.md
   - docs/architecture/SERVICE-LAYER.md
@@ -47,7 +47,11 @@ For the complete endpoint catalog, see [docs/API.md](../API.md).
 | `ai_analysis.py` | Router-level `dependencies=[Depends(require_admin)]` |
 | `webhooks.py` | HMAC `X-Hub-Signature-256` (manual verification, no JWT) |
 | `relationships.py` | Per-endpoint (GET relationships/works-with: `get_current_user` with self-check; POST/DELETE/org-tree/over-tagged/communication-scores: `require_admin`) |
-| `slack.py` | Per-endpoint (config/test/notifications: `require_admin`; user-settings GET/PATCH: `get_current_user`; user-settings/{id}: `require_admin`) |
+| `slack.py` | Per-endpoint (config/test/notifications: `require_admin`; user-settings GET/PATCH: `get_current_user`; user-settings/{id}: `require_admin`). `PATCH /slack/config` has double auth: router-level `require_admin` + endpoint-level `get_current_user` for audit logging |
+| `roles.py` | Per-endpoint (`GET /roles`: `get_current_user`; POST/PATCH/DELETE: `require_admin`) |
+| `work_categories.py` | Per-endpoint (`GET /work-categories`, `GET /work-categories/rules`: `get_current_user`; all mutation endpoints including `POST /work-categories/suggestions`, `POST /work-categories/rules/bulk`: `require_admin`) |
+| `teams.py` | Per-endpoint (`GET /teams`: `get_current_user`; POST/PATCH/DELETE: `require_admin`) |
+| `logs.py` | No auth (public endpoint — frontend errors can occur before/during auth) |
 
 ## Route Organization
 
@@ -66,8 +70,14 @@ All routers registered under `/api` prefix:
 | `ai_analysis` | `/api/ai/*` | ai |
 | `relationships` | `/api/developers/{id}/relationships`, `/api/org-tree`, `/api/developers/{id}/works-with`, `/api/stats/over-tagged`, `/api/stats/communication-scores` | relationships |
 | `slack` | `/api/slack/*` | slack |
+| `roles` | `/api/roles/*` | roles |
+| `work_categories` | `/api/work-categories/*` | work-categories |
+| `teams` | `/api/teams/*` | teams |
+| `logs` | `/api/logs/*` | logs |
 
 Plus standalone `GET /api/health` (no auth) in `main.py`.
+
+**Note:** `relationships.py` also provides two endpoints under the `/api/stats/` prefix (`/api/stats/over-tagged`, `/api/stats/communication-scores`) despite belonging to the `relationships` router -- path prefix does not match router module.
 
 ### Thin Router Pattern
 
@@ -95,7 +105,8 @@ Routers perform `db.get(Model, id)` before delegating to services for endpoints 
 
 | Enum | Values | DB enforcement |
 |------|--------|---------------|
-| `DeveloperRole` | developer, senior_developer, lead, architect, devops, qa, intern | String column, no CHECK |
+| `ContributionCategory` | code_contributor, issue_contributor, non_contributor, system | Fixed enum in schemas.py. Used by `role_definitions` table |
+| ~~`DeveloperRole`~~ | *(removed)* | Replaced by `role_definitions` table. Developer roles are admin-configurable; validated against DB, not an enum |
 | `AppRole` | admin, developer | String column, no CHECK |
 | `MetricKey` | prs_merged, prs_opened, time_to_merge_h, time_to_first_review_h, reviews_given, review_quality_score, issues_closed, avg_pr_additions | String column, no CHECK |
 | `AnalysisType` | communication, conflict, sentiment | String column, no CHECK |
@@ -134,10 +145,12 @@ Routers perform `db.get(Model, id)` before delegating to services for endpoints 
 | Severity | Area | Description |
 |----------|------|-------------|
 | ~~High~~ | ~~Bug~~ | ~~`sync.py` references `httpx.HTTPStatusError` but never imports `httpx`~~ — **Fixed**: `import httpx` added |
-| Medium | Boundaries | `ai_settings.check_feature_enabled` and `ai_analysis.run_*` raise `HTTPException` from service layer |
+| ~~Medium~~ | ~~Boundaries~~ | ~~`ai_settings.check_feature_enabled` and `ai_analysis.run_*` raise `HTTPException` from service layer~~ — **Fixed**: Services now raise custom exceptions from `services/exceptions.py`; routes catch and convert |
 | Medium | Thin router | `POST /ai/estimate` has significant inline business logic (~75 lines) |
+| Medium | Thin router | `GET /sync/status` executes 5 inline SQL queries + schedule config lookup — no service function to delegate to |
 | Medium | Organization | `/api/stats/over-tagged` and `/api/stats/communication-scores` are defined in `relationships.py`, not `stats.py` -- path prefix doesn't match router module |
+| Medium | Circular import | `api/sync.py` does `from app.main import reschedule_sync_jobs` at runtime inside `PATCH /sync/schedule` — circular dependency hidden by lazy loading |
 | Low | Consistency | `GET /ai/history` uses manual column iteration for Pydantic construction; `GET /ai/history/{id}` and POST endpoints use `model_validate` |
 | Low | Consistency | Positional vs keyword args for `HTTPException` across routers |
-| Low | Auth | `GET /stats/repo/{repo_id}` uses `get_current_user` not `require_admin` -- any user can read any repo stats |
-| Low | Efficiency | `PATCH /ai/settings` triggers `get_current_user` twice (router-level + endpoint-level) |
+| Low | Auth | `GET /stats/repo/{repo_id}` and `GET /stats/repos/summary` use `get_current_user` not `require_admin` -- any user can read repo stats |
+| Low | Efficiency | `PATCH /ai/settings` and `PATCH /slack/config` both trigger `get_current_user` twice (router-level + endpoint-level) — double DB round-trip per request |

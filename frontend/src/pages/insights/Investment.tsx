@@ -1,7 +1,8 @@
-import { useMemo, useState, useId } from 'react'
+import { useMemo, useState, useId, useCallback } from 'react'
+import { Link } from 'react-router-dom'
 import { toast } from 'sonner'
 import { useDateRange } from '@/hooks/useDateRange'
-import { useWorkAllocation } from '@/hooks/useStats'
+import { useWorkAllocation, useWorkAllocationItems } from '@/hooks/useStats'
 import StatCard from '@/components/StatCard'
 import StatCardSkeleton from '@/components/StatCardSkeleton'
 import TableSkeleton from '@/components/TableSkeleton'
@@ -34,18 +35,186 @@ import {
   CartesianGrid,
   Legend,
 } from 'recharts'
-import { HelpCircle, Sparkles } from 'lucide-react'
+import { HelpCircle, Sparkles, ExternalLink, ArrowRight, GitPullRequest, CircleDot } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useAISettings } from '@/hooks/useAISettings'
 import type { WorkCategory } from '@/utils/types'
-import { CATEGORY_CONFIG, CATEGORY_ORDER } from '@/utils/categoryConfig'
+import { FALLBACK_CATEGORY_CONFIG, FALLBACK_CATEGORY_ORDER } from '@/utils/categoryConfig'
+import { useCategoryConfig } from '@/hooks/useWorkCategories'
 
-const tooltipStyle = {
-  backgroundColor: 'hsl(var(--card))',
-  border: '1px solid hsl(var(--border))',
-  borderRadius: '6px',
-  fontSize: '12px',
+// --- Custom Tooltip for charts ---
+
+function ChartTooltip({ active, payload }: { active?: boolean; payload?: Array<{ name: string; value: number; payload: { color: string; pct: number } }> }) {
+  if (!active || !payload?.length) return null
+  const entry = payload[0]
+  return (
+    <div className="rounded-lg border bg-card px-3 py-2 shadow-md">
+      <div className="flex items-center gap-2">
+        <div className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: entry.payload.color }} />
+        <span className="text-sm font-medium">{entry.name}</span>
+      </div>
+      <div className="mt-1 text-xs text-muted-foreground">
+        {entry.value} items ({entry.payload.pct.toFixed(1)}%)
+      </div>
+    </div>
+  )
 }
+
+function TrendTooltip({ active, payload, label }: { active?: boolean; payload?: Array<{ name: string; value: number; color: string }>; label?: string }) {
+  if (!active || !payload?.length) return null
+  const total = payload.reduce((s, p) => s + (p.value || 0), 0)
+  return (
+    <div className="rounded-lg border bg-card px-3 py-2.5 shadow-md min-w-[160px]">
+      <div className="text-xs font-medium text-muted-foreground mb-1.5">{label}</div>
+      {payload.filter(p => p.value > 0).map((p) => (
+        <div key={p.name} className="flex items-center justify-between gap-3 text-xs py-0.5">
+          <div className="flex items-center gap-1.5">
+            <div className="h-2 w-2 rounded-full" style={{ backgroundColor: p.color }} />
+            <span>{p.name}</span>
+          </div>
+          <span className="font-medium tabular-nums">{p.value}</span>
+        </div>
+      ))}
+      <div className="mt-1 pt-1 border-t text-xs font-medium flex justify-between">
+        <span>Total</span>
+        <span className="tabular-nums">{total}</span>
+      </div>
+    </div>
+  )
+}
+
+// --- Category Preview (inline drill-down) ---
+
+function CategoryPreview({
+  category,
+  itemType,
+  dateFrom,
+  dateTo,
+}: {
+  category: string
+  itemType: 'pr' | 'issue'
+  dateFrom?: string
+  dateTo?: string
+}) {
+  const { data, isLoading } = useWorkAllocationItems(
+    category,
+    itemType,
+    dateFrom,
+    dateTo,
+    1,
+    5,
+    true,
+  )
+
+  if (isLoading) {
+    return <div className="mt-3 space-y-2">{[...Array(3)].map((_, i) => <div key={i} className="h-8 rounded bg-muted animate-pulse" />)}</div>
+  }
+
+  if (!data || data.total === 0) {
+    return <p className="mt-3 text-xs text-muted-foreground">No items in this category.</p>
+  }
+
+  return (
+    <div className="mt-3">
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead className="h-7 text-xs">Item</TableHead>
+            <TableHead className="h-7 text-xs">Repo</TableHead>
+            <TableHead className="h-7 text-xs text-right">Date</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {data.items.map((item) => (
+            <TableRow key={`${item.type}-${item.id}`} className="text-xs">
+              <TableCell className="py-1.5">
+                <div className="flex items-center gap-1.5">
+                  {item.type === 'pr' ? (
+                    <GitPullRequest className="h-3 w-3 text-muted-foreground shrink-0" />
+                  ) : (
+                    <CircleDot className="h-3 w-3 text-muted-foreground shrink-0" />
+                  )}
+                  {item.html_url ? (
+                    <a
+                      href={item.html_url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="hover:underline text-foreground truncate max-w-[280px]"
+                    >
+                      #{item.number} {item.title}
+                    </a>
+                  ) : (
+                    <span className="truncate max-w-[280px]">#{item.number} {item.title}</span>
+                  )}
+                </div>
+              </TableCell>
+              <TableCell className="py-1.5 text-muted-foreground">{item.repo_name}</TableCell>
+              <TableCell className="py-1.5 text-right text-muted-foreground tabular-nums">
+                {(item.merged_at || item.created_at)
+                  ? new Date(item.merged_at || item.created_at!).toLocaleDateString()
+                  : '-'}
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+      {data.total > 5 && (
+        <Link
+          to={`/insights/investment/${category}?type=${itemType}`}
+          className="mt-2 flex items-center gap-1 text-xs text-primary hover:underline"
+        >
+          View all {data.total} items <ArrowRight className="h-3 w-3" />
+        </Link>
+      )}
+      {data.total <= 5 && data.total > 0 && (
+        <Link
+          to={`/insights/investment/${category}?type=${itemType}`}
+          className="mt-2 flex items-center gap-1 text-xs text-primary hover:underline"
+        >
+          Open detail view <ArrowRight className="h-3 w-3" />
+        </Link>
+      )}
+    </div>
+  )
+}
+
+// --- Clickable Legend ---
+
+function CategoryLegend({
+  data,
+  selected,
+  onSelect,
+}: {
+  data: { name: string; value: number; color: string; category: string }[]
+  selected: string | null
+  onSelect: (category: string | null) => void
+}) {
+  return (
+    <div className="mt-3 flex flex-wrap justify-center gap-3">
+      {data.map((d) => (
+        <button
+          key={d.name}
+          onClick={() => onSelect(selected === d.category ? null : d.category)}
+          className={cn(
+            'flex items-center gap-1.5 text-xs rounded-full px-2 py-0.5 transition-colors cursor-pointer',
+            selected === d.category
+              ? 'bg-accent ring-1 ring-ring'
+              : selected
+                ? 'opacity-40'
+                : 'hover:bg-accent/50',
+          )}
+        >
+          <div className="h-2.5 w-2.5 rounded-full shrink-0" style={{ backgroundColor: d.color }} />
+          <span className="text-muted-foreground">
+            {d.name} ({d.value})
+          </span>
+        </button>
+      ))}
+    </div>
+  )
+}
+
+// --- Main Page ---
 
 export default function Investment() {
   const { dateFrom, dateTo } = useDateRange()
@@ -58,6 +227,11 @@ export default function Investment() {
     useAi,
   )
   const pieId = useId()
+  const catConfig = useCategoryConfig()
+  const CATEGORY_CONFIG = catConfig?.config ?? FALLBACK_CATEGORY_CONFIG
+  const CATEGORY_ORDER = catConfig?.order ?? FALLBACK_CATEGORY_ORDER
+  const [selectedPrCategory, setSelectedPrCategory] = useState<string | null>(null)
+  const [selectedIssueCategory, setSelectedIssueCategory] = useState<string | null>(null)
 
   const prDonutData = useMemo(() => {
     if (!data) return []
@@ -68,6 +242,7 @@ export default function Investment() {
         value: a.count,
         color: CATEGORY_CONFIG[a.category]?.color ?? '#94a3b8',
         pct: a.pct_of_total,
+        category: a.category,
       }))
   }, [data])
 
@@ -80,6 +255,7 @@ export default function Investment() {
         value: a.count,
         color: CATEGORY_CONFIG[a.category]?.color ?? '#94a3b8',
         pct: a.pct_of_total,
+        category: a.category,
       }))
   }, [data])
 
@@ -111,14 +287,14 @@ export default function Investment() {
     })
   }, [data, sortKey, sortDir])
 
-  function toggleSort(key: typeof sortKey) {
+  const toggleSort = useCallback((key: typeof sortKey) => {
     if (sortKey === key) {
       setSortDir((d) => (d === 'desc' ? 'asc' : 'desc'))
     } else {
       setSortKey(key)
       setSortDir('desc')
     }
-  }
+  }, [sortKey])
 
   if (isError) {
     return <ErrorCard message="Failed to load work allocation data." onRetry={refetch} />
@@ -134,8 +310,8 @@ export default function Investment() {
           <StatCardSkeleton />
         </div>
         <div className="grid gap-4 md:grid-cols-2">
-          <Card><CardContent className="h-[300px]" /></Card>
-          <Card><CardContent className="h-[300px]" /></Card>
+          <Card><CardContent className="h-[340px]" /></Card>
+          <Card><CardContent className="h-[340px]" /></Card>
         </div>
         <Card><CardContent className="h-[300px]" /></Card>
         <TableSkeleton rows={5} cols={7} />
@@ -170,7 +346,7 @@ export default function Investment() {
               <HelpCircle className="h-4 w-4 text-muted-foreground" />
             </TooltipTrigger>
             <TooltipContent className="max-w-xs">
-              <p>Classifies merged PRs and created issues into categories using GitHub labels, title keywords, and optionally AI. Shows where engineering effort is going.</p>
+              <p>Classifies merged PRs and created issues into categories using GitHub labels, title keywords, and optionally AI. Click chart segments to drill into individual items.</p>
             </TooltipContent>
           </Tooltip>
         </div>
@@ -215,13 +391,14 @@ export default function Investment() {
         <StatCard
           title="Unclassified"
           value={`${data.unknown_pct}%`}
-          tooltip="Percentage of items that couldn't be classified by labels or title keywords."
+          tooltip="Percentage of items that couldn't be classified by labels or title keywords. Click the Unknown segment in the charts to review and reclassify."
           subtitle={useAi && data.ai_classified_count > 0 ? `${data.ai_classified_count} AI-classified` : undefined}
         />
       </div>
 
       {/* Donut charts */}
       <div className="grid gap-4 md:grid-cols-2">
+        {/* PR Donut */}
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-medium text-muted-foreground">
@@ -234,28 +411,33 @@ export default function Investment() {
             ) : (
               <>
                 <div className="relative">
-                  <ResponsiveContainer width="100%" height={200}>
+                  <ResponsiveContainer width="100%" height={280}>
                     <PieChart>
                       <Pie
                         data={prDonutData}
                         cx="50%"
                         cy="50%"
-                        innerRadius={55}
-                        outerRadius={80}
+                        innerRadius={70}
+                        outerRadius={100}
                         paddingAngle={2}
                         dataKey="value"
+                        cursor="pointer"
+                        onClick={(_, index) => {
+                          const cat = prDonutData[index].category
+                          setSelectedPrCategory(selectedPrCategory === cat ? null : cat)
+                        }}
                       >
                         {prDonutData.map((entry) => (
-                          <Cell key={`${pieId}-pr-${entry.name}`} fill={entry.color} />
+                          <Cell
+                            key={`${pieId}-pr-${entry.name}`}
+                            fill={entry.color}
+                            opacity={selectedPrCategory && selectedPrCategory !== entry.category ? 0.3 : 1}
+                            stroke={selectedPrCategory === entry.category ? entry.color : 'transparent'}
+                            strokeWidth={selectedPrCategory === entry.category ? 3 : 0}
+                          />
                         ))}
                       </Pie>
-                      <RechartsTooltip
-                        contentStyle={tooltipStyle}
-                        formatter={(value: number, name: string) => [
-                          `${value} (${((value / totalPrCount) * 100).toFixed(0)}%)`,
-                          name,
-                        ]}
-                      />
+                      <RechartsTooltip content={<ChartTooltip />} />
                     </PieChart>
                   </ResponsiveContainer>
                   <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
@@ -265,12 +447,25 @@ export default function Investment() {
                     </div>
                   </div>
                 </div>
-                <CategoryLegend data={prDonutData} />
+                <CategoryLegend
+                  data={prDonutData}
+                  selected={selectedPrCategory}
+                  onSelect={setSelectedPrCategory}
+                />
+                {selectedPrCategory && (
+                  <CategoryPreview
+                    category={selectedPrCategory}
+                    itemType="pr"
+                    dateFrom={dateFrom}
+                    dateTo={dateTo}
+                  />
+                )}
               </>
             )}
           </CardContent>
         </Card>
 
+        {/* Issue Donut */}
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-medium text-muted-foreground">
@@ -283,28 +478,33 @@ export default function Investment() {
             ) : (
               <>
                 <div className="relative">
-                  <ResponsiveContainer width="100%" height={200}>
+                  <ResponsiveContainer width="100%" height={280}>
                     <PieChart>
                       <Pie
                         data={issueDonutData}
                         cx="50%"
                         cy="50%"
-                        innerRadius={55}
-                        outerRadius={80}
+                        innerRadius={70}
+                        outerRadius={100}
                         paddingAngle={2}
                         dataKey="value"
+                        cursor="pointer"
+                        onClick={(_, index) => {
+                          const cat = issueDonutData[index].category
+                          setSelectedIssueCategory(selectedIssueCategory === cat ? null : cat)
+                        }}
                       >
                         {issueDonutData.map((entry) => (
-                          <Cell key={`${pieId}-issue-${entry.name}`} fill={entry.color} />
+                          <Cell
+                            key={`${pieId}-issue-${entry.name}`}
+                            fill={entry.color}
+                            opacity={selectedIssueCategory && selectedIssueCategory !== entry.category ? 0.3 : 1}
+                            stroke={selectedIssueCategory === entry.category ? entry.color : 'transparent'}
+                            strokeWidth={selectedIssueCategory === entry.category ? 3 : 0}
+                          />
                         ))}
                       </Pie>
-                      <RechartsTooltip
-                        contentStyle={tooltipStyle}
-                        formatter={(value: number, name: string) => [
-                          `${value} (${((value / totalIssueCount) * 100).toFixed(0)}%)`,
-                          name,
-                        ]}
-                      />
+                      <RechartsTooltip content={<ChartTooltip />} />
                     </PieChart>
                   </ResponsiveContainer>
                   <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
@@ -314,7 +514,19 @@ export default function Investment() {
                     </div>
                   </div>
                 </div>
-                <CategoryLegend data={issueDonutData} />
+                <CategoryLegend
+                  data={issueDonutData}
+                  selected={selectedIssueCategory}
+                  onSelect={setSelectedIssueCategory}
+                />
+                {selectedIssueCategory && (
+                  <CategoryPreview
+                    category={selectedIssueCategory}
+                    itemType="issue"
+                    dateFrom={dateFrom}
+                    dateTo={dateTo}
+                  />
+                )}
               </>
             )}
           </CardContent>
@@ -335,7 +547,7 @@ export default function Investment() {
                 <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
                 <XAxis dataKey="label" fontSize={12} stroke="hsl(var(--muted-foreground))" />
                 <YAxis fontSize={12} stroke="hsl(var(--muted-foreground))" />
-                <RechartsTooltip contentStyle={tooltipStyle} />
+                <RechartsTooltip content={<TrendTooltip />} />
                 <Legend />
                 {CATEGORY_ORDER.filter((cat) => cat !== 'unknown').map((cat) => (
                   <Bar
@@ -371,13 +583,13 @@ export default function Investment() {
               <TableHeader>
                 <TableRow>
                   <TableHead>Developer</TableHead>
-                  <TableHead className="cursor-pointer" onClick={() => toggleSort('total_prs')}>
+                  <TableHead className="cursor-pointer select-none" onClick={() => toggleSort('total_prs')}>
                     PRs {sortKey === 'total_prs' ? (sortDir === 'desc' ? '↓' : '↑') : ''}
                   </TableHead>
                   {CATEGORY_ORDER.map((cat) => (
                     <TableHead
                       key={cat}
-                      className="cursor-pointer text-center"
+                      className="cursor-pointer text-center select-none"
                       onClick={() => toggleSort(cat)}
                     >
                       <span style={{ color: CATEGORY_CONFIG[cat].color }}>
@@ -386,77 +598,57 @@ export default function Investment() {
                       {sortKey === cat ? (sortDir === 'desc' ? ' ↓' : ' ↑') : ''}
                     </TableHead>
                   ))}
-                  <TableHead className="cursor-pointer" onClick={() => toggleSort('total_issues')}>
+                  <TableHead className="cursor-pointer select-none" onClick={() => toggleSort('total_issues')}>
                     Issues {sortKey === 'total_issues' ? (sortDir === 'desc' ? '↓' : '↑') : ''}
                   </TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {sortedDevs.map((dev) => {
-                  const maxCat = CATEGORY_ORDER.reduce(
-                    (max, cat) =>
-                      (dev.pr_categories[cat] ?? 0) > (dev.pr_categories[max] ?? 0) ? cat : max,
-                    CATEGORY_ORDER[0],
-                  )
-                  return (
-                    <TableRow key={dev.developer_id}>
-                      <TableCell>
-                        <div>
-                          <div className="font-medium">{dev.display_name}</div>
-                          {dev.team && (
-                            <div className="text-xs text-muted-foreground">{dev.team}</div>
+                {sortedDevs.map((dev) => (
+                  <TableRow key={dev.developer_id}>
+                    <TableCell>
+                      <div>
+                        <Link to={`/team/${dev.developer_id}`} className="font-medium hover:underline">
+                          {dev.display_name}
+                        </Link>
+                        {dev.team && (
+                          <div className="text-xs text-muted-foreground">{dev.team}</div>
+                        )}
+                      </div>
+                    </TableCell>
+                    <TableCell>{dev.total_prs}</TableCell>
+                    {CATEGORY_ORDER.map((cat) => {
+                      const count = dev.pr_categories[cat] ?? 0
+                      const pct =
+                        dev.total_prs > 0 ? Math.round((count / dev.total_prs) * 100) : 0
+                      return (
+                        <TableCell key={cat} className="text-center">
+                          {count > 0 ? (
+                            <div className="flex flex-col items-center gap-0.5">
+                              <span>{count}</span>
+                              <div
+                                className="h-1 rounded-full"
+                                style={{
+                                  width: `${Math.max(pct, 4)}%`,
+                                  backgroundColor: CATEGORY_CONFIG[cat].color,
+                                  minWidth: count > 0 ? '4px' : '0px',
+                                }}
+                              />
+                            </div>
+                          ) : (
+                            <span className="text-muted-foreground">-</span>
                           )}
-                        </div>
-                      </TableCell>
-                      <TableCell>{dev.total_prs}</TableCell>
-                      {CATEGORY_ORDER.map((cat) => {
-                        const count = dev.pr_categories[cat] ?? 0
-                        const pct =
-                          dev.total_prs > 0 ? Math.round((count / dev.total_prs) * 100) : 0
-                        return (
-                          <TableCell key={cat} className="text-center">
-                            {count > 0 ? (
-                              <div className="flex flex-col items-center gap-0.5">
-                                <span>{count}</span>
-                                <div
-                                  className="h-1 rounded-full"
-                                  style={{
-                                    width: `${Math.max(pct, 4)}%`,
-                                    backgroundColor: CATEGORY_CONFIG[cat].color,
-                                    minWidth: count > 0 ? '4px' : '0px',
-                                  }}
-                                />
-                              </div>
-                            ) : (
-                              <span className="text-muted-foreground">-</span>
-                            )}
-                          </TableCell>
-                        )
-                      })}
-                      <TableCell>{dev.total_issues}</TableCell>
-                    </TableRow>
-                  )
-                })}
+                        </TableCell>
+                      )
+                    })}
+                    <TableCell>{dev.total_issues}</TableCell>
+                  </TableRow>
+                ))}
               </TableBody>
             </Table>
           </CardContent>
         </Card>
       )}
-    </div>
-  )
-}
-
-function CategoryLegend({ data }: { data: { name: string; value: number; color: string }[] }) {
-  return (
-    <div className="mt-2 flex flex-wrap justify-center gap-3">
-      {data.map((d) => (
-        <div key={d.name} className="flex items-center gap-1.5 text-xs">
-          <div className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: d.color }} />
-          <span className="text-muted-foreground">
-            {d.name} ({d.value})
-          </span>
-        </div>
-      ))}
     </div>
   )
 }

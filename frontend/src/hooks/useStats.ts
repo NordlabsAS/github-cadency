@@ -1,7 +1,8 @@
-import { useQuery, useQueries } from '@tanstack/react-query'
+import { useQuery, useQueries, useMutation, useQueryClient } from '@tanstack/react-query'
 import { apiFetch } from '@/utils/api'
 import type {
-  BenchmarksResponse,
+  BenchmarkGroupResponse,
+  BenchmarksV2Response,
   CIStatsResponse,
   CodeChurnResponse,
   CollaborationPairDetail,
@@ -12,9 +13,13 @@ import type {
   DeveloperTrendsResponse,
   IssueCreatorStatsResponse,
   RepoStats,
+  RepoSummaryItem,
   RiskSummaryResponse,
   StalePRsResponse,
   TeamStats,
+  WorkAllocationItem,
+  IssueLinkageByDeveloper,
+  WorkAllocationItemsResponse,
   WorkAllocationResponse,
   WorkloadResponse,
 } from '@/utils/types'
@@ -57,6 +62,14 @@ export function useRepoStats(id: number, dateFrom?: string, dateTo?: string) {
   })
 }
 
+export function useReposSummary(dateFrom?: string, dateTo?: string) {
+  return useQuery<RepoSummaryItem[]>({
+    queryKey: ['repos-summary', dateFrom, dateTo],
+    queryFn: () => apiFetch(`/stats/repos/summary?${dateParams(dateFrom, dateTo)}`),
+    staleTime: 60_000,
+  })
+}
+
 export function useDeveloperTrends(
   id: number,
   periodType: string = 'week',
@@ -93,14 +106,29 @@ export function useWorkload(team?: string, dateFrom?: string, dateTo?: string) {
   })
 }
 
-export function useBenchmarks(team?: string, dateFrom?: string, dateTo?: string) {
+export function useBenchmarkGroups() {
+  return useQuery<BenchmarkGroupResponse[]>({
+    queryKey: ['benchmark-groups'],
+    queryFn: () => apiFetch('/stats/benchmark-groups'),
+  })
+}
+
+export function useBenchmarksV2(group?: string, team?: string, dateFrom?: string, dateTo?: string) {
   const params = new URLSearchParams()
+  if (group) params.set('group', group)
   if (team) params.set('team', team)
   if (dateFrom) params.set('date_from', dateFrom)
   if (dateTo) params.set('date_to', dateTo)
-  return useQuery<BenchmarksResponse>({
-    queryKey: ['benchmarks', team, dateFrom, dateTo],
+  return useQuery<BenchmarksV2Response>({
+    queryKey: ['benchmarks-v2', group, team, dateFrom, dateTo],
     queryFn: () => apiFetch(`/stats/benchmarks?${params}`),
+  })
+}
+
+export function useUnassignedRoleCount() {
+  return useQuery<{ count: number }>({
+    queryKey: ['unassigned-role-count'],
+    queryFn: () => apiFetch('/developers/unassigned-role-count'),
   })
 }
 
@@ -228,6 +256,49 @@ export function useWorkAllocation(
   })
 }
 
+export function useWorkAllocationItems(
+  category: string,
+  itemType: string = 'all',
+  dateFrom?: string,
+  dateTo?: string,
+  page: number = 1,
+  pageSize: number = 20,
+  enabled: boolean = true,
+) {
+  const params = new URLSearchParams()
+  params.set('category', category)
+  params.set('type', itemType)
+  if (dateFrom) params.set('date_from', dateFrom)
+  if (dateTo) params.set('date_to', dateTo)
+  params.set('page', String(page))
+  params.set('page_size', String(pageSize))
+  return useQuery<WorkAllocationItemsResponse>({
+    queryKey: ['work-allocation-items', category, itemType, dateFrom, dateTo, page, pageSize],
+    queryFn: () => apiFetch(`/stats/work-allocation/items?${params}`),
+    enabled,
+  })
+}
+
+export function useRecategorizeItem() {
+  const queryClient = useQueryClient()
+  return useMutation<
+    WorkAllocationItem,
+    Error,
+    { itemType: string; itemId: number; category: string }
+  >({
+    mutationFn: ({ itemType, itemId, category }) =>
+      apiFetch(`/stats/work-allocation/items/${itemType}/${itemId}/category`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ category }),
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['work-allocation'] })
+      queryClient.invalidateQueries({ queryKey: ['work-allocation-items'] })
+    },
+  })
+}
+
 export function useCIStats(
   dateFrom?: string,
   dateTo?: string,
@@ -255,5 +326,16 @@ export function useDoraMetrics(
   return useQuery<DORAMetricsResponse>({
     queryKey: ['dora-metrics', dateFrom, dateTo, repoId],
     queryFn: () => apiFetch(`/stats/dora?${params}`),
+  })
+}
+
+export function useIssueLinkageByDeveloper(team?: string, dateFrom?: string, dateTo?: string) {
+  const params = new URLSearchParams()
+  if (team) params.set('team', team)
+  if (dateFrom) params.set('date_from', dateFrom)
+  if (dateTo) params.set('date_to', dateTo)
+  return useQuery<IssueLinkageByDeveloper>({
+    queryKey: ['issue-linkage-developers', team, dateFrom, dateTo],
+    queryFn: () => apiFetch(`/stats/issue-linkage/developers?${params}`),
   })
 }

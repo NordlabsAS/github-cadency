@@ -7,6 +7,7 @@ import SyncProgressView from './SyncProgressView'
 import SyncWizard from './SyncWizard'
 import ResumeBanner from './ResumeBanner'
 import SyncHistoryTable from './SyncHistoryTable'
+import SyncScheduleCard from './SyncScheduleCard'
 import type { PreflightCheck } from '@/utils/types'
 
 function PreflightBanner({ checks, ready }: { checks: PreflightCheck[]; ready: boolean }) {
@@ -71,8 +72,8 @@ export default function SyncPage() {
 
       {/* Overview stats */}
       {statusLoading ? (
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-          {[...Array(4)].map((_, i) => (
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
+          {[...Array(5)].map((_, i) => (
             <div key={i} className="h-20 animate-pulse rounded-xl bg-muted" />
           ))}
         </div>
@@ -87,6 +88,9 @@ export default function SyncPage() {
           onStartFresh={() => {/* wizard handles fresh start */}}
         />
       )}
+
+      {/* Schedule config (admin) */}
+      <SyncScheduleCard />
 
       {/* Active sync progress OR wizard */}
       {status?.active_sync ? (
@@ -104,7 +108,7 @@ export default function SyncPage() {
           <TableSkeleton
             columns={8}
             rows={5}
-            headers={['Type', 'Status', 'Progress', 'PRs', 'Issues', 'Errors', 'Duration', 'Started']}
+            headers={['Scope', 'Status', 'Progress', 'PRs', 'Issues', 'Errors', 'Duration', 'Started']}
           />
         ) : (
           <SyncHistoryTable events={events ?? []} />

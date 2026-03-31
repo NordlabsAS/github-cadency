@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef, useEffect, useId, useMemo } from 'react'
 import { Link } from 'react-router-dom'
 import { useAISettings, useUpdateAISettings, useAIUsage } from '@/hooks/useAISettings'
+import { timeAgo } from '@/utils/format'
 import ErrorCard from '@/components/ErrorCard'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Switch } from '@/components/ui/switch'
@@ -65,18 +66,6 @@ function fmtTokens(n: number): string {
 
 function fmtCost(n: number): string {
   return `$${n.toFixed(2)}`
-}
-
-function timeAgo(iso: string | null): string {
-  if (!iso) return 'Never'
-  const ms = Date.now() - new Date(iso).getTime()
-  const mins = Math.floor(ms / 60_000)
-  if (mins < 1) return 'Just now'
-  if (mins < 60) return `${mins}m ago`
-  const hours = Math.floor(mins / 60)
-  if (hours < 24) return `${hours}h ago`
-  const days = Math.floor(hours / 24)
-  return `${days}d ago`
 }
 
 export default function AISettings() {

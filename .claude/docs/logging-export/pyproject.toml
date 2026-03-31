@@ -1,0 +1,21 @@
+[project]
+name = "claros-observability"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "structlog>=24.1",
+]
+
+[project.optional-dependencies]
+otel = [
+    "opentelemetry-api>=1.22",
+    "opentelemetry-sdk>=1.22",
+    "opentelemetry-exporter-otlp>=1.22",
+]
+dev = [
+    "pytest>=8.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

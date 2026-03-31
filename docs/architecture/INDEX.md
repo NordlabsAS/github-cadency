@@ -1,6 +1,6 @@
 ---
 purpose: "Navigation hub for architecture documentation"
-last-updated: "2026-03-29"
+last-updated: "2026-03-31"
 related:
   - docs/architecture/OVERVIEW.md
   - docs/architecture/DATA-MODEL.md
@@ -29,6 +29,11 @@ This directory contains interconnected architecture documents for DevPulse. Gene
 | How AI analysis works | [DATA-FLOWS.md](DATA-FLOWS.md) | AI analysis lifecycle |
 | How auth works | [DATA-FLOWS.md](DATA-FLOWS.md) | Auth flow |
 | How Slack notifications work | [DATA-FLOWS.md](DATA-FLOWS.md) | Slack notification flow |
+| How role definitions work | [DATA-MODEL.md](DATA-MODEL.md) | `role_definitions` table |
+| How teams are managed | [DATA-MODEL.md](DATA-MODEL.md) | `teams` table |
+| How work categories are configured | [DATA-MODEL.md](DATA-MODEL.md) | `work_categories` + `work_category_rules` tables |
+| How work categorization rules work | [SERVICE-LAYER.md](SERVICE-LAYER.md) | Work categorization algorithm |
+| How benchmarks peer groups work | [SERVICE-LAYER.md](SERVICE-LAYER.md) | Key algorithms |
 
 ## Related References
 

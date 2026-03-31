@@ -1,6 +1,5 @@
 """Slack integration service — configuration, notification sending, and scheduled jobs."""
 
-import logging
 from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException
@@ -9,6 +8,7 @@ from slack_sdk.errors import SlackApiError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.logging import get_logger
 from app.models.models import (
     Developer,
     NotificationLog,
@@ -19,7 +19,7 @@ from app.models.models import (
 )
 from app.schemas.schemas import SlackConfigUpdate, SlackUserSettingsUpdate
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 # --- Config CRUD ---
@@ -250,7 +250,7 @@ async def _send_dm_to_developer(
         return True
     except SlackApiError as e:
         error = e.response["error"]
-        logger.warning("Failed to DM %s: %s", developer.github_username, error)
+        logger.warning("Failed to DM", github_username=developer.github_username, error=error, event_type="system.slack")
         await _log_notification(
             db, notification_type, user_settings.slack_user_id, developer.id, "failed",
             error_message=error, payload={"text": text[:200]},
@@ -300,7 +300,7 @@ async def send_stale_pr_nudges(db: AsyncSession) -> int:
         if await _send_dm_to_developer(db, config, dev, "stale_pr", text):
             sent += 1
 
-    logger.info("Sent stale PR nudges to %d developers (%d stale PRs)", sent, len(stale_prs))
+    logger.info("Sent stale PR nudges", developers_notified=sent, stale_prs=len(stale_prs), event_type="system.slack")
     return sent
 
 
@@ -387,7 +387,7 @@ async def send_sync_notification(
         return True
     except SlackApiError as e:
         error = e.response["error"]
-        logger.warning("Failed to send sync notification: %s", error)
+        logger.warning("Failed to send sync notification", error=str(error), event_type="system.slack")
         await _log_notification(
             db, "sync_failure" if is_failure else "sync_complete",
             channel, None, "failed", error_message=error,
@@ -409,7 +409,7 @@ async def send_weekly_digest(db: AsyncSession) -> int:
     try:
         stats = await get_team_stats(db, team=None, date_from=week_ago, date_to=now)
     except Exception as e:
-        logger.warning("Failed to compute weekly digest metrics: %s", e)
+        logger.warning("Failed to compute weekly digest metrics", error=str(e), event_type="system.slack")
         return 0
 
     avg_merge = f"{stats.avg_time_to_merge_hours:.1f}h" if stats.avg_time_to_merge_hours else "N/A"
@@ -434,7 +434,7 @@ async def send_weekly_digest(db: AsyncSession) -> int:
         if await _send_dm_to_developer(db, config, dev, "weekly_digest", text):
             sent += 1
 
-    logger.info("Sent weekly digest to %d developers", sent)
+    logger.info("Sent weekly digest", developers_notified=sent, event_type="system.slack")
     return sent
 
 
@@ -454,7 +454,7 @@ async def scheduled_stale_pr_check() -> None:
                 return
             await send_stale_pr_nudges(db)
         except Exception as e:
-            logger.error("Stale PR check failed: %s", e)
+            logger.error("Stale PR check failed", error=str(e), event_type="system.slack")
 
 
 async def scheduled_weekly_digest() -> None:
@@ -473,4 +473,4 @@ async def scheduled_weekly_digest() -> None:
                 return
             await send_weekly_digest(db)
         except Exception as e:
-            logger.error("Weekly digest failed: %s", e)
+            logger.error("Weekly digest failed", error=str(e), event_type="system.slack")

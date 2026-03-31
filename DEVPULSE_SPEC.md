@@ -59,7 +59,7 @@ DevPulse is an engineering intelligence dashboard that tracks developer activity
 | github_username | varchar(255) | UNIQUE, NOT NULL, indexed |
 | display_name | varchar(255) | NOT NULL |
 | email | varchar(255) | |
-| role | varchar(50) | developer, senior_developer, lead, architect, devops, qa, intern |
+| role | varchar(50) | Admin-configurable via `role_definitions` table. 13 defaults: developer, senior_developer, lead, architect, devops, qa, intern, product_manager, product_owner, engineering_manager, scrum_master, designer, system_account. Each maps to a `contribution_category` (code_contributor, issue_contributor, non_contributor, system). |
 | skills | jsonb | e.g. ["python", "react", "kubernetes"] |
 | specialty | varchar(255) | frontend, backend, infra, fullstack, etc. |
 | location | varchar(255) | "Oslo, Norway" |

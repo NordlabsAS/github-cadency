@@ -8,6 +8,26 @@ export interface AuthUser {
   avatar_url: string | null
 }
 
+// --- Role Definitions ---
+
+export type ContributionCategory = 'code_contributor' | 'issue_contributor' | 'non_contributor' | 'system'
+
+export interface RoleDefinition {
+  role_key: string
+  display_name: string
+  contribution_category: ContributionCategory
+  display_order: number
+  is_default: boolean
+}
+
+// --- Teams ---
+
+export interface Team {
+  id: number
+  name: string
+  display_order: number
+}
+
 // --- Developer ---
 
 export interface Developer {
@@ -54,6 +74,19 @@ export interface DeactivationImpact {
   open_branches: string[]
 }
 
+export interface ActivitySummary {
+  prs_authored: number
+  prs_merged: number
+  prs_open: number
+  reviews_given: number
+  issues_created: number
+  issues_assigned: number
+  repos_touched: number
+  first_activity: string | null
+  last_activity: string | null
+  work_categories: Record<string, number>
+}
+
 // --- Stats ---
 
 export interface ReviewBreakdown {
@@ -83,6 +116,25 @@ export interface DeveloperStats {
   prs_merged_without_approval: number
   prs_reverted: number
   reverts_authored: number
+  prs_linked_to_issue: number
+  issue_linkage_rate: number | null
+}
+
+export interface DeveloperLinkageRow {
+  developer_id: number
+  github_username: string
+  display_name: string
+  team: string | null
+  prs_total: number
+  prs_linked: number
+  linkage_rate: number
+}
+
+export interface IssueLinkageByDeveloper {
+  developers: DeveloperLinkageRow[]
+  team_average_rate: number
+  attention_threshold: number
+  attention_developers: DeveloperLinkageRow[]
 }
 
 export interface TeamStats {
@@ -112,6 +164,19 @@ export interface RepoStats {
   total_reviews: number
   avg_time_to_merge_hours: number | null
   top_contributors: TopContributor[]
+}
+
+export interface RepoSummaryItem {
+  repo_id: number
+  total_prs: number
+  total_merged: number
+  total_issues: number
+  total_reviews: number
+  avg_time_to_merge_hours: number | null
+  last_pr_date: string | null
+  prev_total_prs: number
+  prev_total_merged: number
+  prev_avg_time_to_merge_hours: number | null
 }
 
 // --- Repo ---
@@ -207,6 +272,15 @@ export interface SyncEvent {
   cancel_requested: boolean
   log_summary: SyncLogEntry[] | null
   rate_limit_wait_s: number | null
+  triggered_by: string | null
+  sync_scope: string | null
+}
+
+export interface SyncScheduleConfig {
+  auto_sync_enabled: boolean
+  incremental_interval_minutes: number
+  full_sync_cron_hour: number
+  updated_at: string | null
 }
 
 export interface SyncStatusResponse {
@@ -216,12 +290,14 @@ export interface SyncStatusResponse {
   total_repos_count: number
   last_successful_sync: string | null
   last_sync_duration_s: number | null
+  schedule: SyncScheduleConfig | null
 }
 
 export interface SyncStartRequest {
   sync_type: 'full' | 'incremental'
   repo_ids?: number[]
   since?: string
+  sync_scope?: string
 }
 
 export type TimeRangeOption =
@@ -383,12 +459,53 @@ export interface StalePRsResponse {
 
 // --- Benchmarks Response (M2) ---
 
-export interface BenchmarksResponse {
+export interface BenchmarkGroupResponse {
+  group_key: string
+  display_name: string
+  display_order: number
+  roles: string[]
+  metrics: string[]
+  min_team_size: number
+  is_default: boolean
+}
+
+export interface BenchmarkMetricInfo {
+  key: string
+  label: string
+  lower_is_better: boolean
+  unit: string
+}
+
+export interface MetricValue {
+  value: number | null
+  percentile_band: 'below_p25' | 'p25_to_p50' | 'p50_to_p75' | 'above_p75' | null
+}
+
+export interface DeveloperBenchmarkRow {
+  developer_id: number
+  display_name: string
+  avatar_url: string | null
+  team: string | null
+  role: string | null
+  metrics: Record<string, MetricValue>
+}
+
+export interface TeamMedianRow {
+  team: string
+  sample_size: number
+  metrics: Record<string, number | null>
+}
+
+export interface BenchmarksV2Response {
+  group: BenchmarkGroupResponse
   period_start: string
   period_end: string
   sample_size: number
   team: string | null
   metrics: Record<string, BenchmarkMetric>
+  metric_info: BenchmarkMetricInfo[]
+  developers: DeveloperBenchmarkRow[]
+  team_comparison: TeamMedianRow[] | null
 }
 
 // --- Collaboration (M5) ---
@@ -713,7 +830,7 @@ export interface DORAMetricsResponse {
 
 // --- Work Categorization (P4-02) ---
 
-export type WorkCategory = 'feature' | 'bugfix' | 'tech_debt' | 'ops' | 'unknown'
+export type WorkCategory = string
 
 export interface CategoryAllocation {
   category: WorkCategory
@@ -760,6 +877,31 @@ export interface WorkAllocationResponse {
   ai_classified_count: number
   total_prs: number
   total_issues: number
+}
+
+export interface WorkAllocationItem {
+  id: number
+  type: 'pr' | 'issue'
+  number: number
+  title: string | null
+  labels: string[] | null
+  repo_name: string | null
+  author_name: string | null
+  author_id: number | null
+  html_url: string | null
+  category: string
+  category_source: string | null
+  merged_at: string | null
+  created_at: string | null
+  additions: number | null
+  deletions: number | null
+}
+
+export interface WorkAllocationItemsResponse {
+  items: WorkAllocationItem[]
+  total: number
+  page: number
+  page_size: number
 }
 
 // --- AI Settings (P5) ---

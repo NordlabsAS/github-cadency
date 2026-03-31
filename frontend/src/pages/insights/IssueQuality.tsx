@@ -188,13 +188,13 @@ export default function IssueQuality() {
                   <TableRow>
                     <ColHeader label="Creator" tooltip={columnTooltips.creator} />
                     <ColHeader label="Issues" tooltip={columnTooltips.issues} align="right" />
-                    <ColHeader label="Checklist %" tooltip={columnTooltips.checklist} align="right" />
-                    <ColHeader label="Avg Close (h)" tooltip={columnTooltips.closeTime} align="right" />
-                    <ColHeader label="Reopened %" tooltip={columnTooltips.reopened} align="right" />
-                    <ColHeader label="Not Planned %" tooltip={columnTooltips.notPlanned} align="right" />
+                    <ColHeader label="Checklist" tooltip={columnTooltips.checklist} align="right" />
+                    <ColHeader label="Close (h)" tooltip={columnTooltips.closeTime} align="right" />
+                    <ColHeader label="Reopen" tooltip={columnTooltips.reopened} align="right" />
+                    <ColHeader label="Not Planned" tooltip={columnTooltips.notPlanned} align="right" />
                     <ColHeader label="PRs/Issue" tooltip={columnTooltips.prsPerIssue} align="right" />
-                    <ColHeader label="Time to PR (h)" tooltip={columnTooltips.timeToFirstPR} align="right" />
-                    <ColHeader label="Comments Before PR" tooltip={columnTooltips.commentBeforePR} align="right" />
+                    <ColHeader label="To PR (h)" tooltip={columnTooltips.timeToFirstPR} align="right" />
+                    <ColHeader label="Pre-PR Comments" tooltip={columnTooltips.commentBeforePR} align="right" />
                     <ColHeader label="Poor Body" tooltip={columnTooltips.poorBody} align="right" />
                   </TableRow>
                 </TableHeader>
@@ -214,7 +214,7 @@ export default function IssueQuality() {
 
 function ColHeader({ label, tooltip, align }: { label: string; tooltip: string; align?: 'right' }) {
   return (
-    <TableHead className={cn(align === 'right' && 'text-right')}>
+    <TableHead className={cn('whitespace-nowrap px-2', align === 'right' && 'text-right')}>
       <span className="inline-flex items-center gap-1">
         {label}
         <Tooltip>
@@ -231,7 +231,7 @@ function ColHeader({ label, tooltip, align }: { label: string; tooltip: string; 
 function CreatorRow({ creator: c, avg }: { creator: IssueCreatorStats; avg: IssueCreatorStats }) {
   return (
     <TableRow>
-      <TableCell>
+      <TableCell className="px-2">
         <div className="flex flex-col">
           <span className="font-medium">{c.display_name ?? c.github_username}</span>
           {c.display_name && (
@@ -244,7 +244,7 @@ function CreatorRow({ creator: c, avg }: { creator: IssueCreatorStats; avg: Issu
           )}
         </div>
       </TableCell>
-      <TableCell className="text-right font-medium">{c.issues_created}</TableCell>
+      <TableCell className="text-right font-medium px-2">{c.issues_created}</TableCell>
       <MetricCell
         value={c.pct_with_checklist}
         avg={avg.pct_with_checklist}
@@ -313,7 +313,7 @@ function MetricCell({
 }) {
   const bad = isWorse(value, avg, 1.5, higherIsWorse)
   return (
-    <TableCell className="text-right">
+    <TableCell className="text-right px-2">
       <span className={cn(bad && 'inline-flex items-center')}>
         {fmt(value, suffix, decimals)}
         {bad && (

@@ -28,18 +28,30 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { AlertTriangle, CheckCircle2, RefreshCw, XCircle, Users, UserX } from 'lucide-react'
-import type { Developer, DeveloperCreate } from '@/utils/types'
+import { useRoles } from '@/hooks/useRoles'
+import SortableHead from '@/components/SortableHead'
+import TeamCombobox from '@/components/TeamCombobox'
+import type { Developer, DeveloperCreate, RoleDefinition } from '@/utils/types'
 
-const ROLES = ['developer', 'senior_developer', 'lead', 'architect', 'devops', 'qa', 'intern']
+type SortField = 'display_name' | 'role' | 'team' | 'office' | 'location'
+
+const CATEGORY_LABELS: Record<string, string> = {
+  code_contributor: 'Code Contributors',
+  issue_contributor: 'Issue Contributors',
+  non_contributor: 'Non-Contributors',
+  system: 'System',
+}
 
 function DeveloperForm({
   initial,
   onSubmit,
   submitLabel,
+  roles,
 }: {
   initial?: Partial<DeveloperCreate>
   onSubmit: (data: DeveloperCreate) => void
   submitLabel: string
+  roles: RoleDefinition[]
 }) {
   const [form, setForm] = useState<DeveloperCreate>({
     github_username: initial?.github_username ?? '',
@@ -100,17 +112,26 @@ function DeveloperForm({
             onChange={(e) => setForm({ ...form, role: e.target.value || null })}
           >
             <option value="">Select role...</option>
-            {ROLES.map((r) => (
-              <option key={r} value={r}>{r.replace('_', ' ')}</option>
+            {Object.entries(
+              roles.reduce<Record<string, RoleDefinition[]>>((acc, r) => {
+                (acc[r.contribution_category] ??= []).push(r)
+                return acc
+              }, {})
+            ).map(([category, categoryRoles]) => (
+              <optgroup key={category} label={CATEGORY_LABELS[category] ?? category}>
+                {categoryRoles.map((r) => (
+                  <option key={r.role_key} value={r.role_key}>{r.display_name}</option>
+                ))}
+              </optgroup>
             ))}
           </select>
         </div>
         <div className="space-y-1.5">
           <Label htmlFor="team">Team</Label>
-          <Input
+          <TeamCombobox
             id="team"
             value={form.team ?? ''}
-            onChange={(e) => setForm({ ...form, team: e.target.value || null })}
+            onChange={(val) => setForm({ ...form, team: val || null })}
           />
         </div>
         <div className="space-y-1.5">
@@ -169,8 +190,14 @@ export default function TeamRegistry() {
   const navigate = useNavigate()
   const qc = useQueryClient()
   const [teamFilter, setTeamFilter] = useState('')
+  const [roleFilter, setRoleFilter] = useState('')
+  const [officeFilter, setOfficeFilter] = useState('')
+  const [locationFilter, setLocationFilter] = useState('')
+  const [sortField, setSortField] = useState<SortField>('display_name')
+  const [sortAsc, setSortAsc] = useState(true)
   const [showInactive, setShowInactive] = useState(false)
-  const { data: developers, isLoading, isError, refetch } = useDevelopers(teamFilter || undefined, !showInactive)
+  const { data: developers, isLoading, isError, refetch } = useDevelopers(undefined, !showInactive)
+  const { data: roles = [] } = useRoles()
   const createDev = useCreateDeveloper()
   const syncContributors = useSyncContributors()
   const forceStop = useForceStopSync()
@@ -211,7 +238,37 @@ export default function TeamRegistry() {
 
   const lastCompleted = syncStatus?.last_completed
 
-  const teams = [...new Set((developers ?? []).map((d) => d.team).filter(Boolean))] as string[]
+  // Extract unique filter options from all developers
+  const allDevs = developers ?? []
+  const uniqueOffices = [...new Set(allDevs.map((d) => d.office).filter(Boolean))].sort() as string[]
+  const uniqueLocations = [...new Set(allDevs.map((d) => d.location).filter(Boolean))].sort() as string[]
+
+  // Client-side filter + sort
+  const filteredDevs = allDevs
+    .filter((d) => {
+      if (teamFilter && d.team !== teamFilter) return false
+      if (roleFilter && d.role !== roleFilter) return false
+      if (officeFilter && d.office !== officeFilter) return false
+      if (locationFilter && d.location !== locationFilter) return false
+      return true
+    })
+    .sort((a, b) => {
+      const av = (a[sortField] ?? '').toLowerCase()
+      const bv = (b[sortField] ?? '').toLowerCase()
+      const cmp = av.localeCompare(bv)
+      return sortAsc ? cmp : -cmp
+    })
+
+  function toggleSort(field: SortField) {
+    if (sortField === field) {
+      setSortAsc(!sortAsc)
+    } else {
+      setSortField(field)
+      setSortAsc(true)
+    }
+  }
+
+  const hasActiveFilters = !!(teamFilter || roleFilter || officeFilter || locationFilter)
 
   return (
     <div className="space-y-4">
@@ -241,17 +298,6 @@ export default function TeamRegistry() {
               Inactive
             </button>
           </div>
-
-          <select
-            className="rounded-md border bg-background px-3 py-1.5 text-sm"
-            value={teamFilter}
-            onChange={(e) => setTeamFilter(e.target.value)}
-          >
-            <option value="">All teams</option>
-            {teams.map((t) => (
-              <option key={t} value={t}>{t}</option>
-            ))}
-          </select>
 
           <Button
             variant="outline"
@@ -305,6 +351,7 @@ export default function TeamRegistry() {
               ) : (
                 <DeveloperForm
                   submitLabel="Create"
+                  roles={roles}
                   onSubmit={(data) => {
                     createDev.mutate(data, {
                       onSuccess: () => setAddOpen(false),
@@ -320,6 +367,75 @@ export default function TeamRegistry() {
             </DialogContent>
           </Dialog>
         </div>
+      </div>
+
+      {/* Filters */}
+      <div className="flex items-center gap-3">
+        <div className="w-44">
+          <TeamCombobox
+            value={teamFilter}
+            onChange={setTeamFilter}
+            allowEmpty
+            emptyLabel="All teams"
+            placeholder="All teams"
+          />
+        </div>
+        <select
+          className="h-8 rounded-lg border border-input bg-transparent px-2.5 text-sm"
+          value={roleFilter}
+          onChange={(e) => setRoleFilter(e.target.value)}
+        >
+          <option value="">All roles</option>
+          {Object.entries(
+            roles.reduce<Record<string, RoleDefinition[]>>((acc, r) => {
+              (acc[r.contribution_category] ??= []).push(r)
+              return acc
+            }, {})
+          ).map(([category, categoryRoles]) => (
+            <optgroup key={category} label={CATEGORY_LABELS[category] ?? category}>
+              {categoryRoles.map((r) => (
+                <option key={r.role_key} value={r.role_key}>{r.display_name}</option>
+              ))}
+            </optgroup>
+          ))}
+        </select>
+        <select
+          className="h-8 rounded-lg border border-input bg-transparent px-2.5 text-sm"
+          value={officeFilter}
+          onChange={(e) => setOfficeFilter(e.target.value)}
+        >
+          <option value="">All offices</option>
+          {uniqueOffices.map((o) => (
+            <option key={o} value={o}>{o}</option>
+          ))}
+        </select>
+        <select
+          className="h-8 rounded-lg border border-input bg-transparent px-2.5 text-sm"
+          value={locationFilter}
+          onChange={(e) => setLocationFilter(e.target.value)}
+        >
+          <option value="">All locations</option>
+          {uniqueLocations.map((l) => (
+            <option key={l} value={l}>{l}</option>
+          ))}
+        </select>
+        {hasActiveFilters && (
+          <button
+            type="button"
+            className="text-xs text-muted-foreground hover:text-foreground"
+            onClick={() => {
+              setTeamFilter('')
+              setRoleFilter('')
+              setOfficeFilter('')
+              setLocationFilter('')
+            }}
+          >
+            Clear filters
+          </button>
+        )}
+        <span className="ml-auto text-sm text-muted-foreground">
+          {filteredDevs.length} developer{filteredDevs.length !== 1 ? 's' : ''}
+        </span>
       </div>
 
       {/* Active contributor sync banner */}
@@ -396,19 +512,19 @@ export default function TeamRegistry() {
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Name</TableHead>
+                <SortableHead field="display_name" current={sortField} asc={sortAsc} onToggle={toggleSort}>Name</SortableHead>
                 <TableHead>GitHub</TableHead>
-                <TableHead>Role</TableHead>
-                <TableHead>Team</TableHead>
-                <TableHead>Office</TableHead>
+                <SortableHead field="role" current={sortField} asc={sortAsc} onToggle={toggleSort}>Role</SortableHead>
+                <SortableHead field="team" current={sortField} asc={sortAsc} onToggle={toggleSort}>Team</SortableHead>
+                <SortableHead field="office" current={sortField} asc={sortAsc} onToggle={toggleSort}>Office</SortableHead>
                 <TableHead>Skills</TableHead>
-                <TableHead>Location</TableHead>
+                <SortableHead field="location" current={sortField} asc={sortAsc} onToggle={toggleSort}>Location</SortableHead>
                 <TableHead>Timezone</TableHead>
                 <TableHead />
               </TableRow>
             </TableHeader>
             <TableBody>
-              {(developers ?? []).map((dev) => (
+              {filteredDevs.map((dev) => (
                 <TableRow
                   key={dev.id}
                   className={`cursor-pointer ${showInactive ? 'opacity-60' : ''}`}
@@ -425,7 +541,9 @@ export default function TeamRegistry() {
                   <TableCell className="text-muted-foreground">{dev.github_username}</TableCell>
                   <TableCell>
                     {dev.role && (
-                      <Badge variant="secondary">{dev.role.replace('_', ' ')}</Badge>
+                      <Badge variant="secondary">
+                        {roles.find((r) => r.role_key === dev.role)?.display_name ?? dev.role.replace('_', ' ')}
+                      </Badge>
                     )}
                   </TableCell>
                   <TableCell>{dev.team}</TableCell>
@@ -469,12 +587,14 @@ export default function TeamRegistry() {
                   </TableCell>
                 </TableRow>
               ))}
-              {(developers ?? []).length === 0 && (
+              {filteredDevs.length === 0 && (
                 <TableRow>
                   <TableCell colSpan={9} className="text-center text-muted-foreground">
-                    {showInactive
-                      ? 'No inactive developers.'
-                      : 'No developers found. Add one to get started.'}
+                    {hasActiveFilters
+                      ? 'No developers match the current filters.'
+                      : showInactive
+                        ? 'No inactive developers.'
+                        : 'No developers found. Add one to get started.'}
                   </TableCell>
                 </TableRow>
               )}
@@ -492,6 +612,7 @@ export default function TeamRegistry() {
             <DeveloperForm
               initial={editDev}
               submitLabel="Save"
+              roles={roles}
               onSubmit={({ github_username, ...updateData }) => {
                 void github_username
                 updateDev.mutate(updateData, { onSuccess: () => setEditOpen(false) })

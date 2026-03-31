@@ -6,16 +6,18 @@ export default function SortableHead<T extends string>({
   asc,
   onToggle,
   children,
+  className,
 }: {
   field: T
   current: T
   asc: boolean
   onToggle: (f: T) => void
   children: React.ReactNode
+  className?: string
 }) {
   const active = field === current
   return (
-    <TableHead>
+    <TableHead className={className}>
       <button
         type="button"
         className="inline-flex items-center gap-1 hover:text-foreground"
