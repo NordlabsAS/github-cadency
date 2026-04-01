@@ -48,9 +48,9 @@ export default class ErrorBoundary extends Component<Props, State> {
                 >
                   Try Again
                 </Button>
-                <Button variant="ghost" asChild>
-                  <a href="/">Go to Dashboard</a>
-                </Button>
+                <a href="/">
+                  <Button variant="ghost">Go to Dashboard</Button>
+                </a>
               </div>
             </CardContent>
           </Card>

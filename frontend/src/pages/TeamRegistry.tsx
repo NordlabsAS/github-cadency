@@ -177,7 +177,7 @@ function DeveloperForm({
         </div>
       </div>
       <div className="flex justify-end gap-2">
-        <DialogClose asChild>
+        <DialogClose>
           <Button variant="outline">Cancel</Button>
         </DialogClose>
         <Button type="submit">{submitLabel}</Button>
@@ -309,7 +309,7 @@ export default function TeamRegistry() {
           </Button>
 
           <Dialog open={addOpen} onOpenChange={(open) => { setAddOpen(open); if (!open) setInactiveConflict(null) }}>
-            <DialogTrigger asChild>
+            <DialogTrigger>
               <Button>Add Developer</Button>
             </DialogTrigger>
             <DialogContent className="max-w-lg">

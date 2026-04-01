@@ -5,7 +5,7 @@ import { useDateRange } from '@/hooks/useDateRange'
 import { useWorkAllocationItems, useRecategorizeItem } from '@/hooks/useStats'
 import ErrorCard from '@/components/ErrorCard'
 import TableSkeleton from '@/components/TableSkeleton'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Card, CardContent } from '@/components/ui/card'
 import {
   Table,
   TableBody,
@@ -140,7 +140,7 @@ export default function InvestmentCategory() {
 
       {/* Filters */}
       <div className="flex items-center gap-3">
-        <Select value={typeFilter} onValueChange={handleTypeChange}>
+        <Select value={typeFilter} onValueChange={(v) => v && handleTypeChange(v)}>
           <SelectTrigger className="w-[140px]">
             <SelectValue />
           </SelectTrigger>
@@ -155,7 +155,7 @@ export default function InvestmentCategory() {
       {/* Content */}
       {isError && <ErrorCard message="Failed to load items." onRetry={refetch} />}
 
-      {isLoading && <TableSkeleton rows={10} cols={6} />}
+      {isLoading && <TableSkeleton rows={10} columns={6} />}
 
       {data && data.items.length === 0 && (
         <Card>
@@ -260,7 +260,7 @@ export default function InvestmentCategory() {
                     <TableCell className="text-right">
                       <Select
                         value={item.category}
-                        onValueChange={(v) => handleRecategorize(item, v)}
+                        onValueChange={(v) => v && handleRecategorize(item, v)}
                       >
                         <SelectTrigger className="w-[130px] h-8 text-xs">
                           <SelectValue />

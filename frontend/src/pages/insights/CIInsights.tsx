@@ -9,7 +9,7 @@ import TableSkeleton from '@/components/TableSkeleton'
 import ErrorCard from '@/components/ErrorCard'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
-import { HelpCircle, AlertTriangle, Clock, TriangleAlert } from 'lucide-react'
+import { HelpCircle, Clock, TriangleAlert } from 'lucide-react'
 import {
   Table,
   TableBody,

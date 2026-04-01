@@ -18,15 +18,8 @@ import {
   DialogClose,
 } from '@/components/ui/dialog'
 import { Label } from '@/components/ui/label'
-import { Badge } from '@/components/ui/badge'
 import { Users, X, Plus } from 'lucide-react'
 import type { RelationshipType, DeveloperRelationshipResponse } from '@/utils/types'
-
-const RELATIONSHIP_LABELS: Record<RelationshipType, string> = {
-  reports_to: 'Reports to',
-  tech_lead_of: 'Tech Lead',
-  team_lead_of: 'Team Lead',
-}
 
 function RelLink({
   rel,
@@ -96,7 +89,7 @@ function AddRelationshipDialog({
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger asChild>
+      <DialogTrigger>
         <Button variant="ghost" size="sm" className="h-7 text-xs gap-1">
           <Plus className="h-3 w-3" />
           Set {label}
@@ -144,7 +137,7 @@ function AddRelationshipDialog({
               <p className="text-sm text-muted-foreground py-2 text-center">No developers found</p>
             )}
           </div>
-          <DialogClose asChild>
+          <DialogClose>
             <Button variant="outline" className="w-full">Cancel</Button>
           </DialogClose>
         </div>

@@ -1,6 +1,6 @@
 # Task 2: Harden docker-compose.yml for Production
 
-**Status:** pending
+**Status:** done
 **Blocked by:** Task 1 (frontend Dockerfile)
 **Blocks:** Task 3 (.env.example)
 

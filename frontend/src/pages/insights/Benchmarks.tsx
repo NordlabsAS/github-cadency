@@ -265,17 +265,18 @@ export default function Benchmarks() {
                       {benchmarks.metric_info.map((info) => (
                         <SortableHead
                           key={info.key}
-                          label={info.label}
-                          sortKey={info.key}
-                          currentSort={sortKey || benchmarks.group.metrics[0]}
-                          direction={
+                          field={info.key}
+                          current={sortKey || benchmarks.group.metrics[0]}
+                          asc={
                             (sortKey || benchmarks.group.metrics[0]) === info.key
-                              ? (sortDir || (info.lower_is_better ? 'asc' : 'desc'))
-                              : undefined
+                              ? (sortDir || (info.lower_is_better ? 'asc' : 'desc')) === 'asc'
+                              : false
                           }
-                          onSort={() => handleSort(info.key)}
+                          onToggle={() => handleSort(info.key)}
                           className="text-right"
-                        />
+                        >
+                          {info.label}
+                        </SortableHead>
                       ))}
                     </TableRow>
                   </TableHeader>

@@ -71,7 +71,6 @@ function GoalProgressRow({ goal }: { goal: GoalResponse }) {
   const baseline = goal.baseline_value ?? 0
   const current = progress?.current_value ?? baseline
   const target = goal.target_value
-  const range = Math.max(Math.abs(target - baseline), 1)
   const pct = Math.min(100, Math.max(0, ((current - baseline) / (target - baseline)) * 100))
 
   return (
@@ -204,7 +203,7 @@ function ActivitySummaryCard({ developerId }: { developerId: number }) {
                 const pct = (count / totalCat) * 100
                 return (
                   <Tooltip key={cat}>
-                    <TooltipTrigger asChild>
+                    <TooltipTrigger>
                       <div
                         className="h-full transition-all"
                         style={{ width: `${pct}%`, backgroundColor: CATEGORY_CONFIG[cat].color }}
@@ -443,9 +442,6 @@ export default function DeveloperDetail() {
   const { user, isAdmin } = useAuth()
   const { data: goals } = useGoals(devId)
   const updateSelfGoal = useUpdateSelfGoal()
-  const catConfig = useCategoryConfig()
-  const CATEGORY_CONFIG = catConfig?.config ?? FALLBACK_CATEGORY_CONFIG
-  const CATEGORY_ORDER = catConfig?.order ?? FALLBACK_CATEGORY_ORDER
   const [analysisType, setAnalysisType] = useState<'communication' | 'sentiment'>('communication')
   const [analyzeOpen, setAnalyzeOpen] = useState(false)
   const [prepOpen, setPrepOpen] = useState(false)
@@ -782,7 +778,7 @@ export default function DeveloperDetail() {
           <div className="flex gap-2">
             {/* Generate 1:1 Prep Brief */}
             <Dialog open={prepOpen} onOpenChange={setPrepOpen}>
-              <DialogTrigger asChild>
+              <DialogTrigger>
                 <Button>Generate 1:1 Prep Brief</Button>
               </DialogTrigger>
               <DialogContent>
@@ -798,7 +794,7 @@ export default function DeveloperDetail() {
                     Date range: {dateFrom} to {dateTo}
                   </p>
                   <div className="flex justify-end gap-2">
-                    <DialogClose asChild>
+                    <DialogClose>
                       <Button variant="outline">Cancel</Button>
                     </DialogClose>
                     <Button
@@ -825,7 +821,7 @@ export default function DeveloperDetail() {
 
             {/* Run generic AI Analysis */}
             <Dialog open={analyzeOpen} onOpenChange={setAnalyzeOpen}>
-              <DialogTrigger asChild>
+              <DialogTrigger>
                 <Button variant="outline">Run AI Analysis</Button>
               </DialogTrigger>
               <DialogContent>
@@ -849,7 +845,7 @@ export default function DeveloperDetail() {
                     Date range: {dateFrom} to {dateTo}
                   </p>
                   <div className="flex justify-end gap-2">
-                    <DialogClose asChild>
+                    <DialogClose>
                       <Button variant="outline">Cancel</Button>
                     </DialogClose>
                     <Button

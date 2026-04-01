@@ -8,7 +8,7 @@ import ErrorCard from '@/components/ErrorCard'
 import SyncProgressView from './SyncProgressView'
 import SyncErrorDetail from './SyncErrorDetail'
 import SyncLogViewer from './SyncLogViewer'
-import type { SyncEvent, SyncError } from '@/utils/types'
+import type { SyncError } from '@/utils/types'
 import { formatDuration, formatDate } from '@/utils/format'
 
 function statusVariant(status: string | null) {

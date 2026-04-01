@@ -1,6 +1,6 @@
 # Task 5: Add Deploy Helper Scripts
 
-**Status:** pending
+**Status:** done
 **Blocks:** Task 6 (GitHub Actions CI/CD — calls `deploy.sh`)
 
 ## Problem

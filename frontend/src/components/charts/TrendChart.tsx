@@ -107,9 +107,9 @@ export default function TrendChart({
                 borderRadius: '6px',
                 fontSize: '12px',
               }}
-              formatter={(value: number) =>
+              formatter={((value: number) =>
                 formatValue ? formatValue(value) : value
-              }
+              ) as never}
             />
             <Area
               type="monotone"

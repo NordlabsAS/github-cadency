@@ -11,7 +11,6 @@ import StalePRsSection from '@/components/StalePRsSection'
 import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { cn } from '@/lib/utils'
 import {
   Table,
   TableBody,
@@ -20,7 +19,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import type { RiskAssessment, WorkloadAlert, DeveloperWorkload, TeamStats } from '@/utils/types'
+import type { RiskAssessment, TeamStats } from '@/utils/types'
 import { riskLevelLabels, riskLevelStyles } from '@/utils/types'
 
 import AlertSummaryBar from '@/components/NotificationCenter/AlertSummaryBar'
@@ -202,7 +201,7 @@ export default function Dashboard() {
           <div className="flex items-center justify-between">
             <h2 className="text-lg font-semibold">Team Status</h2>
             {teams.length > 0 && (
-              <Select value={teamFilter || '__all__'} onValueChange={(v) => setTeamFilter(v === '__all__' ? '' : v)}>
+              <Select value={teamFilter || '__all__'} onValueChange={(v) => v && setTeamFilter(v === '__all__' ? '' : v)}>
                 <SelectTrigger className="w-[160px]">
                   <SelectValue placeholder="All teams" />
                 </SelectTrigger>

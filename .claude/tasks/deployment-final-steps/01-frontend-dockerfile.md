@@ -1,6 +1,6 @@
 # Task 1: Make Frontend Dockerfile Production-Ready
 
-**Status:** pending
+**Status:** complete
 **Blocks:** Task 2 (docker-compose hardening)
 
 ## Problem

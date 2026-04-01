@@ -1,9 +1,10 @@
 services:
   db:
     image: postgres:15.17
+    restart: unless-stopped
     environment:
       POSTGRES_USER: devpulse
-      POSTGRES_PASSWORD: devpulse
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-devpulse}
       POSTGRES_DB: devpulse
     ports:
       - "127.0.0.1:5432:5432"
@@ -14,16 +15,25 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   backend:
     build: ./backend
+    restart: unless-stopped
     ports:
       - "8000:8000"
     env_file:
       - .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://devpulse:devpulse@db:5432/devpulse
+      DATABASE_URL: postgresql+asyncpg://devpulse:${POSTGRES_PASSWORD:-devpulse}@db:5432/devpulse
       LOG_FORMAT: json
+      GITHUB_APP_PRIVATE_KEY_PATH: /etc/devpulse/github-app.pem
+    volumes:
+      - ${GITHUB_APP_PEM_HOST_PATH:-./github-app.pem}:/etc/devpulse/github-app.pem:ro
     depends_on:
       db:
         condition: service_healthy
@@ -35,6 +45,7 @@ services:
 
   frontend:
     build: ./frontend
+    restart: unless-stopped
     ports:
       - "3001:5173"
     environment:
@@ -42,6 +53,11 @@ services:
       - API_URL=http://backend:8000
     depends_on:
       - backend
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   # --- Observability stack (opt-in: docker compose --profile logging up) ---
 

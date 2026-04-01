@@ -1,0 +1,52 @@
+# DevPulse reverse proxy
+# Handles HTTPS termination + IP whitelist.
+#
+# Caddy runs on the host (not in Docker) so it persists across deploys.
+#
+# Install: https://caddyserver.com/docs/install
+# Deploy:  sudo cp infrastructure/Caddyfile /etc/caddy/Caddyfile
+# Start:   sudo systemctl enable --now caddy
+# Reload:  sudo systemctl reload caddy
+#
+# Replace the domain and IP ranges below with your values.
+
+devpulse.internal.company.com {
+    # --- IP Whitelist ---
+    # Only allow requests from VPN / office network ranges.
+    # Requests from other IPs get a 403.
+    #
+    # Common private ranges (customize to your network):
+    #   10.0.0.0/8       — Class A private (large VPNs)
+    #   172.16.0.0/12    — Class B private
+    #   192.168.0.0/16   — Class C private (typical office)
+    #
+    # Example: allow only the 10.10.0.0/16 VPN subnet:
+    #   @blocked not remote_ip 10.10.0.0/16
+    @blocked not remote_ip 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16
+    respond @blocked "Access denied" 403
+
+    # --- Reverse proxy ---
+    # API requests → backend container
+    handle /api/* {
+        reverse_proxy localhost:8000
+    }
+
+    # Everything else → frontend container
+    handle {
+        reverse_proxy localhost:3001
+    }
+}
+
+# --- TLS certificate options ---
+#
+# If the domain is publicly resolvable (e.g., has a public DNS A record):
+#   Caddy auto-provisions a Let's Encrypt certificate. Zero config needed.
+#
+# If the domain is internal-only (no public DNS):
+#   Option 1 — Use your company's internal CA:
+#     Add inside the site block:
+#       tls /etc/caddy/certs/devpulse.crt /etc/caddy/certs/devpulse.key
+#
+#   Option 2 — Self-signed (testing only):
+#     Add inside the site block:
+#       tls internal

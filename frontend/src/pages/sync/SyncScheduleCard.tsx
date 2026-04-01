@@ -26,7 +26,7 @@ export default function SyncScheduleCard() {
   }, [schedule])
 
   // Debounced save for numeric inputs
-  const saveTimer = useRef<ReturnType<typeof setTimeout>>()
+  const saveTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
   const debouncedSave = useCallback((data: Record<string, unknown>) => {
     clearTimeout(saveTimer.current)
     saveTimer.current = setTimeout(() => {

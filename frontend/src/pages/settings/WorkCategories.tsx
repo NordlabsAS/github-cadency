@@ -69,13 +69,11 @@ function InfoTip({ children }: { children: React.ReactNode }) {
 
 function CategoryDialog({
   initial,
-  categories,
   onSave,
   isPending,
   trigger,
 }: {
   initial?: WorkCategoryDef
-  categories: WorkCategoryDef[]
   onSave: (data: { category_key: string; display_name: string; description: string | null; color: string; exclude_from_stats: boolean }) => void
   isPending: boolean
   trigger: React.ReactNode
@@ -100,7 +98,7 @@ function CategoryDialog({
 
   return (
     <Dialog open={open} onOpenChange={(v) => { setOpen(v); if (!v) reset() }}>
-      <DialogTrigger asChild>{trigger}</DialogTrigger>
+      <DialogTrigger>{trigger}</DialogTrigger>
       <DialogContent>
         <DialogHeader>
           <DialogTitle>{isEdit ? 'Edit Category' : 'New Category'}</DialogTitle>
@@ -149,7 +147,7 @@ function CategoryDialog({
           </div>
         </div>
         <div className="flex justify-end gap-2 mt-4">
-          <DialogClose asChild>
+          <DialogClose>
             <Button variant="outline">Cancel</Button>
           </DialogClose>
           <Button
@@ -228,7 +226,7 @@ function RuleDialog({
 
   return (
     <Dialog open={open} onOpenChange={(v) => { setOpen(v); if (!v) reset() }}>
-      <DialogTrigger asChild>{trigger}</DialogTrigger>
+      <DialogTrigger>{trigger}</DialogTrigger>
       <DialogContent>
         <DialogHeader>
           <DialogTitle>{initial ? 'Edit Rule' : 'New Rule'}</DialogTitle>
@@ -236,7 +234,7 @@ function RuleDialog({
         <div className="space-y-4">
           <div>
             <Label>Match Type</Label>
-            <Select value={matchType} onValueChange={setMatchType}>
+            <Select value={matchType} onValueChange={(v) => v && setMatchType(v)}>
               <SelectTrigger><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="label">Label</SelectItem>
@@ -267,7 +265,7 @@ function RuleDialog({
           </div>
           <div>
             <Label>Category</Label>
-            <Select value={categoryKey} onValueChange={setCategoryKey}>
+            <Select value={categoryKey} onValueChange={(v) => v && setCategoryKey(v)}>
               <SelectTrigger><SelectValue placeholder="Select category" /></SelectTrigger>
               <SelectContent>
                 {categories.map((cat) => (
@@ -303,7 +301,7 @@ function RuleDialog({
           </div>
         </div>
         <div className="flex justify-end gap-2 mt-4">
-          <DialogClose asChild>
+          <DialogClose>
             <Button variant="outline">Cancel</Button>
           </DialogClose>
           <Button
@@ -462,7 +460,7 @@ function SuggestionsCard({ categories }: { categories: WorkCategoryDef[] }) {
                       <TableCell className="font-mono text-sm">{s.match_value}</TableCell>
                       <TableCell className="text-right tabular-nums">{s.usage_count}</TableCell>
                       <TableCell>
-                        <Select value={s._category} onValueChange={(v) => updateCategory(i, v)}>
+                        <Select value={s._category} onValueChange={(v) => v && updateCategory(i, v)}>
                           <SelectTrigger className="w-[160px] h-8">
                             <SelectValue />
                           </SelectTrigger>
@@ -481,7 +479,7 @@ function SuggestionsCard({ categories }: { categories: WorkCategoryDef[] }) {
                       <TableCell>
                         <div className="flex gap-1">
                           <Tooltip>
-                            <TooltipTrigger asChild>
+                            <TooltipTrigger>
                               <Button
                                 variant="ghost"
                                 size="icon"
@@ -495,7 +493,7 @@ function SuggestionsCard({ categories }: { categories: WorkCategoryDef[] }) {
                             <TooltipContent>Create rule</TooltipContent>
                           </Tooltip>
                           <Tooltip>
-                            <TooltipTrigger asChild>
+                            <TooltipTrigger>
                               <Button
                                 variant="ghost"
                                 size="icon"
@@ -606,7 +604,6 @@ export default function WorkCategoriesPage() {
             </CardDescription>
           </div>
           <CategoryDialog
-            categories={cats}
             onSave={(data) => createCat.mutate(data)}
             isPending={createCat.isPending}
             trigger={<Button size="sm"><Plus className="h-4 w-4 mr-1" /> Add Category</Button>}
@@ -661,7 +658,6 @@ export default function WorkCategoriesPage() {
                     <div className="flex gap-1">
                       <CategoryDialog
                         initial={cat}
-                        categories={cats}
                         onSave={(data) => updateCat.mutate({ key: cat.category_key, display_name: data.display_name, description: data.description, color: data.color, exclude_from_stats: data.exclude_from_stats })}
                         isPending={updateCat.isPending}
                         trigger={

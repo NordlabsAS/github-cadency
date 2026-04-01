@@ -10,6 +10,10 @@ services:
       - ./github-app.pem:/app/github-app.pem:ro
 
   frontend:
+    build:
+      context: ./frontend
+      target: build
+    command: ["sh", "-c", "pnpm install --no-frozen-lockfile && pnpm dev --host"]
     volumes:
       - ./frontend:/app
       - /app/node_modules

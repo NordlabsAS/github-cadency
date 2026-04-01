@@ -37,8 +37,8 @@ const columnTooltips: Record<string, string> = {
   poorBody: 'Issues with descriptions under 100 characters — likely under-specified.',
 }
 
-function fmt(v: number | null, suffix = '', decimals = 1): string {
-  if (v === null || v === undefined) return '—'
+function fmt(v: number | null | undefined, suffix = '', decimals = 1): string {
+  if (v == null) return '—'
   return `${v.toFixed(decimals)}${suffix}`
 }
 

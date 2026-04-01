@@ -19,14 +19,6 @@ import {
   DialogTrigger,
   DialogClose,
 } from '@/components/ui/dialog'
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
 import AnalysisResultRenderer from '@/components/ai/AnalysisResultRenderer'
@@ -233,7 +225,7 @@ export default function AIAnalysis() {
           <div className="space-y-4">
             <div className="flex justify-end">
               <Dialog open={open} onOpenChange={setOpen}>
-                <DialogTrigger asChild>
+                <DialogTrigger>
                   <Button>New Analysis</Button>
                 </DialogTrigger>
                 <DialogContent>
@@ -277,7 +269,7 @@ export default function AIAnalysis() {
                             ? 'Team'
                             : 'Repository'}
                       </label>
-                      <Select value={form.scope_id || undefined} onValueChange={(v) => setForm({ ...form, scope_id: v })}>
+                      <Select value={form.scope_id || undefined} onValueChange={(v) => v && setForm({ ...form, scope_id: v })}>
                         <SelectTrigger>
                           <SelectValue placeholder="Select..." />
                         </SelectTrigger>
@@ -317,7 +309,7 @@ export default function AIAnalysis() {
                     )}
 
                     <div className="flex justify-end gap-2">
-                      <DialogClose asChild>
+                      <DialogClose>
                         <Button variant="outline">Cancel</Button>
                       </DialogClose>
                       <Button
@@ -372,7 +364,7 @@ export default function AIAnalysis() {
               <CardContent className="flex flex-wrap items-end gap-4 pt-4">
                 <div className="space-y-1.5">
                   <label className="text-sm font-medium">Developer</label>
-                  <Select value={prepDevId || undefined} onValueChange={setPrepDevId}>
+                  <Select value={prepDevId || undefined} onValueChange={(v) => v && setPrepDevId(v)}>
                     <SelectTrigger className="min-w-[200px]">
                       <SelectValue placeholder="Select developer..." />
                     </SelectTrigger>
@@ -432,7 +424,7 @@ export default function AIAnalysis() {
               <CardContent className="flex flex-wrap items-end gap-4 pt-4">
                 <div className="space-y-1.5">
                   <label className="text-sm font-medium">Team</label>
-                  <Select value={healthTeam || '__all__'} onValueChange={(v) => setHealthTeam(v === '__all__' ? '' : v)}>
+                  <Select value={healthTeam || '__all__'} onValueChange={(v) => v && setHealthTeam(v === '__all__' ? '' : v)}>
                     <SelectTrigger className="min-w-[200px]">
                       <SelectValue placeholder="All teams" />
                     </SelectTrigger>

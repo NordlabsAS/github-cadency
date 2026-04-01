@@ -1,7 +1,6 @@
 # Task 3: Update .env.example with Production Guidance
 
-**Status:** pending
-**Blocked by:** Task 2 (docker-compose hardening introduces `POSTGRES_PASSWORD`)
+**Status:** done
 
 ## Problem
 

@@ -221,7 +221,7 @@ export default function Goals() {
         <h1 className="text-2xl font-bold">{isAdmin ? 'Goals' : 'My Goals'}</h1>
         <div className="flex items-center gap-3">
           {isAdmin && developers && (
-            <Select value={filterDevId} onValueChange={setFilterDevId}>
+            <Select value={filterDevId} onValueChange={(v) => v && setFilterDevId(v)}>
               <SelectTrigger className="w-[200px]">
                 <SelectValue placeholder="Filter by developer" />
               </SelectTrigger>

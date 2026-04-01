@@ -15,14 +15,11 @@ import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import {
   AlertTriangle,
-  Bell,
-  BellOff,
   CheckCircle2,
   Clock,
   Hash,
   MessageSquare,
   Send,
-  Timer,
   TrendingUp,
   Zap,
 } from 'lucide-react'

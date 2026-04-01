@@ -1,5 +1,4 @@
-import { useState, useCallback, useRef, useEffect, useId, useMemo } from 'react'
-import { Link } from 'react-router-dom'
+import { useState, useCallback, useRef, useMemo } from 'react'
 import { useAISettings, useUpdateAISettings, useAIUsage } from '@/hooks/useAISettings'
 import { timeAgo } from '@/utils/format'
 import ErrorCard from '@/components/ErrorCard'
@@ -8,13 +7,7 @@ import { Switch } from '@/components/ui/switch'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from '@/components/ui/tooltip'
 import {
   AreaChart,
   Area,
@@ -145,7 +138,7 @@ export default function AISettings() {
         {/* Section 3: Feature Toggle Cards */}
         <FeatureCards
           features={usage?.features ?? []}
-          settings={settings}
+          settings={{ ...settings }}
           onToggle={(feature, enabled) => {
             const key = `feature_${feature}` as keyof AISettingsUpdate
             saveNow({ [key]: enabled } as AISettingsUpdate)
@@ -468,8 +461,6 @@ function UsageDashboard({
   days: number
   onDaysChange: (d: number) => void
 }) {
-  const chartId = useId()
-
   const chartData = useMemo(() => {
     if (!usage) return []
     return usage.daily_usage.map((d) => ({
@@ -532,7 +523,7 @@ function UsageDashboard({
               <YAxis fontSize={10} stroke="hsl(var(--muted-foreground))" tickFormatter={fmtTokens} />
               <RechartsTooltip
                 contentStyle={tooltipStyle}
-                formatter={(value: number, name: string) => [fmtTokens(value), name.replace(/_/g, ' ')]}
+                formatter={((value: number, name: string) => [fmtTokens(value), name.replace(/_/g, ' ')]) as never}
                 labelFormatter={(label) => `Date: ${label}`}
               />
               <Legend formatter={(value) => value.replace(/_/g, ' ')} />

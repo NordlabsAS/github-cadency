@@ -146,7 +146,7 @@ export default function SyncWizard() {
 
   const handleStartCustomSync = () => {
     const syncType = state.timeRange === 'since_last' ? 'incremental' : 'full'
-    const scope = computeSyncScope(selectedRepos, state.timeRange, trackedCount)
+    const scope = computeSyncScope(selectedRepos as { full_name: string }[], state.timeRange, trackedCount)
     const request: SyncStartRequest = {
       sync_type: syncType,
       repo_ids: state.selectedRepoIds,

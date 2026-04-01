@@ -100,7 +100,7 @@ export default function GoalCreateDialog({
 
   return (
     <Dialog open={open} onOpenChange={(v) => { setOpen(v); if (!v) reset() }}>
-      <DialogTrigger asChild>
+      <DialogTrigger>
         {trigger ?? <Button variant="outline" size="sm">Add Goal</Button>}
       </DialogTrigger>
       <DialogContent>
@@ -111,7 +111,7 @@ export default function GoalCreateDialog({
           {showDevSelector && (
             <div className="space-y-1.5">
               <Label>Developer</Label>
-              <Select value={selectedDevId} onValueChange={setSelectedDevId}>
+              <Select value={selectedDevId} onValueChange={(v) => v && setSelectedDevId(v)}>
                 <SelectTrigger>
                   <SelectValue placeholder="Select developer" />
                 </SelectTrigger>
@@ -178,7 +178,7 @@ export default function GoalCreateDialog({
             />
           </div>
           <div className="flex justify-end gap-2">
-            <DialogClose asChild>
+            <DialogClose>
               <Button variant="outline">Cancel</Button>
             </DialogClose>
             <Button disabled={!canSubmit || isPending} onClick={handleSubmit}>

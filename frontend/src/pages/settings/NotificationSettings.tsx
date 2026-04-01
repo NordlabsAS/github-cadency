@@ -35,7 +35,7 @@ export default function NotificationSettings() {
   const { data: config, isLoading, error } = useNotificationConfig()
   const update = useUpdateNotificationConfig()
   const evaluate = useEvaluateNotifications()
-  const debounceTimers = useRef<Record<string, NodeJS.Timeout>>({})
+  const debounceTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
 
   const debouncedUpdate = useCallback((field: string, value: unknown) => {
     if (debounceTimers.current[field]) clearTimeout(debounceTimers.current[field])
@@ -55,7 +55,7 @@ export default function NotificationSettings() {
   }, [update])
 
   if (isLoading) return <div className="space-y-4"><StatCardSkeleton /><StatCardSkeleton /></div>
-  if (error || !config) return <ErrorCard title="Failed to load notification settings" error={error} />
+  if (error || !config) return <ErrorCard title="Failed to load notification settings" message={error?.message} />
 
   const alertTypeMap: Record<string, AlertTypeMeta> = {}
   for (const at of config.alert_types) {

@@ -25,7 +25,6 @@ import {
   Table,
   TableBody,
   TableCell,
-  TableHead,
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
@@ -174,15 +173,15 @@ function RepoStatsPanel({ repoId }: { repoId: number }) {
         )}
       </div>
       <div className="flex gap-2 border-t pt-3">
-        <Button variant="outline" size="sm" asChild>
-          <Link to={`/insights/dora?repo_id=${repoId}`}>DORA Metrics</Link>
-        </Button>
-        <Button variant="outline" size="sm" asChild>
-          <Link to={`/insights/ci?repo_id=${repoId}`}>CI Health</Link>
-        </Button>
-        <Button variant="outline" size="sm" asChild>
-          <Link to={`/insights/code-churn?repo_id=${repoId}`}>Code Churn</Link>
-        </Button>
+        <Link to={`/insights/dora?repo_id=${repoId}`}>
+          <Button variant="outline" size="sm">DORA Metrics</Button>
+        </Link>
+        <Link to={`/insights/ci?repo_id=${repoId}`}>
+          <Button variant="outline" size="sm">CI Health</Button>
+        </Link>
+        <Link to={`/insights/code-churn?repo_id=${repoId}`}>
+          <Button variant="outline" size="sm">Code Churn</Button>
+        </Link>
       </div>
     </div>
   )
@@ -371,7 +370,7 @@ export default function Repos() {
           onChange={(e) => setSearch(e.target.value)}
           className="w-64"
         />
-        <Select value={langFilter || '__all__'} onValueChange={(v) => setLangFilter(v === '__all__' ? '' : v)}>
+        <Select value={langFilter || '__all__'} onValueChange={(v) => v && setLangFilter(v === '__all__' ? '' : v)}>
           <SelectTrigger className="w-[150px]">
             <SelectValue placeholder="Language" />
           </SelectTrigger>
@@ -384,7 +383,7 @@ export default function Repos() {
             ))}
           </SelectContent>
         </Select>
-        <Select value={statusFilter || '__all__'} onValueChange={(v) => setStatusFilter(v === '__all__' ? '' : v)}>
+        <Select value={statusFilter || '__all__'} onValueChange={(v) => v && setStatusFilter(v === '__all__' ? '' : v)}>
           <SelectTrigger className="w-[150px]">
             <SelectValue placeholder="Status" />
           </SelectTrigger>
@@ -395,7 +394,7 @@ export default function Repos() {
             <SelectItem value="never_synced">Never Synced</SelectItem>
           </SelectContent>
         </Select>
-        <Select value={healthFilter || '__all__'} onValueChange={(v) => setHealthFilter(v === '__all__' ? '' : v)}>
+        <Select value={healthFilter || '__all__'} onValueChange={(v) => v && setHealthFilter(v === '__all__' ? '' : v)}>
           <SelectTrigger className="w-[170px]">
             <SelectValue placeholder="Health" />
           </SelectTrigger>

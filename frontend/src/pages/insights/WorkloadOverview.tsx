@@ -16,7 +16,6 @@ import {
   Table,
   TableBody,
   TableCell,
-  TableHead,
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
@@ -118,7 +117,7 @@ export default function WorkloadOverview() {
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold">Workload Overview</h1>
         {teams.length > 0 && (
-          <Select value={teamFilter || '__all__'} onValueChange={(v) => setTeamFilter(v === '__all__' ? '' : v)}>
+          <Select value={teamFilter || '__all__'} onValueChange={(v) => v && setTeamFilter(v === '__all__' ? '' : v)}>
             <SelectTrigger className="w-[160px]">
               <SelectValue placeholder="All teams" />
             </SelectTrigger>

@@ -1,7 +1,6 @@
 # Task 6: Create GitHub Actions CI/CD Deploy Workflow
 
-**Status:** pending
-**Blocked by:** Task 5 (deploy scripts — the workflow calls `scripts/deploy.sh`)
+**Status:** done
 
 ## Problem
 

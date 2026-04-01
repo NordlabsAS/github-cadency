@@ -1,6 +1,6 @@
 # Task 4: Add Caddy Reverse Proxy Config with IP Whitelist
 
-**Status:** pending
+**Status:** done
 **Independent** — can be done in parallel with Tasks 1-3
 
 ## Problem

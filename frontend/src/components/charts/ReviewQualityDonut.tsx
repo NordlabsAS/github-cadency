@@ -70,10 +70,10 @@ export default function ReviewQualityDonut({
                   borderRadius: '6px',
                   fontSize: '12px',
                 }}
-                formatter={(value: number, name: string) => [
+                formatter={((value: number, name: string) => [
                   `${value} (${((value / total) * 100).toFixed(0)}%)`,
                   name,
-                ]}
+                ]) as never}
               />
             </PieChart>
           </ResponsiveContainer>

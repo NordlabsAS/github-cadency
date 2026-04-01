@@ -35,7 +35,7 @@ import {
   CartesianGrid,
   Legend,
 } from 'recharts'
-import { HelpCircle, Sparkles, ExternalLink, ArrowRight, GitPullRequest, CircleDot } from 'lucide-react'
+import { HelpCircle, Sparkles, ArrowRight, GitPullRequest, CircleDot } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useAISettings } from '@/hooks/useAISettings'
 import type { WorkCategory } from '@/utils/types'
@@ -314,7 +314,7 @@ export default function Investment() {
           <Card><CardContent className="h-[340px]" /></Card>
         </div>
         <Card><CardContent className="h-[300px]" /></Card>
-        <TableSkeleton rows={5} cols={7} />
+        <TableSkeleton rows={5} columns={7} />
       </div>
     )
   }
@@ -352,7 +352,7 @@ export default function Investment() {
         </div>
         <div className="flex items-center gap-2">
           <Tooltip>
-            <TooltipTrigger asChild>
+            <TooltipTrigger>
               <div className="flex items-center gap-2">
                 <Sparkles className={cn('h-4 w-4', useAi ? 'text-primary' : 'text-muted-foreground')} />
                 <Switch

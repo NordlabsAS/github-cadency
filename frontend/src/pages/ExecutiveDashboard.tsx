@@ -14,7 +14,6 @@ import {
 import { useDevelopers } from '@/hooks/useDevelopers'
 import StatCard from '@/components/StatCard'
 import StatCardSkeleton from '@/components/StatCardSkeleton'
-import TableSkeleton from '@/components/TableSkeleton'
 import ErrorCard from '@/components/ErrorCard'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -49,7 +48,7 @@ import {
 import { HelpCircle, AlertTriangle, ShieldAlert, Users, TrendingDown } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { riskLevelLabels, riskLevelStyles } from '@/utils/types'
-import type { WorkCategory, RiskLevel, DeveloperStatsWithPercentiles } from '@/utils/types'
+import type { RiskLevel, DeveloperStatsWithPercentiles } from '@/utils/types'
 
 import { FALLBACK_CATEGORY_CONFIG, FALLBACK_CATEGORY_ORDER } from '@/utils/categoryConfig'
 import { useCategoryConfig } from '@/hooks/useWorkCategories'
@@ -331,10 +330,10 @@ export default function ExecutiveDashboard() {
                       </Pie>
                       <RechartsTooltip
                         contentStyle={tooltipStyle}
-                        formatter={(value: number, name: string) => {
+                        formatter={((value: number, name: string) => {
                           const total = prDonutData.reduce((s, d) => s + d.value, 0)
                           return [`${value} (${((value / total) * 100).toFixed(0)}%)`, name]
-                        }}
+                        }) as never}
                       />
                     </PieChart>
                   </ResponsiveContainer>
