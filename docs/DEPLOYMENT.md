@@ -228,15 +228,19 @@ In your repo → Settings → Secrets and variables → Actions, add:
 | Secret | Value |
 |--------|-------|
 | `DEPLOY_HOST` | Server IP or hostname |
-| `DEPLOY_USER` | `deploy` |
-| `DEPLOY_KEY` | Contents of `deploy-key` (private key) |
+| `DEPLOY_USER` | `deploy` (the SSH user created by `server-bootstrap.sh`) |
+| `DEPLOY_SSH_KEY` | Contents of the private key file (ed25519 format, include header/footer lines) |
+
+> **Setting the key secret:** Use `gh secret set DEPLOY_SSH_KEY < deploy-key` or paste the full private key contents (including `-----BEGIN/END OPENSSH PRIVATE KEY-----` lines) into the GitHub UI. Ensure no trailing whitespace or CRLF line endings — the key must be byte-identical to the original file.
 
 ### How it works
 
 The `.github/workflows/deploy.yml` workflow:
 1. **On every push to `main`**: runs backend tests (pytest) and frontend build check
-2. **After tests pass**: SSHs to the server, pulls latest code, runs `./scripts/deploy.sh`
+2. **After tests pass**: writes the SSH key to a temp file, SSHs to the server, pulls latest code, runs `./scripts/deploy.sh`, then removes the key
 3. **Concurrency lock**: only one deploy runs at a time — a second push queues behind the active deploy, but a third push while one is queued replaces the queued run
+
+> **Note:** The workflow uses raw `ssh` instead of third-party SSH actions for reliability with ed25519 keys. The key is written to `~/.ssh/deploy_key` on the runner, used for the SSH connection, and deleted after the deploy completes.
 
 ### Network requirements
 

@@ -296,7 +296,7 @@ Go to each repo's **Settings > Secrets and variables > Actions** at:
 |--------|-------|
 | `DEPLOY_HOST` | Your server IP (e.g., `65.108.x.x`) |
 | `DEPLOY_USER` | `deploy` |
-| `DEPLOY_KEY` | Contents of `~/.ssh/deploy_key` (the private key from step 6e) |
+| `DEPLOY_SSH_KEY` | Contents of `~/.ssh/deploy_key` (the private key from step 6e) |
 
 ### Workflow template
 
@@ -305,16 +305,23 @@ Each app's deploy workflow SSHs to the server and runs its deploy script. The on
 ```yaml
 # .github/workflows/deploy.yml
 - name: Deploy via SSH
-  uses: appleboy/ssh-action@v1
-  with:
-    host: ${{ secrets.DEPLOY_HOST }}
-    username: ${{ secrets.DEPLOY_USER }}
-    key: ${{ secrets.DEPLOY_KEY }}
-    script: |
+  env:
+    DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+    DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+    DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+  run: |
+    mkdir -p ~/.ssh && chmod 700 ~/.ssh
+    printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+    chmod 600 ~/.ssh/deploy_key
+    ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key "$DEPLOY_USER@$DEPLOY_HOST" '
       cd /opt/<app-name>       # ← only this line changes per app
       git pull origin main
       ./scripts/deploy.sh
+    '
+    rm -f ~/.ssh/deploy_key
 ```
+
+> **Note:** We use raw `ssh` instead of third-party SSH actions (e.g., `appleboy/ssh-action`) for reliability with ed25519 keys. The key is written to a temp file, used for the connection, and deleted afterward.
 
 DevPulse already has this workflow at `.github/workflows/deploy.yml`.
 
@@ -330,7 +337,7 @@ When you add another application to the server:
 4. **Config:** create `/etc/newapp/.env`, symlink into `/opt/newapp/.env`
 5. **Ports:** pick unused ports, update the app's `docker-compose.yml`
 6. **Caddy:** add a new site block to `/etc/caddy/Caddyfile`, then `systemctl reload caddy`
-7. **CI/CD:** add `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_KEY` secrets to the new repo
+7. **CI/CD:** add `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY` secrets to the new repo
 8. **Deploy:** `cd /opt/newapp && docker compose up -d`
 9. **Backups:** add a cron job for the new app's database (if applicable)
 
