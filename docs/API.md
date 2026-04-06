@@ -3302,3 +3302,431 @@ Receive a batch of frontend log entries and emit them through the backend struct
 **Response:** `204 No Content`
 
 Entries beyond the first 50 are silently dropped. All `context` keys are spread as top-level fields in the structlog output. Each entry is tagged with `source="frontend"` for Loki filtering.
+
+## Integrations
+
+External integration configuration (Linear, future: Jira). All endpoints admin-only. API keys encrypted at rest using Fernet symmetric encryption (requires `ENCRYPTION_KEY` env var).
+
+### POST /api/integrations
+
+Create a new integration configuration. **Admin only.**
+
+**Request body:**
+```json
+{
+  "type": "linear",
+  "display_name": "My Linear Workspace",
+  "api_key": "lin_api_..."
+}
+```
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `type` | `string` | Yes | Integration type (`"linear"`) |
+| `display_name` | `string` | No | Admin-friendly label (max 255) |
+| `api_key` | `string` | No | API key (encrypted before storage, max 500) |
+
+**Response:** `201 Created`
+```json
+{
+  "id": 1,
+  "type": "linear",
+  "display_name": "My Linear Workspace",
+  "api_key_configured": true,
+  "workspace_id": null,
+  "workspace_name": null,
+  "status": "active",
+  "error_message": null,
+  "is_primary_issue_source": false,
+  "last_synced_at": null,
+  "created_at": "2026-04-06T10:00:00Z",
+  "updated_at": "2026-04-06T10:00:00Z"
+}
+```
+
+Note: `api_key` is never returned in responses. `api_key_configured` indicates whether a key has been set.
+
+### GET /api/integrations
+
+List all configured integrations. **Admin only.**
+
+**Response:** `200 OK` — array of `IntegrationConfigResponse`.
+
+### PATCH /api/integrations/{id}
+
+Update integration configuration. **Admin only.** Only provided fields are updated.
+
+**Request body:**
+```json
+{
+  "display_name": "Updated Name",
+  "api_key": "lin_api_new_key",
+  "status": "disabled"
+}
+```
+
+**Response:** `200 OK` — `IntegrationConfigResponse`.
+
+### DELETE /api/integrations/{id}
+
+Remove an integration and all its synced data (cascading delete). **Admin only.**
+
+**Response:** `204 No Content`
+
+### POST /api/integrations/{id}/test
+
+Test the integration connection. **Admin only.**
+
+**Response:** `200 OK`
+```json
+{
+  "success": true,
+  "message": "Connected to workspace: My Workspace",
+  "workspace_name": "My Workspace"
+}
+```
+
+### POST /api/integrations/{id}/sync
+
+Trigger a manual sync for this integration. Runs in background. **Admin only.**
+
+**Response:** `202 Accepted`
+```json
+{
+  "message": "Sync started"
+}
+```
+
+### GET /api/integrations/{id}/status
+
+Get sync status and data counts for this integration. **Admin only.**
+
+**Response:** `200 OK`
+```json
+{
+  "is_syncing": false,
+  "last_sync_event_id": 42,
+  "last_synced_at": "2026-04-06T12:00:00Z",
+  "last_sync_status": "completed",
+  "issues_synced": 150,
+  "sprints_synced": 8,
+  "projects_synced": 3
+}
+```
+
+### GET /api/integrations/{id}/users
+
+List Linear workspace users for developer identity mapping. **Admin only.**
+
+**Response:** `200 OK`
+```json
+{
+  "users": [
+    {
+      "id": "linear_user_abc",
+      "name": "Jane Doe",
+      "display_name": "Jane",
+      "email": "jane@example.com",
+      "active": true,
+      "mapped_developer_id": 5,
+      "mapped_developer_name": "Jane Doe"
+    }
+  ],
+  "total": 12,
+  "mapped_count": 8,
+  "unmapped_count": 4
+}
+```
+
+### POST /api/integrations/{id}/map-user
+
+Manually map a Linear user to a DevPulse developer. **Admin only.**
+
+**Request body:**
+```json
+{
+  "external_user_id": "linear_user_abc",
+  "developer_id": 5
+}
+```
+
+**Response:** `200 OK`
+```json
+{
+  "id": 1,
+  "developer_id": 5,
+  "integration_type": "linear",
+  "external_user_id": "linear_user_abc",
+  "external_email": "jane@example.com",
+  "external_display_name": "Jane",
+  "mapped_by": "admin",
+  "created_at": "2026-04-06T10:00:00Z"
+}
+```
+
+### GET /api/integrations/issue-source
+
+Get the current primary issue source. **Admin only.**
+
+**Response:** `200 OK`
+```json
+{
+  "source": "github",
+  "integration_id": null
+}
+```
+
+When Linear is set as primary:
+```json
+{
+  "source": "linear",
+  "integration_id": 1
+}
+```
+
+### PATCH /api/integrations/{id}/primary
+
+Set this integration as the primary issue source. Clears primary flag from all other integrations. **Admin only.**
+
+**Response:** `200 OK` — `IntegrationConfigResponse` with `is_primary_issue_source: true`.
+
+## Sprint & Planning Stats
+
+Sprint metrics, planning insights, and project portfolio data from external integrations (Linear). All endpoints admin-only. Requires an active Linear integration with synced data.
+
+### GET /api/sprints
+
+List cycles/sprints. **Admin only.**
+
+**Query params:**
+
+| Param | Type | Default | Notes |
+|-------|------|---------|-------|
+| `team_key` | `string` | `null` | Filter by team (e.g., `ENG`) |
+| `state` | `string` | `null` | Filter by state: `active`, `closed`, `future` |
+| `limit` | `int` | `20` | Max results (1-100) |
+
+**Response:** `200 OK`
+```json
+[
+  {
+    "id": 1,
+    "external_id": "cycle_abc",
+    "name": "Sprint 42",
+    "number": 42,
+    "team_key": "ENG",
+    "team_name": "Engineering",
+    "state": "closed",
+    "start_date": "2026-03-01",
+    "end_date": "2026-03-14",
+    "planned_scope": 15,
+    "completed_scope": 12,
+    "cancelled_scope": 2,
+    "added_scope": 4,
+    "url": "https://linear.app/workspace/cycle/..."
+  }
+]
+```
+
+### GET /api/sprints/{id}
+
+Sprint detail with issues and computed metrics. **Admin only.**
+
+**Response:** `200 OK`
+```json
+{
+  "id": 1,
+  "name": "Sprint 42",
+  "number": 42,
+  "state": "closed",
+  "planned_scope": 15,
+  "completed_scope": 12,
+  "issues": [ /* ExternalIssueResponse[] */ ],
+  "completion_rate": 80.0,
+  "scope_creep_pct": 26.7
+}
+```
+
+### GET /api/sprints/velocity
+
+Sprint velocity trend (completed scope per cycle). **Admin only.**
+
+**Query params:** `team_key` (optional), `limit` (default 10).
+
+**Response:** `200 OK`
+```json
+{
+  "data": [
+    {
+      "sprint_id": 1,
+      "sprint_name": "Sprint 40",
+      "sprint_number": 40,
+      "team_key": "ENG",
+      "completed_scope": 12,
+      "planned_scope": 15,
+      "start_date": "2026-01-01",
+      "end_date": "2026-01-14"
+    }
+  ],
+  "avg_velocity": 11.5,
+  "trend_direction": "increasing"
+}
+```
+
+`trend_direction`: `"increasing"`, `"decreasing"`, or `"stable"` (half-split comparison, >10% change threshold).
+
+### GET /api/sprints/completion
+
+Sprint completion rate trend. **Admin only.**
+
+**Query params:** `team_key` (optional), `limit` (default 10).
+
+**Response:** `200 OK`
+```json
+{
+  "data": [
+    {
+      "sprint_id": 1,
+      "sprint_name": "Sprint 40",
+      "sprint_number": 40,
+      "planned_scope": 15,
+      "completed_scope": 12,
+      "completion_rate": 80.0
+    }
+  ],
+  "avg_completion_rate": 78.5
+}
+```
+
+### GET /api/sprints/scope-creep
+
+Scope creep trend (mid-cycle additions as % of planned). **Admin only.**
+
+**Query params:** `team_key` (optional), `limit` (default 10).
+
+**Response:** `200 OK`
+```json
+{
+  "data": [
+    {
+      "sprint_id": 1,
+      "sprint_name": "Sprint 40",
+      "sprint_number": 40,
+      "planned_scope": 15,
+      "added_scope": 4,
+      "scope_creep_pct": 26.7
+    }
+  ],
+  "avg_scope_creep_pct": 22.3
+}
+```
+
+### GET /api/projects
+
+List external projects with health and issue counts. **Admin only.**
+
+**Response:** `200 OK`
+```json
+[
+  {
+    "id": 1,
+    "external_id": "proj_abc",
+    "key": "platform",
+    "name": "Platform Rewrite",
+    "status": "started",
+    "health": "on_track",
+    "start_date": "2026-01-01",
+    "target_date": "2026-06-30",
+    "progress_pct": 0.45,
+    "lead_id": 5,
+    "url": "https://linear.app/workspace/project/...",
+    "issue_count": 42,
+    "completed_issue_count": 28
+  }
+]
+```
+
+### GET /api/projects/{id}
+
+Project detail with issues. **Admin only.**
+
+**Response:** `200 OK` — `ExternalProjectDetailResponse` with `issues: ExternalIssueResponse[]`.
+
+### GET /api/planning/triage
+
+Triage queue metrics. **Admin only.**
+
+**Query params:** `date_from` (optional), `date_to` (optional).
+
+**Response:** `200 OK`
+```json
+{
+  "avg_triage_duration_s": 14400.0,
+  "median_triage_duration_s": 10800.0,
+  "p90_triage_duration_s": 28800.0,
+  "issues_in_triage": 3,
+  "total_triaged": 45
+}
+```
+
+### GET /api/planning/alignment
+
+Work alignment — linked vs unlinked PRs. **Admin only.**
+
+**Query params:** `date_from` (optional), `date_to` (optional).
+
+**Response:** `200 OK`
+```json
+{
+  "total_prs": 100,
+  "linked_prs": 72,
+  "unlinked_prs": 28,
+  "alignment_pct": 72.0
+}
+```
+
+### GET /api/planning/accuracy
+
+Estimation accuracy trend (estimated vs completed points per cycle). **Admin only.**
+
+**Query params:** `team_key` (optional), `limit` (default 10).
+
+**Response:** `200 OK`
+```json
+{
+  "data": [
+    {
+      "sprint_id": 1,
+      "sprint_name": "Sprint 40",
+      "sprint_number": 40,
+      "estimated_points": 25.0,
+      "completed_points": 20.0,
+      "accuracy_pct": 80.0
+    }
+  ],
+  "avg_accuracy_pct": 76.5
+}
+```
+
+### GET /api/planning/correlation
+
+Planning vs delivery correlation (sprint completion rate vs avg PR merge time). **Admin only.**
+
+**Query params:** `team_key` (optional), `limit` (default 10).
+
+**Response:** `200 OK`
+```json
+{
+  "data": [
+    {
+      "sprint_id": 1,
+      "sprint_name": "Sprint 40",
+      "completion_rate": 80.0,
+      "avg_pr_merge_time_hours": 12.5
+    }
+  ],
+  "correlation_coefficient": -0.65
+}
+```
+
+`correlation_coefficient`: Pearson r (-1 to 1). Negative = higher completion correlates with faster merge times. `null` if fewer than 3 data points.

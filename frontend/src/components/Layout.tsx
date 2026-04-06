@@ -39,6 +39,7 @@ const adminNavItems: NavEntry[] = [
       { to: '/admin/ai/settings', label: 'AI Settings' },
       { to: '/admin/slack', label: 'Slack' },
       { to: '/admin/work-categories', label: 'Work Categories' },
+      { to: '/admin/integrations', label: 'Integrations' },
       { to: '/admin/notifications', label: 'Notifications' },
     ],
   },

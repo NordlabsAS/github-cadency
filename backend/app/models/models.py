@@ -953,6 +953,198 @@ class NotificationConfig(Base):
     updated_by: Mapped[str | None] = mapped_column(String(255))
 
 
+class IntegrationConfig(Base):
+    """External integration configuration (Linear, future: Jira, etc.)."""
+    __tablename__ = "integration_config"
+    __table_args__ = (
+        Index("ix_integration_config_type", "type"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    type: Mapped[str] = mapped_column(String(30), nullable=False)
+    display_name: Mapped[str | None] = mapped_column(String(255))
+    api_key: Mapped[str | None] = mapped_column(Text)
+    workspace_id: Mapped[str | None] = mapped_column(String(255))
+    workspace_name: Mapped[str | None] = mapped_column(String(255))
+    config: Mapped[dict | None] = mapped_column(JSONB)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="active", server_default="active")
+    error_message: Mapped[str | None] = mapped_column(Text)
+    is_primary_issue_source: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, server_default=func.now()
+    )
+
+    external_projects: Mapped[list["ExternalProject"]] = relationship(back_populates="integration", cascade="all, delete-orphan")
+    external_sprints: Mapped[list["ExternalSprint"]] = relationship(back_populates="integration", cascade="all, delete-orphan")
+    external_issues: Mapped[list["ExternalIssue"]] = relationship(back_populates="integration", cascade="all, delete-orphan")
+
+
+class ExternalProject(Base):
+    """External project tracker projects (Linear projects, etc.)."""
+    __tablename__ = "external_projects"
+    __table_args__ = (
+        UniqueConstraint("external_id", name="uq_external_projects_ext_id"),
+        Index("ix_external_projects_integration", "integration_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    integration_id: Mapped[int] = mapped_column(ForeignKey("integration_config.id", ondelete="CASCADE"), nullable=False)
+    external_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    key: Mapped[str | None] = mapped_column(String(50))
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str | None] = mapped_column(String(30))
+    health: Mapped[str | None] = mapped_column(String(30))
+    start_date: Mapped[date | None] = mapped_column(Date)
+    target_date: Mapped[date | None] = mapped_column(Date)
+    progress_pct: Mapped[float | None] = mapped_column(Float)
+    lead_id: Mapped[int | None] = mapped_column(ForeignKey("developers.id", ondelete="SET NULL"))
+    url: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, server_default=func.now()
+    )
+
+    integration: Mapped["IntegrationConfig"] = relationship(back_populates="external_projects")
+    lead: Mapped["Developer | None"] = relationship(foreign_keys=[lead_id])
+    issues: Mapped[list["ExternalIssue"]] = relationship(back_populates="project")
+
+
+class ExternalSprint(Base):
+    """External sprint/cycle data (Linear cycles, etc.)."""
+    __tablename__ = "external_sprints"
+    __table_args__ = (
+        UniqueConstraint("external_id", name="uq_external_sprints_ext_id"),
+        Index("ix_external_sprints_integration", "integration_id"),
+        Index("ix_external_sprints_state", "state"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    integration_id: Mapped[int] = mapped_column(ForeignKey("integration_config.id", ondelete="CASCADE"), nullable=False)
+    external_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    name: Mapped[str | None] = mapped_column(String(255))
+    number: Mapped[int | None] = mapped_column(Integer)
+    team_key: Mapped[str | None] = mapped_column(String(100))
+    team_name: Mapped[str | None] = mapped_column(String(255))
+    state: Mapped[str] = mapped_column(String(30), nullable=False)
+    start_date: Mapped[date | None] = mapped_column(Date)
+    end_date: Mapped[date | None] = mapped_column(Date)
+    planned_scope: Mapped[int | None] = mapped_column(Integer)
+    completed_scope: Mapped[int | None] = mapped_column(Integer)
+    cancelled_scope: Mapped[int | None] = mapped_column(Integer)
+    added_scope: Mapped[int | None] = mapped_column(Integer)
+    url: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, server_default=func.now()
+    )
+
+    integration: Mapped["IntegrationConfig"] = relationship(back_populates="external_sprints")
+    issues: Mapped[list["ExternalIssue"]] = relationship(back_populates="sprint")
+
+
+class ExternalIssue(Base):
+    """External issue tracker issues (Linear issues, etc.)."""
+    __tablename__ = "external_issues"
+    __table_args__ = (
+        UniqueConstraint("external_id", name="uq_external_issues_ext_id"),
+        Index("ix_external_issues_integration", "integration_id"),
+        Index("ix_external_issues_identifier", "identifier"),
+        Index("ix_external_issues_sprint", "sprint_id"),
+        Index("ix_external_issues_project", "project_id"),
+        Index("ix_external_issues_assignee", "assignee_developer_id"),
+        Index("ix_external_issues_status_category", "status_category"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    integration_id: Mapped[int] = mapped_column(ForeignKey("integration_config.id", ondelete="CASCADE"), nullable=False)
+    external_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    identifier: Mapped[str] = mapped_column(String(50), nullable=False)
+    title: Mapped[str] = mapped_column(String(500), nullable=False)
+    description_length: Mapped[int | None] = mapped_column(Integer)
+    issue_type: Mapped[str | None] = mapped_column(String(30))
+    status: Mapped[str | None] = mapped_column(String(100))
+    status_category: Mapped[str | None] = mapped_column(String(30))
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    priority_label: Mapped[str | None] = mapped_column(String(30))
+    estimate: Mapped[float | None] = mapped_column(Float)
+    assignee_email: Mapped[str | None] = mapped_column(String(320))
+    assignee_developer_id: Mapped[int | None] = mapped_column(ForeignKey("developers.id", ondelete="SET NULL"))
+    project_id: Mapped[int | None] = mapped_column(ForeignKey("external_projects.id", ondelete="SET NULL"))
+    sprint_id: Mapped[int | None] = mapped_column(ForeignKey("external_sprints.id", ondelete="SET NULL"))
+    parent_issue_id: Mapped[int | None] = mapped_column(ForeignKey("external_issues.id", ondelete="SET NULL"))
+    labels: Mapped[list | None] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, server_default=func.now()
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, server_default=func.now()
+    )
+    triage_duration_s: Mapped[int | None] = mapped_column(Integer)
+    cycle_time_s: Mapped[int | None] = mapped_column(Integer)
+    url: Mapped[str | None] = mapped_column(Text)
+
+    integration: Mapped["IntegrationConfig"] = relationship(back_populates="external_issues")
+    assignee: Mapped["Developer | None"] = relationship(foreign_keys=[assignee_developer_id])
+    project: Mapped["ExternalProject | None"] = relationship(back_populates="issues")
+    sprint: Mapped["ExternalSprint | None"] = relationship(back_populates="issues")
+    parent_issue: Mapped["ExternalIssue | None"] = relationship(remote_side="ExternalIssue.id")
+    pr_links: Mapped[list["PRExternalIssueLink"]] = relationship(back_populates="external_issue")
+
+
+class DeveloperIdentityMap(Base):
+    """Maps developers to their identities in external systems (Linear, etc.)."""
+    __tablename__ = "developer_identity_map"
+    __table_args__ = (
+        UniqueConstraint("developer_id", "integration_type", name="uq_dev_identity_map"),
+        Index("ix_dev_identity_map_ext_email", "external_email"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    developer_id: Mapped[int] = mapped_column(ForeignKey("developers.id", ondelete="CASCADE"), nullable=False)
+    integration_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    external_user_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    external_email: Mapped[str | None] = mapped_column(String(320))
+    external_display_name: Mapped[str | None] = mapped_column(String(255))
+    mapped_by: Mapped[str] = mapped_column(String(20), nullable=False, default="auto")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, server_default=func.now()
+    )
+
+    developer: Mapped["Developer"] = relationship(foreign_keys=[developer_id])
+
+
+class PRExternalIssueLink(Base):
+    """Links pull requests to external issue tracker issues."""
+    __tablename__ = "pr_external_issue_links"
+    __table_args__ = (
+        UniqueConstraint("pull_request_id", "external_issue_id", name="uq_pr_ext_issue_link"),
+        Index("ix_pr_ext_issue_links_pr", "pull_request_id"),
+        Index("ix_pr_ext_issue_links_issue", "external_issue_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    pull_request_id: Mapped[int] = mapped_column(ForeignKey("pull_requests.id", ondelete="CASCADE"), nullable=False)
+    external_issue_id: Mapped[int] = mapped_column(ForeignKey("external_issues.id", ondelete="CASCADE"), nullable=False)
+    link_source: Mapped[str] = mapped_column(String(30), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, server_default=func.now()
+    )
+
+    pull_request: Mapped["PullRequest"] = relationship(foreign_keys=[pull_request_id])
+    external_issue: Mapped["ExternalIssue"] = relationship(back_populates="pr_links")
+
+
 class RoleDefinition(Base):
     """Admin-configurable role definitions linked to fixed contribution categories."""
     __tablename__ = "role_definitions"

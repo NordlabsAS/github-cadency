@@ -1207,3 +1207,240 @@ export interface SlackTestResponse {
   success: boolean
   message: string
 }
+
+// --- Integration Config (Linear, etc.) ---
+
+export interface IntegrationConfig {
+  id: number
+  type: string
+  display_name: string | null
+  api_key_configured: boolean
+  workspace_id: string | null
+  workspace_name: string | null
+  status: string
+  error_message: string | null
+  is_primary_issue_source: boolean
+  last_synced_at: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface IntegrationConfigCreate {
+  type: string
+  display_name?: string
+  api_key?: string
+}
+
+export interface IntegrationConfigUpdate {
+  display_name?: string
+  api_key?: string
+  status?: string
+}
+
+export interface IntegrationTestResponse {
+  success: boolean
+  message: string
+  workspace_name: string | null
+}
+
+export interface IntegrationSyncStatus {
+  is_syncing: boolean
+  last_sync_event_id: number | null
+  last_synced_at: string | null
+  last_sync_status: string | null
+  issues_synced: number
+  sprints_synced: number
+  projects_synced: number
+}
+
+export interface IssueSourceResponse {
+  source: string
+  integration_id: number | null
+}
+
+export interface LinearUser {
+  id: string
+  name: string
+  display_name: string | null
+  email: string | null
+  active: boolean
+  mapped_developer_id: number | null
+  mapped_developer_name: string | null
+}
+
+export interface LinearUserListResponse {
+  users: LinearUser[]
+  total: number
+  mapped_count: number
+  unmapped_count: number
+}
+
+export interface MapUserRequest {
+  external_user_id: string
+  developer_id: number
+}
+
+export interface DeveloperIdentityMap {
+  id: number
+  developer_id: number
+  integration_type: string
+  external_user_id: string
+  external_email: string | null
+  external_display_name: string | null
+  mapped_by: string
+  created_at: string
+}
+
+// --- Sprint & Planning Stats ---
+
+export interface ExternalSprint {
+  id: number
+  external_id: string
+  name: string | null
+  number: number | null
+  team_key: string | null
+  team_name: string | null
+  state: string
+  start_date: string | null
+  end_date: string | null
+  planned_scope: number | null
+  completed_scope: number | null
+  cancelled_scope: number | null
+  added_scope: number | null
+  url: string | null
+}
+
+export interface ExternalIssue {
+  id: number
+  external_id: string
+  identifier: string
+  title: string
+  issue_type: string | null
+  status: string | null
+  status_category: string | null
+  priority: number
+  priority_label: string | null
+  estimate: number | null
+  assignee_developer_id: number | null
+  project_id: number | null
+  sprint_id: number | null
+  labels: string[] | null
+  created_at: string
+  started_at: string | null
+  completed_at: string | null
+  triage_duration_s: number | null
+  cycle_time_s: number | null
+  url: string | null
+}
+
+export interface SprintDetail extends ExternalSprint {
+  issues: ExternalIssue[]
+  completion_rate: number | null
+  scope_creep_pct: number | null
+}
+
+export interface SprintVelocityPoint {
+  sprint_id: number
+  sprint_name: string | null
+  sprint_number: number | null
+  team_key: string | null
+  completed_scope: number
+  planned_scope: number
+  start_date: string | null
+  end_date: string | null
+}
+
+export interface SprintVelocityResponse {
+  data: SprintVelocityPoint[]
+  avg_velocity: number
+  trend_direction: string
+}
+
+export interface SprintCompletionPoint {
+  sprint_id: number
+  sprint_name: string | null
+  sprint_number: number | null
+  planned_scope: number
+  completed_scope: number
+  completion_rate: number
+}
+
+export interface SprintCompletionResponse {
+  data: SprintCompletionPoint[]
+  avg_completion_rate: number
+}
+
+export interface ScopeCreepPoint {
+  sprint_id: number
+  sprint_name: string | null
+  sprint_number: number | null
+  planned_scope: number
+  added_scope: number
+  scope_creep_pct: number
+}
+
+export interface ScopeCreepResponse {
+  data: ScopeCreepPoint[]
+  avg_scope_creep_pct: number
+}
+
+export interface ExternalProject {
+  id: number
+  external_id: string
+  key: string | null
+  name: string
+  status: string | null
+  health: string | null
+  start_date: string | null
+  target_date: string | null
+  progress_pct: number | null
+  lead_id: number | null
+  url: string | null
+  issue_count: number
+  completed_issue_count: number
+}
+
+export interface ExternalProjectDetail extends ExternalProject {
+  issues: ExternalIssue[]
+}
+
+export interface TriageMetrics {
+  avg_triage_duration_s: number
+  median_triage_duration_s: number
+  p90_triage_duration_s: number
+  issues_in_triage: number
+  total_triaged: number
+}
+
+export interface EstimationAccuracyPoint {
+  sprint_id: number
+  sprint_name: string | null
+  sprint_number: number | null
+  estimated_points: number
+  completed_points: number
+  accuracy_pct: number
+}
+
+export interface EstimationAccuracyResponse {
+  data: EstimationAccuracyPoint[]
+  avg_accuracy_pct: number
+}
+
+export interface WorkAlignment {
+  total_prs: number
+  linked_prs: number
+  unlinked_prs: number
+  alignment_pct: number
+}
+
+export interface PlanningCorrelationPoint {
+  sprint_id: number
+  sprint_name: string | null
+  completion_rate: number
+  avg_pr_merge_time_hours: number | null
+}
+
+export interface PlanningCorrelationResponse {
+  data: PlanningCorrelationPoint[]
+  correlation_coefficient: number | null
+}

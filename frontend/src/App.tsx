@@ -40,6 +40,10 @@ const AISettingsPage = lazy(() => import('@/pages/settings/AISettings'))
 const SlackSettingsPage = lazy(() => import('@/pages/settings/SlackSettings'))
 const WorkCategoriesPage = lazy(() => import('@/pages/settings/WorkCategories'))
 const NotificationSettings = lazy(() => import('@/pages/settings/NotificationSettings'))
+const IntegrationSettings = lazy(() => import('@/pages/settings/IntegrationSettings'))
+const SprintDashboard = lazy(() => import('@/pages/insights/SprintDashboard'))
+const PlanningInsights = lazy(() => import('@/pages/insights/PlanningInsights'))
+const ProjectPortfolio = lazy(() => import('@/pages/insights/ProjectPortfolio'))
 
 function PageSkeleton() {
   return (
@@ -61,6 +65,9 @@ const insightsSidebarItems: SidebarItem[] = [
   { to: '/insights/dora', label: 'DORA Metrics' },
   { to: '/insights/investment', label: 'Investment' },
   { to: '/insights/org-chart', label: 'Org Chart' },
+  { to: '/insights/sprints', label: 'Sprints' },
+  { to: '/insights/planning', label: 'Planning' },
+  { to: '/insights/projects', label: 'Projects' },
 ]
 
 const adminSidebarItems: SidebarItem[] = [
@@ -71,6 +78,7 @@ const adminSidebarItems: SidebarItem[] = [
   { to: '/admin/ai/settings', label: 'AI Settings' },
   { to: '/admin/slack', label: 'Slack' },
   { to: '/admin/work-categories', label: 'Work Categories' },
+  { to: '/admin/integrations', label: 'Integrations' },
   { to: '/admin/notifications', label: 'Notifications' },
 ]
 
@@ -143,6 +151,9 @@ function AppRoutes() {
                                 <Route path="/investment" element={<Investment />} />
                                 <Route path="/investment/:category" element={<InvestmentCategory />} />
                                 <Route path="/org-chart" element={<OrgChart />} />
+                                <Route path="/sprints" element={<SprintDashboard />} />
+                                <Route path="/planning" element={<PlanningInsights />} />
+                                <Route path="/projects" element={<ProjectPortfolio />} />
                                 <Route path="*" element={<Navigate to="/insights/workload" replace />} />
                               </Routes>
                             </ErrorBoundary>
@@ -165,6 +176,7 @@ function AppRoutes() {
                                 <Route path="/ai/settings" element={<AISettingsPage />} />
                                 <Route path="/slack" element={<SlackSettingsPage />} />
                                 <Route path="/work-categories" element={<WorkCategoriesPage />} />
+                                <Route path="/integrations" element={<IntegrationSettings />} />
                                 <Route path="/notifications" element={<NotificationSettings />} />
                                 <Route path="*" element={<Navigate to="/admin/team" replace />} />
                               </Routes>

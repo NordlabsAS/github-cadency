@@ -1595,6 +1595,255 @@ class EvaluationResultResponse(BaseModel):
 # --- Frontend Log Ingestion ---
 
 
+# --- Integration Config (Linear, etc.) ---
+
+
+class IntegrationConfigResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    type: str
+    display_name: str | None
+    api_key_configured: bool = False
+    workspace_id: str | None
+    workspace_name: str | None
+    status: str
+    error_message: str | None
+    is_primary_issue_source: bool
+    last_synced_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class IntegrationConfigCreate(BaseModel):
+    type: str = Field(max_length=30)
+    display_name: str | None = Field(default=None, max_length=255)
+    api_key: str | None = Field(default=None, max_length=500)
+
+
+class IntegrationConfigUpdate(BaseModel):
+    display_name: str | None = Field(default=None, max_length=255)
+    api_key: str | None = Field(default=None, max_length=500)
+    status: str | None = Field(default=None, max_length=30)
+
+
+class IntegrationTestResponse(BaseModel):
+    success: bool
+    message: str
+    workspace_name: str | None = None
+
+
+class IntegrationSyncStatusResponse(BaseModel):
+    is_syncing: bool
+    last_sync_event_id: int | None = None
+    last_synced_at: datetime | None = None
+    last_sync_status: str | None = None
+    issues_synced: int = 0
+    sprints_synced: int = 0
+    projects_synced: int = 0
+
+
+class IssueSourceResponse(BaseModel):
+    source: str
+    integration_id: int | None = None
+
+
+class LinearUserResponse(BaseModel):
+    id: str
+    name: str
+    display_name: str | None = None
+    email: str | None = None
+    active: bool = True
+    mapped_developer_id: int | None = None
+    mapped_developer_name: str | None = None
+
+
+class LinearUserListResponse(BaseModel):
+    users: list[LinearUserResponse]
+    total: int
+    mapped_count: int
+    unmapped_count: int
+
+
+class MapUserRequest(BaseModel):
+    external_user_id: str = Field(max_length=255)
+    developer_id: int
+
+
+class DeveloperIdentityMapResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    developer_id: int
+    integration_type: str
+    external_user_id: str
+    external_email: str | None
+    external_display_name: str | None
+    mapped_by: str
+    created_at: datetime
+
+
+# --- Sprint & Planning Stats ---
+
+
+class SprintResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    external_id: str
+    name: str | None
+    number: int | None
+    team_key: str | None
+    team_name: str | None
+    state: str
+    start_date: date | None
+    end_date: date | None
+    planned_scope: int | None
+    completed_scope: int | None
+    cancelled_scope: int | None
+    added_scope: int | None
+    url: str | None
+
+
+class SprintDetailResponse(SprintResponse):
+    issues: list["ExternalIssueResponse"] = []
+    completion_rate: float | None = None
+    scope_creep_pct: float | None = None
+
+
+class SprintVelocityPoint(BaseModel):
+    sprint_id: int
+    sprint_name: str | None
+    sprint_number: int | None
+    team_key: str | None
+    completed_scope: int
+    planned_scope: int
+    start_date: date | None
+    end_date: date | None
+
+
+class SprintVelocityResponse(BaseModel):
+    data: list[SprintVelocityPoint]
+    avg_velocity: float = 0.0
+    trend_direction: str = "stable"
+
+
+class SprintCompletionPoint(BaseModel):
+    sprint_id: int
+    sprint_name: str | None
+    sprint_number: int | None
+    planned_scope: int
+    completed_scope: int
+    completion_rate: float
+
+
+class SprintCompletionResponse(BaseModel):
+    data: list[SprintCompletionPoint]
+    avg_completion_rate: float = 0.0
+
+
+class ScopeCreepPoint(BaseModel):
+    sprint_id: int
+    sprint_name: str | None
+    sprint_number: int | None
+    planned_scope: int
+    added_scope: int
+    scope_creep_pct: float
+
+
+class ScopeCreepResponse(BaseModel):
+    data: list[ScopeCreepPoint]
+    avg_scope_creep_pct: float = 0.0
+
+
+class ExternalIssueResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    external_id: str
+    identifier: str
+    title: str
+    issue_type: str | None
+    status: str | None
+    status_category: str | None
+    priority: int
+    priority_label: str | None
+    estimate: float | None
+    assignee_developer_id: int | None
+    project_id: int | None
+    sprint_id: int | None
+    labels: list | None
+    created_at: datetime
+    started_at: datetime | None
+    completed_at: datetime | None
+    triage_duration_s: int | None
+    cycle_time_s: int | None
+    url: str | None
+
+
+class ExternalProjectResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    external_id: str
+    key: str | None
+    name: str
+    status: str | None
+    health: str | None
+    start_date: date | None
+    target_date: date | None
+    progress_pct: float | None
+    lead_id: int | None
+    url: str | None
+    issue_count: int = 0
+    completed_issue_count: int = 0
+
+
+class ExternalProjectDetailResponse(ExternalProjectResponse):
+    issues: list[ExternalIssueResponse] = []
+
+
+class TriageMetricsResponse(BaseModel):
+    avg_triage_duration_s: float = 0.0
+    median_triage_duration_s: float = 0.0
+    p90_triage_duration_s: float = 0.0
+    issues_in_triage: int = 0
+    total_triaged: int = 0
+
+
+class EstimationAccuracyPoint(BaseModel):
+    sprint_id: int
+    sprint_name: str | None
+    sprint_number: int | None
+    estimated_points: float
+    completed_points: float
+    accuracy_pct: float
+
+
+class EstimationAccuracyResponse(BaseModel):
+    data: list[EstimationAccuracyPoint]
+    avg_accuracy_pct: float = 0.0
+
+
+class WorkAlignmentResponse(BaseModel):
+    total_prs: int = 0
+    linked_prs: int = 0
+    unlinked_prs: int = 0
+    alignment_pct: float = 0.0
+
+
+class PlanningCorrelationPoint(BaseModel):
+    sprint_id: int
+    sprint_name: str | None
+    completion_rate: float
+    avg_pr_merge_time_hours: float | None
+
+
+class PlanningCorrelationResponse(BaseModel):
+    data: list[PlanningCorrelationPoint]
+    correlation_coefficient: float | None = None
+
+
 class FrontendLogEntry(BaseModel):
     level: Literal["warn", "error"] = "error"
     message: str = Field(max_length=4000)

@@ -45,6 +45,9 @@ class Settings(BaseSettings):
     # Rate limiting
     rate_limit_enabled: bool = True
 
+    # Linear integration (optional)
+    linear_sync_interval_minutes: int = 120
+
     # DORA metrics
     deploy_workflow_name: str = ""
     deploy_environment: str = "production"

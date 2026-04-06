@@ -19,10 +19,11 @@ configure_logging(
     json_output=settings.log_format == "json",
 )
 
-from app.api import ai_analysis, developers, goals, logs, notifications, oauth, relationships, roles, slack, stats, sync, teams, webhooks, work_categories  # noqa: E402
+from app.api import ai_analysis, developers, goals, integrations, logs, notifications, oauth, relationships, roles, slack, sprints, stats, sync, teams, webhooks, work_categories  # noqa: E402
 from app.models.database import AsyncSessionLocal  # noqa: E402
-from app.models.models import AIAnalysisSchedule, NotificationConfig, Repository, SyncEvent, SyncScheduleConfig  # noqa: E402
+from app.models.models import AIAnalysisSchedule, IntegrationConfig, NotificationConfig, Repository, SyncEvent, SyncScheduleConfig  # noqa: E402
 from app.services.github_sync import run_sync  # noqa: E402
+from app.services.linear_sync import run_linear_sync  # noqa: E402
 
 logger = get_logger(__name__)
 
@@ -360,6 +361,29 @@ async def lifespan(app: FastAPI):
         misfire_grace_time=None,
     )
 
+    # Linear integration sync job
+    async def scheduled_linear_sync() -> None:
+        async with AsyncSessionLocal() as db:
+            try:
+                config = (await db.execute(
+                    select(IntegrationConfig).where(
+                        IntegrationConfig.type == "linear",
+                        IntegrationConfig.status == "active",
+                    )
+                )).scalar_one_or_none()
+                if config:
+                    await run_linear_sync(db, config.id)
+            except Exception as e:
+                logger.warning("Scheduled Linear sync failed", error=str(e), event_type="system.sync")
+
+    scheduler.add_job(
+        scheduled_linear_sync,
+        "interval",
+        minutes=settings.linear_sync_interval_minutes,
+        id="linear_sync",
+        misfire_grace_time=None,
+    )
+
     scheduler.start()
     app.state.scheduler = scheduler
     if auto_enabled:
@@ -451,6 +475,8 @@ app.include_router(teams.router, prefix="/api", tags=["teams"])
 app.include_router(logs.router, prefix="/api", tags=["logs"])
 app.include_router(work_categories.router, prefix="/api", tags=["work-categories"])
 app.include_router(notifications.router, prefix="/api", tags=["notifications"])
+app.include_router(integrations.router, prefix="/api", tags=["integrations"])
+app.include_router(sprints.router, prefix="/api", tags=["sprints"])
 
 
 @app.get("/api/health")

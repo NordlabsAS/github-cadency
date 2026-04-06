@@ -2,14 +2,12 @@
 
 from datetime import datetime, timedelta, timezone
 
-from cryptography.fernet import Fernet, InvalidToken
 from fastapi import HTTPException
 from slack_sdk.web.async_client import AsyncWebClient
 from slack_sdk.errors import SlackApiError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import settings
 from app.logging import get_logger
 from app.models.models import (
     Developer,
@@ -20,40 +18,9 @@ from app.models.models import (
     SyncEvent,
 )
 from app.schemas.schemas import SlackConfigUpdate, SlackUserSettingsUpdate
+from app.services.encryption import decrypt_token, encrypt_token
 
 logger = get_logger(__name__)
-
-
-# --- Token encryption helpers ---
-
-
-def _get_fernet() -> Fernet:
-    """Return a Fernet instance using the configured encryption key.
-
-    Raises ValueError if the key is missing or invalid.
-    """
-    if not settings.encryption_key:
-        raise ValueError(
-            "ENCRYPTION_KEY is required for Slack bot token encryption. "
-            "Generate one with: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
-        )
-    try:
-        return Fernet(settings.encryption_key.encode())
-    except Exception as exc:
-        raise ValueError(f"Invalid ENCRYPTION_KEY (must be a valid Fernet key): {exc}") from exc
-
-
-def encrypt_token(plaintext: str) -> str:
-    """Encrypt a bot token for storage. Returns a Fernet ciphertext string."""
-    return _get_fernet().encrypt(plaintext.encode()).decode()
-
-
-def decrypt_token(ciphertext: str) -> str:
-    """Decrypt a stored bot token. Returns the plaintext token."""
-    try:
-        return _get_fernet().decrypt(ciphertext.encode()).decode()
-    except InvalidToken as exc:
-        raise ValueError("Failed to decrypt bot token — ENCRYPTION_KEY may have changed") from exc
 
 
 # --- Config CRUD ---
