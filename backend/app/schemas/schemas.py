@@ -1702,6 +1702,7 @@ class SprintResponse(BaseModel):
     completed_scope: int | None
     cancelled_scope: int | None
     added_scope: int | None
+    scope_unit: str | None = None
     url: str | None
 
 
@@ -1770,6 +1771,10 @@ class ExternalIssueResponse(BaseModel):
     priority_label: str | None
     estimate: float | None
     assignee_developer_id: int | None
+    creator_developer_id: int | None = None
+    creator_email: str | None = None
+    work_category: str | None = None
+    work_category_source: str | None = None
     project_id: int | None
     sprint_id: int | None
     labels: list | None
@@ -1842,6 +1847,17 @@ class PlanningCorrelationPoint(BaseModel):
 class PlanningCorrelationResponse(BaseModel):
     data: list[PlanningCorrelationPoint]
     correlation_coefficient: float | None = None
+
+
+# --- System Version ---
+
+
+class VersionResponse(BaseModel):
+    version: str
+    build: str
+    commit: str
+    deployed_at: str
+    full_version: str
 
 
 class FrontendLogEntry(BaseModel):

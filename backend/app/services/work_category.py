@@ -14,7 +14,7 @@ from sqlalchemy import and_, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.logging import get_logger
-from app.models.models import Developer, Issue, PullRequest, Repository
+from app.models.models import Developer, ExternalIssue, Issue, PRExternalIssueLink, PullRequest, Repository
 from app.schemas.schemas import (
     CategoryAllocation,
     DeveloperWorkAllocation,
@@ -132,6 +132,37 @@ def cross_reference_pr_categories(
         if linked_cats:
             pr["category"] = Counter(linked_cats).most_common(1)[0][0]
     return prs
+
+
+async def _cross_reference_pr_categories_linear(
+    db: AsyncSession,
+    prs: list[dict],
+    issues_by_id: dict[int, str],
+) -> None:
+    """For unknown PRs, inherit category from linked external issues via pr_external_issue_links."""
+    unknown_pr_ids = [pr["id"] for pr in prs if pr["category"] == "unknown"]
+    if not unknown_pr_ids or not issues_by_id:
+        return
+
+    # Fetch links for unknown PRs
+    links = (await db.execute(
+        select(PRExternalIssueLink.pull_request_id, PRExternalIssueLink.external_issue_id)
+        .where(PRExternalIssueLink.pull_request_id.in_(unknown_pr_ids))
+    )).all()
+
+    # Group linked issue categories per PR
+    pr_linked_cats: dict[int, list[str]] = {}
+    for pr_id, ext_issue_id in links:
+        cat = issues_by_id.get(ext_issue_id)
+        if cat and cat != "unknown":
+            pr_linked_cats.setdefault(pr_id, []).append(cat)
+
+    # Apply most common category
+    pr_lookup = {pr["id"]: pr for pr in prs}
+    for pr_id, cats in pr_linked_cats.items():
+        pr = pr_lookup.get(pr_id)
+        if pr:
+            pr["category"] = Counter(cats).most_common(1)[0][0]
 
 
 def _auto_granularity(date_from: datetime, date_to: datetime) -> str:
@@ -363,22 +394,42 @@ async def get_work_allocation(
     pr_result = await db.execute(pr_query)
     pr_rows = pr_result.all()
 
-    # Fetch issues created in period (by team members)
-    issue_query = select(
-        Issue.id,
-        Issue.title,
-        Issue.labels,
-        Issue.repo_id,
-        Issue.number,
-        Issue.created_at,
-        Issue.creator_github_username,
-        Issue.work_category,
-        Issue.work_category_source,
-    ).where(
-        Issue.creator_github_username.in_(dev_usernames),
-        Issue.created_at >= date_from,
-        Issue.created_at <= date_to,
-    )
+    # Fetch issues created in period (by team members) — branch on primary issue source
+    from app.services.linear_sync import get_primary_issue_source
+    issue_source = await get_primary_issue_source(db)
+
+    if issue_source == "linear":
+        issue_query = select(
+            ExternalIssue.id,
+            ExternalIssue.title,
+            ExternalIssue.labels,
+            ExternalIssue.integration_id,  # placeholder for repo_id position
+            ExternalIssue.identifier,  # placeholder for number position
+            ExternalIssue.created_at,
+            ExternalIssue.creator_email,  # placeholder for creator_github_username position
+            ExternalIssue.work_category,
+            ExternalIssue.work_category_source,
+        ).where(
+            ExternalIssue.creator_developer_id.in_(dev_ids),
+            ExternalIssue.created_at >= date_from,
+            ExternalIssue.created_at <= date_to,
+        )
+    else:
+        issue_query = select(
+            Issue.id,
+            Issue.title,
+            Issue.labels,
+            Issue.repo_id,
+            Issue.number,
+            Issue.created_at,
+            Issue.creator_github_username,
+            Issue.work_category,
+            Issue.work_category_source,
+        ).where(
+            Issue.creator_github_username.in_(dev_usernames),
+            Issue.created_at >= date_from,
+            Issue.created_at <= date_to,
+        )
     issue_result = await db.execute(issue_query)
     issue_rows = issue_result.all()
 
@@ -414,9 +465,17 @@ async def get_work_allocation(
         })
 
     # Build issue lookup for cross-reference
-    issues_by_key: dict[tuple[int, int], str] = {
-        (item["repo_id"], item["number"]): item["category"] for item in issue_items
-    }
+    if issue_source == "linear":
+        # For Linear: key by issue ID (used via pr_external_issue_links later)
+        issues_by_id: dict[int, str] = {
+            item["id"]: item["category"] for item in issue_items
+        }
+        issues_by_key: dict[tuple[int, int], str] = {}  # empty — not used for Linear
+    else:
+        issues_by_key: dict[tuple[int, int], str] = {
+            (item["repo_id"], item["number"]): item["category"] for item in issue_items
+        }
+        issues_by_id = {}
 
     # Classify PRs — trust stored work_category, fallback to rules for NULL
     pr_items: list[dict] = []
@@ -444,7 +503,10 @@ async def get_work_allocation(
         })
 
     # Cross-reference: unknown PRs inherit from linked issues
-    cross_reference_pr_categories(pr_items, issues_by_key)
+    if issue_source == "linear":
+        await _cross_reference_pr_categories_linear(db, pr_items, issues_by_id)
+    else:
+        cross_reference_pr_categories(pr_items, issues_by_key)
 
     # AI classification for remaining unknowns
     ai_classified_count = 0
@@ -692,52 +754,102 @@ async def get_work_allocation_items(
                 ))
 
     if item_type in ("all", "issue"):
-        issue_q = (
-            select(
-                Issue.id,
-                Issue.number,
-                Issue.title,
-                Issue.labels,
-                Issue.html_url,
-                Issue.created_at,
-                Issue.work_category,
-                Issue.work_category_source,
-                Issue.creator_github_username,
-                Repository.name.label("repo_name"),
+        from app.services.linear_sync import get_primary_issue_source
+        issue_source = await get_primary_issue_source(db)
+
+        if issue_source == "linear":
+            issue_q = (
+                select(
+                    ExternalIssue.id,
+                    ExternalIssue.identifier,
+                    ExternalIssue.title,
+                    ExternalIssue.labels,
+                    ExternalIssue.url,
+                    ExternalIssue.created_at,
+                    ExternalIssue.work_category,
+                    ExternalIssue.work_category_source,
+                    ExternalIssue.creator_developer_id,
+                    Developer.display_name.label("creator_name"),
+                )
+                .outerjoin(Developer, ExternalIssue.creator_developer_id == Developer.id)
+                .where(
+                    ExternalIssue.created_at >= date_from,
+                    ExternalIssue.created_at <= date_to,
+                )
             )
-            .outerjoin(Repository, Issue.repo_id == Repository.id)
-            .where(
-                Issue.created_at >= date_from,
-                Issue.created_at <= date_to,
+
+            issue_result = await db.execute(issue_q)
+            issue_rows = issue_result.all()
+
+            for row in issue_rows:
+                if row.work_category:
+                    cat = row.work_category
+                    source = row.work_category_source or ""
+                else:
+                    cat, source = classify_work_item_with_rules(row.labels, row.title, classification_rules)
+
+                if cat == category:
+                    items.append(WorkAllocationItem(
+                        id=row.id,
+                        type="issue",
+                        number=None,
+                        title=row.title,
+                        labels=row.labels,
+                        repo_name=row.identifier,  # Linear identifier (e.g. ENG-123) as context
+                        author_name=row.creator_name,
+                        author_id=row.creator_developer_id,
+                        html_url=row.url,
+                        category=cat,
+                        category_source=source,
+                        created_at=row.created_at,
+                    ))
+        else:
+            issue_q = (
+                select(
+                    Issue.id,
+                    Issue.number,
+                    Issue.title,
+                    Issue.labels,
+                    Issue.html_url,
+                    Issue.created_at,
+                    Issue.work_category,
+                    Issue.work_category_source,
+                    Issue.creator_github_username,
+                    Repository.name.label("repo_name"),
+                )
+                .outerjoin(Repository, Issue.repo_id == Repository.id)
+                .where(
+                    Issue.created_at >= date_from,
+                    Issue.created_at <= date_to,
+                )
             )
-        )
 
-        issue_result = await db.execute(issue_q)
-        issue_rows = issue_result.all()
+            issue_result = await db.execute(issue_q)
+            issue_rows = issue_result.all()
 
-        for row in issue_rows:
-            # Trust stored work_category; fallback to rules for legacy NULL items
-            if row.work_category:
-                cat = row.work_category
-                source = row.work_category_source or ""
-            else:
-                cat, source = classify_work_item_with_rules(row.labels, row.title, classification_rules)
+            for row in issue_rows:
+                # Trust stored work_category; fallback to rules for legacy NULL items
+                if row.work_category:
+                    cat = row.work_category
+                    source = row.work_category_source or ""
+                else:
+                    cat, source = classify_work_item_with_rules(row.labels, row.title, classification_rules)
 
-            if cat == category:
-                items.append(WorkAllocationItem(
-                    id=row.id,
-                    type="issue",
-                    number=row.number,
-                    title=row.title,
-                    labels=row.labels,
-                    repo_name=row.repo_name,
-                    author_name=row.creator_github_username,
-                    author_id=None,
-                    html_url=row.html_url,
-                    category=cat,
-                    category_source=source,
-                    created_at=row.created_at,
-                ))
+                if cat == category:
+                    items.append(WorkAllocationItem(
+                        id=row.id,
+                        type="issue",
+                        number=row.number,
+                        title=row.title,
+                        labels=row.labels,
+                        repo_name=row.repo_name,
+                        author_name=row.creator_github_username,
+                        author_id=None,
+                        html_url=row.html_url,
+                        category=cat,
+                        category_source=source,
+                        created_at=row.created_at,
+                    ))
 
     # Sort: PRs by merged_at desc, issues by created_at desc, interleaved by date
     items.sort(key=lambda x: x.merged_at or x.created_at or datetime.min, reverse=True)

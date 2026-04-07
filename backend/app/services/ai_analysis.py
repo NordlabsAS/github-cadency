@@ -11,8 +11,14 @@ from app.models.models import (
     AIAnalysis,
     Developer,
     DeveloperGoal,
+    DeveloperIdentityMap,
+    ExternalIssue,
+    ExternalProject,
+    ExternalSprint,
+    IntegrationConfig,
     Issue,
     IssueComment,
+    PRExternalIssueLink,
     PRReview,
     PullRequest,
 )
@@ -567,6 +573,302 @@ async def _call_claude_and_store(
     return analysis
 
 
+# --- Sprint / Planning Context Helpers ---
+
+
+async def _get_active_linear_integration(db: AsyncSession) -> IntegrationConfig | None:
+    """Return the active Linear integration, or None."""
+    result = await db.execute(
+        select(IntegrationConfig).where(
+            IntegrationConfig.type == "linear",
+            IntegrationConfig.status == "active",
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+async def _is_developer_mapped(db: AsyncSession, developer_id: int) -> bool:
+    """Check if a developer has a Linear identity mapping."""
+    result = await db.execute(
+        select(func.count()).select_from(DeveloperIdentityMap).where(
+            DeveloperIdentityMap.developer_id == developer_id,
+            DeveloperIdentityMap.integration_type == "linear",
+        )
+    )
+    return (result.scalar() or 0) > 0
+
+
+async def gather_sprint_context_for_developer(
+    db: AsyncSession, developer_id: int
+) -> dict | None:
+    """Build sprint context for 1:1 prep. Returns None if Linear not configured or dev not mapped."""
+    integration = await _get_active_linear_integration(db)
+    if not integration:
+        return None
+
+    if not await _is_developer_mapped(db, developer_id):
+        return None
+
+    now = datetime.now(timezone.utc)
+
+    # --- Active sprint ---
+    active_sprint_result = await db.execute(
+        select(ExternalSprint).where(ExternalSprint.state == "active")
+        .order_by(ExternalSprint.start_date.desc())
+        .limit(1)
+    )
+    active_sprint = active_sprint_result.scalar_one_or_none()
+
+    active_sprint_ctx = None
+    if active_sprint:
+        # Count developer's issues in active sprint
+        assigned_result = await db.execute(
+            select(func.count()).where(
+                ExternalIssue.sprint_id == active_sprint.id,
+                ExternalIssue.assignee_developer_id == developer_id,
+            )
+        )
+        assigned_count = assigned_result.scalar() or 0
+
+        completed_result = await db.execute(
+            select(func.count()).where(
+                ExternalIssue.sprint_id == active_sprint.id,
+                ExternalIssue.assignee_developer_id == developer_id,
+                ExternalIssue.status_category == "done",
+            )
+        )
+        completed_count = completed_result.scalar() or 0
+
+        # Scope added mid-sprint (issues added after sprint start)
+        scope_added = 0
+        if active_sprint.start_date:
+            scope_added_result = await db.execute(
+                select(func.count()).where(
+                    ExternalIssue.sprint_id == active_sprint.id,
+                    ExternalIssue.assignee_developer_id == developer_id,
+                    ExternalIssue.created_at > datetime.combine(
+                        active_sprint.start_date, datetime.min.time(), tzinfo=timezone.utc,
+                    ),
+                )
+            )
+            scope_added = scope_added_result.scalar() or 0
+
+        days_remaining = None
+        if active_sprint.end_date:
+            days_remaining = max(0, (active_sprint.end_date - now.date()).days)
+
+        completion_pct = (completed_count / assigned_count * 100) if assigned_count > 0 else 0.0
+
+        active_sprint_ctx = {
+            "name": active_sprint.name,
+            "days_remaining": days_remaining,
+            "issues_assigned": assigned_count,
+            "issues_completed": completed_count,
+            "completion_pct": round(completion_pct, 1),
+            "scope_added_mid_sprint": scope_added,
+        }
+
+    # --- Recent closed sprints (last 3) ---
+    recent_sprints_result = await db.execute(
+        select(ExternalSprint)
+        .where(ExternalSprint.state == "closed")
+        .order_by(ExternalSprint.end_date.desc())
+        .limit(3)
+    )
+    recent_sprints = recent_sprints_result.scalars().all()
+
+    recent_sprint_ctx = []
+    for sprint in recent_sprints:
+        # Developer's personal completion
+        dev_total_result = await db.execute(
+            select(func.count()).where(
+                ExternalIssue.sprint_id == sprint.id,
+                ExternalIssue.assignee_developer_id == developer_id,
+            )
+        )
+        dev_total = dev_total_result.scalar() or 0
+
+        dev_done_result = await db.execute(
+            select(func.count()).where(
+                ExternalIssue.sprint_id == sprint.id,
+                ExternalIssue.assignee_developer_id == developer_id,
+                ExternalIssue.status_category == "done",
+            )
+        )
+        dev_done = dev_done_result.scalar() or 0
+
+        # Team completion
+        planned = sprint.planned_scope or 0
+        completed = sprint.completed_scope or 0
+        team_pct = (completed / planned * 100) if planned > 0 else 0.0
+        personal_pct = (dev_done / dev_total * 100) if dev_total > 0 else 0.0
+
+        # Carried over = not done and not cancelled
+        carried_result = await db.execute(
+            select(func.count()).where(
+                ExternalIssue.sprint_id == sprint.id,
+                ExternalIssue.assignee_developer_id == developer_id,
+                ExternalIssue.status_category.notin_(["done", "cancelled"]),
+            )
+        )
+        carried_over = carried_result.scalar() or 0
+
+        recent_sprint_ctx.append({
+            "name": sprint.name,
+            "personal_completion_pct": round(personal_pct, 1),
+            "team_completion_pct": round(team_pct, 1),
+            "carried_over": carried_over,
+        })
+
+    if not active_sprint_ctx and not recent_sprint_ctx:
+        return None
+
+    # --- Triage stats for developer ---
+    triage_count_result = await db.execute(
+        select(func.count()).where(
+            ExternalIssue.status_category == "triage",
+            ExternalIssue.assignee_developer_id == developer_id,
+        )
+    )
+    issues_in_triage = triage_count_result.scalar() or 0
+
+    avg_triage_result = await db.execute(
+        select(func.avg(ExternalIssue.triage_duration_s)).where(
+            ExternalIssue.assignee_developer_id == developer_id,
+            ExternalIssue.triage_duration_s.isnot(None),
+            ExternalIssue.triage_duration_s > 0,
+        )
+    )
+    avg_triage_s = avg_triage_result.scalar()
+    avg_triage_hours = round(avg_triage_s / 3600, 1) if avg_triage_s else 0.0
+
+    # --- Estimation pattern ---
+    est_buckets = {"small_1_2": [0, 0], "medium_3_5": [0, 0], "large_8_plus": [0, 0]}
+    est_issues_result = await db.execute(
+        select(ExternalIssue.estimate, ExternalIssue.status_category).where(
+            ExternalIssue.assignee_developer_id == developer_id,
+            ExternalIssue.estimate.isnot(None),
+            ExternalIssue.sprint_id.isnot(None),
+        )
+    )
+    estimates = []
+    for estimate, status_category in est_issues_result.all():
+        estimates.append(estimate)
+        if estimate <= 2:
+            bucket = "small_1_2"
+        elif estimate <= 5:
+            bucket = "medium_3_5"
+        else:
+            bucket = "large_8_plus"
+        est_buckets[bucket][0] += 1  # total
+        if status_category == "done":
+            est_buckets[bucket][1] += 1  # completed
+
+    completion_by_size = {}
+    for bucket, (total, done) in est_buckets.items():
+        completion_by_size[bucket] = round(done / total * 100, 1) if total > 0 else None
+
+    avg_estimate = round(sum(estimates) / len(estimates), 1) if estimates else None
+
+    return {
+        "active_sprint": active_sprint_ctx,
+        "recent_sprints": recent_sprint_ctx,
+        "triage_stats": {
+            "issues_in_triage_assigned_to_dev": issues_in_triage,
+            "avg_triage_duration_hours": avg_triage_hours,
+        },
+        "estimation_pattern": {
+            "avg_estimate": avg_estimate,
+            "completion_rate_by_size": completion_by_size,
+        },
+    }
+
+
+async def gather_planning_health_context(
+    db: AsyncSession,
+) -> dict | None:
+    """Build planning health context for team health. Returns None if Linear not configured."""
+    from app.services.sprint_stats import (
+        get_estimation_accuracy,
+        get_scope_creep,
+        get_sprint_completion,
+        get_sprint_velocity,
+        get_triage_metrics,
+        get_work_alignment,
+    )
+
+    integration = await _get_active_linear_integration(db)
+    if not integration:
+        return None
+
+    # Reuse existing sprint_stats functions
+    velocity = await get_sprint_velocity(db, limit=5)
+    completion = await get_sprint_completion(db, limit=5)
+    scope_creep = await get_scope_creep(db, limit=5)
+    triage = await get_triage_metrics(db)
+    estimation = await get_estimation_accuracy(db, limit=5)
+    alignment = await get_work_alignment(db)
+
+    # At-risk projects
+    at_risk_result = await db.execute(
+        select(ExternalProject).where(
+            ExternalProject.health.in_(["at_risk", "off_track"])
+        )
+    )
+    at_risk_projects = [
+        {
+            "name": p.name,
+            "health": p.health,
+            "progress_pct": p.progress_pct,
+            "days_to_target": (p.target_date - datetime.now(timezone.utc).date()).days
+            if p.target_date else None,
+        }
+        for p in at_risk_result.scalars().all()
+    ]
+
+    # Only return if there's meaningful data
+    if not velocity["data"] and not triage["total_triaged"]:
+        return None
+
+    return {
+        "velocity_trend": {
+            "direction": velocity["trend_direction"],
+            "last_sprints": [d["completed_scope"] for d in velocity["data"]],
+            "avg_velocity": velocity["avg_velocity"],
+        },
+        "completion_rate": {
+            "avg_last_sprints": completion["avg_completion_rate"],
+            "per_sprint": [
+                {"name": d["sprint_name"], "rate": d["completion_rate"]}
+                for d in completion["data"]
+            ],
+        },
+        "scope_creep": {
+            "avg_pct": scope_creep["avg_scope_creep_pct"],
+            "per_sprint": [
+                {"name": d["sprint_name"], "pct": d["scope_creep_pct"]}
+                for d in scope_creep["data"]
+            ],
+        },
+        "triage_health": {
+            "issues_in_triage": triage["issues_in_triage"],
+            "avg_triage_hours": round(triage["avg_triage_duration_s"] / 3600, 1)
+            if triage["avg_triage_duration_s"] else 0.0,
+            "p90_triage_hours": round(triage["p90_triage_duration_s"] / 3600, 1)
+            if triage["p90_triage_duration_s"] else 0.0,
+        },
+        "estimation_accuracy": {
+            "avg_accuracy_pct": estimation["avg_accuracy_pct"],
+            "per_sprint": [
+                {"name": d["sprint_name"], "accuracy_pct": d["accuracy_pct"]}
+                for d in estimation["data"]
+            ],
+        },
+        "work_alignment_pct": alignment["alignment_pct"],
+        "at_risk_projects": at_risk_projects,
+    }
+
+
 # --- M7: 1:1 Prep Brief ---
 
 
@@ -596,7 +898,12 @@ KEY GUIDELINES:
 - If issue_creator_stats is present, analyze the developer's issue quality patterns:
   compare their checklist usage, reopen rate, not-planned rate, and close times against
   team averages. Surface actionable insights like "Issues without checklists take longer to close"
-  or "High reopen rate may indicate unclear acceptance criteria"."""
+  or "High reopen rate may indicate unclear acceptance criteria".
+- When sprint_context is present, assess whether the developer is on track for current sprint
+  commitments. Note patterns in estimation accuracy — are they consistently over-committing on
+  large items? Flag if they have stale triage items or are carrying over work across sprints.
+  Frame sprint insights constructively: "completing 5 of 8 sprint items with 5 days left" is
+  more useful than "behind on sprint"."""
 
 
 async def build_one_on_one_context(
@@ -742,6 +1049,11 @@ async def build_one_on_one_context(
         "issue_creator_stats": issue_creator_context,
     }
 
+    # 9. Sprint context (Linear) — omit key entirely if not available
+    sprint_context = await gather_sprint_context_for_developer(db, developer_id)
+    if sprint_context:
+        context["sprint_context"] = sprint_context
+
     input_summary = (
         f"1:1 prep for {dev.display_name}: {stats.prs_merged} PRs merged, "
         f"{stats.reviews_given.approved + stats.reviews_given.changes_requested + stats.reviews_given.commented} reviews given, "
@@ -851,7 +1163,12 @@ KEY GUIDELINES:
 - Focus on systemic patterns, not individual blame
 - Communication flags should cite specific patterns from the review/comment data
 - Action items must be concrete and assignable
-- Strengths are important — always include at least 2-3 positive observations"""
+- Strengths are important — always include at least 2-3 positive observations
+- When planning_health data is available, assess the team's planning discipline. Rising scope
+  creep or declining velocity may indicate systemic planning issues, not just execution problems.
+  Correlate PR delivery metrics with sprint completion — a team that merges fast but completes
+  few sprint items may be doing a lot of unplanned work. Flag at-risk projects with concrete
+  timelines."""
 
 
 async def build_team_health_context(
@@ -1037,6 +1354,11 @@ async def build_team_health_context(
         "heated_threads": heated_threads,
         "team_goals": team_goals,
     }
+
+    # 7. Planning health (Linear) — omit key entirely if not available
+    planning_health = await gather_planning_health_context(db)
+    if planning_health:
+        context["planning_health"] = planning_health
 
     scope_id = team or "all"
     input_summary = (

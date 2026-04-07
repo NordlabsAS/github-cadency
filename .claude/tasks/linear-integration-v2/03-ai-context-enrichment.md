@@ -5,7 +5,7 @@
 > Independent of: Phase 2 (primary issue source), Phase 4-5
 > Related: `backend/app/services/ai_analysis.py`
 
-## Status: Pending
+## Status: Completed
 
 ## Problem
 
@@ -163,18 +163,30 @@ Both context builders accept optional `repo_ids` for scoping. Sprint data is not
 
 ## Acceptance Criteria
 
-- [ ] `build_one_on_one_context()` includes `sprint_context` when Linear is active and developer is mapped
-- [ ] `build_team_health_context()` includes `planning_health` when Linear is active
-- [ ] Context is omitted gracefully when Linear is not configured (no errors, no empty sections)
-- [ ] System prompts updated to guide Claude on sprint data interpretation
-- [ ] Cost estimation automatically reflects the larger context
-- [ ] All existing AI tests pass (context additions are additive, not breaking)
+- [x] `build_one_on_one_context()` includes `sprint_context` when Linear is active and developer is mapped
+- [x] `build_team_health_context()` includes `planning_health` when Linear is active
+- [x] Context is omitted gracefully when Linear is not configured (no errors, no empty sections)
+- [x] System prompts updated to guide Claude on sprint data interpretation
+- [x] Cost estimation automatically reflects the larger context
+- [x] All existing AI tests pass (context additions are additive, not breaking)
 
 ## Test Plan
 
-- Unit test: `_gather_sprint_context_for_developer()` returns None when no Linear integration
-- Unit test: `_gather_sprint_context_for_developer()` returns correct structure with mock sprint data
-- Unit test: `_gather_planning_health_context()` aggregates sprint stats correctly
-- Unit test: `build_one_on_one_context()` includes sprint_context key when Linear active
-- Unit test: `build_team_health_context()` includes planning_health key when Linear active
-- Regression: `build_one_on_one_context()` output unchanged when Linear not configured
+- [x] Unit test: `gather_sprint_context_for_developer()` returns None when no Linear integration
+- [x] Unit test: `gather_sprint_context_for_developer()` returns correct structure with mock sprint data
+- [x] Unit test: `gather_planning_health_context()` aggregates sprint stats correctly
+- [x] Unit test: `build_one_on_one_context()` includes sprint_context key when Linear active
+- [x] Unit test: `build_team_health_context()` includes planning_health key when Linear active
+- [x] Regression: `build_one_on_one_context()` output unchanged when Linear not configured
+
+## Files Modified
+
+- `backend/app/services/ai_analysis.py` — Added `gather_sprint_context_for_developer()`, `gather_planning_health_context()`, helper functions `_get_active_linear_integration()` and `_is_developer_mapped()`. Wired into `build_one_on_one_context()` and `build_team_health_context()`. Updated `ONE_ON_ONE_SYSTEM_PROMPT` and `TEAM_HEALTH_SYSTEM_PROMPT` with sprint-aware guidance.
+- `backend/tests/service/test_ai_context_builders.py` — Added 15 tests: `TestGatherSprintContextForDeveloper` (7), `TestGatherPlanningHealthContext` (4), `TestOneOnOneContextWithSprint` (2), `TestTeamHealthContextWithPlanning` (2). Added fixtures for `linear_integration`, `dev_identity_map`, `active_sprint`, `closed_sprint`, `sprint_issues`.
+
+## Implementation Notes
+
+- Helper functions are named without underscore prefix (`gather_sprint_context_for_developer`, `gather_planning_health_context`) to allow direct import in tests.
+- `gather_planning_health_context()` reuses existing `sprint_stats.py` functions — no duplicated query logic.
+- Sprint context is additive: keys are only added to the context dict when data exists. No behavioral change when Linear is not configured.
+- No new API endpoints or schema changes — context enrichment is internal to the AI analysis pipeline.

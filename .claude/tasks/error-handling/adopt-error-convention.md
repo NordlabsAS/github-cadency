@@ -1,6 +1,6 @@
 # Task: Adopt Shared Error Classification Convention
 
-## Status: Not Started
+## Status: Complete
 
 ## Problem
 
@@ -52,9 +52,9 @@ Create `backend/app/libs/error_reporter.py`:
 
 ## Definition of Done
 
-- [ ] ErrorCategory enum matches canonical
-- [ ] CadencyErrorClassifier with GitHub API rules
-- [ ] ErrorReporter wired with periodic flush
-- [ ] Global exception handlers in main.py
-- [ ] Tests for classification rules
-- [ ] Registered in Sentinel
+- [x] ErrorCategory enum matches canonical
+- [x] CadencyErrorClassifier with GitHub API rules
+- [x] ErrorReporter wired with periodic flush
+- [x] Global exception handlers in main.py
+- [x] Tests for classification rules
+- [x] Registered in Sentinel (project ID: `5a17dd30-96e5-4935-8c00-44b469bc1fa3`)

@@ -4,8 +4,9 @@ import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.models import IntegrationConfig, ExternalSprint, ExternalIssue, ExternalProject
+from app.models.models import IntegrationConfig, ExternalSprint, ExternalIssue, ExternalProject, SyncEvent
 from app.services.encryption import encrypt_token
+from datetime import datetime, timezone
 
 
 # --- Fixtures ---
@@ -143,3 +144,29 @@ async def test_map_user(client, linear_integration, sample_developer):
     assert data["external_user_id"] == "linear_user_abc"
     assert data["mapped_by"] == "admin"
     assert data["integration_type"] == "linear"
+
+
+@pytest.mark.asyncio
+async def test_get_issue_source_route_not_422(client):
+    """GET /integrations/issue-source must return 200, not 422 from route collision."""
+    resp = await client.get("/api/integrations/issue-source")
+    assert resp.status_code == 200
+    assert "source" in resp.json()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_sync_returns_409(client, db_session, linear_integration):
+    """Triggering sync while another is running should return 409."""
+    # Create an active Linear sync event
+    active_sync = SyncEvent(
+        sync_type="linear",
+        status="started",
+        started_at=datetime.now(timezone.utc),
+        triggered_by="manual",
+    )
+    db_session.add(active_sync)
+    await db_session.commit()
+
+    resp = await client.post(f"/api/integrations/{linear_integration.id}/sync")
+    assert resp.status_code == 409
+    assert "already in progress" in resp.json()["detail"]

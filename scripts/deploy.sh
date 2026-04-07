@@ -24,8 +24,16 @@ else
     echo "Database container not running, skipping backup (first deploy?)"
 fi
 
-# 2. Build new images
+# 2. Build new images with version metadata
 echo "--- Building images ---"
+DEVPULSE_VERSION=$(cat VERSION 2>/dev/null | tr -d '[:space:]' || echo "0.0.0")
+DEVPULSE_BUILD_NUMBER="${DEVPULSE_BUILD_NUMBER:-$(git rev-list --count HEAD 2>/dev/null || echo "0")}"
+DEVPULSE_COMMIT_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+DEVPULSE_DEPLOY_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+echo "Version: $DEVPULSE_VERSION+build.$DEVPULSE_BUILD_NUMBER ($DEVPULSE_COMMIT_SHA)"
+
+export DEVPULSE_VERSION DEVPULSE_BUILD_NUMBER DEVPULSE_COMMIT_SHA DEVPULSE_DEPLOY_TIME
 $COMPOSE build
 
 # 3. Ensure database is running and healthy before migrations

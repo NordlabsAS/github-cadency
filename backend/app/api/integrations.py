@@ -82,6 +82,21 @@ async def list_integrations(db: AsyncSession = Depends(get_db)):
     return [IntegrationConfigResponse(**_build_response(c)) for c in configs]
 
 
+@router.get(
+    "/integrations/issue-source",
+    response_model=IssueSourceResponse,
+    dependencies=[Depends(require_admin)],
+)
+async def get_issue_source(db: AsyncSession = Depends(get_db)):
+    """Get the current primary issue source (admin only)."""
+    source = await get_primary_issue_source(db)
+    integration = await get_active_linear_integration(db) if source == "linear" else None
+    return IssueSourceResponse(
+        source=source,
+        integration_id=integration.id if integration else None,
+    )
+
+
 @router.patch(
     "/integrations/{integration_id}",
     response_model=IntegrationConfigResponse,
@@ -148,11 +163,24 @@ async def trigger_sync(
 
     from app.models.database import AsyncSessionLocal
 
+    from sqlalchemy import select as sa_select
+    from app.models.models import SyncEvent
+
     config = await get_integration(db, integration_id)
     if not config:
         raise HTTPException(status_code=404, detail="Integration not found")
     if config.status != "active":
         raise HTTPException(status_code=400, detail="Integration is not active")
+
+    # Check for already-running Linear sync
+    active_sync = (await db.execute(
+        sa_select(SyncEvent.id).where(
+            SyncEvent.sync_type == "linear",
+            SyncEvent.status == "started",
+        ).limit(1)
+    )).scalar_one_or_none()
+    if active_sync:
+        raise HTTPException(status_code=409, detail="Linear sync already in progress")
 
     # Run sync in background with its own session (request-scoped session will close)
     async def _bg_sync():
@@ -257,21 +285,6 @@ async def map_linear_user(
         raise HTTPException(status_code=404, detail="Integration not found")
     mapping = await map_user(db, config, body.external_user_id, body.developer_id)
     return DeveloperIdentityMapResponse.model_validate(mapping)
-
-
-@router.get(
-    "/integrations/issue-source",
-    response_model=IssueSourceResponse,
-    dependencies=[Depends(require_admin)],
-)
-async def get_issue_source(db: AsyncSession = Depends(get_db)):
-    """Get the current primary issue source (admin only)."""
-    source = await get_primary_issue_source(db)
-    integration = await get_active_linear_integration(db) if source == "linear" else None
-    return IssueSourceResponse(
-        source=source,
-        integration_id=integration.id if integration else None,
-    )
 
 
 @router.patch(

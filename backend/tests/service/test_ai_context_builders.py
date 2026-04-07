@@ -1,7 +1,7 @@
 """Service tests for AI context builders and repo filtering."""
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 import pytest_asyncio
@@ -11,6 +11,10 @@ from app.models.models import (
     BenchmarkGroupConfig,
     Developer,
     DeveloperGoal,
+    DeveloperIdentityMap,
+    ExternalIssue,
+    ExternalSprint,
+    IntegrationConfig,
     Issue,
     IssueComment,
     PRReview,
@@ -23,6 +27,8 @@ from app.services.ai_analysis import (
     _gather_team_texts,
     build_one_on_one_context,
     build_team_health_context,
+    gather_planning_health_context,
+    gather_sprint_context_for_developer,
 )
 
 NOW = datetime.now(timezone.utc) + timedelta(hours=1)  # future to ensure all fixtures included
@@ -340,3 +346,278 @@ class TestBuildTeamHealthContext:
         )
         serialized = json.dumps(context, default=str)
         assert len(serialized) > 0
+
+
+# --- Linear Sprint Context Fixtures ---
+
+
+@pytest_asyncio.fixture
+async def linear_integration(db_session: AsyncSession) -> IntegrationConfig:
+    integration = IntegrationConfig(
+        type="linear",
+        display_name="Linear",
+        status="active",
+        is_primary_issue_source=True,
+    )
+    db_session.add(integration)
+    await db_session.commit()
+    await db_session.refresh(integration)
+    return integration
+
+
+@pytest_asyncio.fixture
+async def dev_identity_map(
+    db_session: AsyncSession, sample_developer: Developer, linear_integration: IntegrationConfig,
+) -> DeveloperIdentityMap:
+    mapping = DeveloperIdentityMap(
+        developer_id=sample_developer.id,
+        integration_type="linear",
+        external_user_id="linear-user-123",
+        external_email="test@example.com",
+        mapped_by="auto",
+    )
+    db_session.add(mapping)
+    await db_session.commit()
+    await db_session.refresh(mapping)
+    return mapping
+
+
+@pytest_asyncio.fixture
+async def active_sprint(
+    db_session: AsyncSession, linear_integration: IntegrationConfig,
+) -> ExternalSprint:
+    today = date.today()
+    sprint = ExternalSprint(
+        integration_id=linear_integration.id,
+        external_id="sprint-active-1",
+        name="Sprint 24",
+        number=24,
+        state="active",
+        start_date=today - timedelta(days=7),
+        end_date=today + timedelta(days=7),
+        planned_scope=20,
+        completed_scope=12,
+        scope_unit="points",
+    )
+    db_session.add(sprint)
+    await db_session.commit()
+    await db_session.refresh(sprint)
+    return sprint
+
+
+@pytest_asyncio.fixture
+async def closed_sprint(
+    db_session: AsyncSession, linear_integration: IntegrationConfig,
+) -> ExternalSprint:
+    today = date.today()
+    sprint = ExternalSprint(
+        integration_id=linear_integration.id,
+        external_id="sprint-closed-1",
+        name="Sprint 23",
+        number=23,
+        state="closed",
+        start_date=today - timedelta(days=21),
+        end_date=today - timedelta(days=7),
+        planned_scope=18,
+        completed_scope=15,
+        scope_unit="points",
+    )
+    db_session.add(sprint)
+    await db_session.commit()
+    await db_session.refresh(sprint)
+    return sprint
+
+
+@pytest_asyncio.fixture
+async def sprint_issues(
+    db_session: AsyncSession,
+    linear_integration: IntegrationConfig,
+    active_sprint: ExternalSprint,
+    closed_sprint: ExternalSprint,
+    sample_developer: Developer,
+) -> list[ExternalIssue]:
+    issues = []
+    # 3 active sprint issues: 2 done, 1 in_progress
+    for i, status in enumerate(["done", "done", "in_progress"]):
+        issue = ExternalIssue(
+            integration_id=linear_integration.id,
+            external_id=f"issue-active-{i}",
+            identifier=f"ENG-{100 + i}",
+            title=f"Active sprint issue {i}",
+            status_category=status,
+            assignee_developer_id=sample_developer.id,
+            sprint_id=active_sprint.id,
+            estimate=3.0,
+            priority=2,
+            created_at=LONG_AGO + timedelta(days=1),
+        )
+        issues.append(issue)
+
+    # 2 closed sprint issues: 1 done, 1 not done (carried over)
+    for i, status in enumerate(["done", "todo"]):
+        issue = ExternalIssue(
+            integration_id=linear_integration.id,
+            external_id=f"issue-closed-{i}",
+            identifier=f"ENG-{200 + i}",
+            title=f"Closed sprint issue {i}",
+            status_category=status,
+            assignee_developer_id=sample_developer.id,
+            sprint_id=closed_sprint.id,
+            estimate=2.0,
+            priority=2,
+            created_at=LONG_AGO,
+        )
+        issues.append(issue)
+
+    db_session.add_all(issues)
+    await db_session.commit()
+    for issue in issues:
+        await db_session.refresh(issue)
+    return issues
+
+
+class TestGatherSprintContextForDeveloper:
+    @pytest.mark.asyncio
+    async def test_returns_none_without_linear(self, db_session, sample_developer):
+        result = await gather_sprint_context_for_developer(db_session, sample_developer.id)
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_dev_not_mapped(
+        self, db_session, sample_developer, linear_integration,
+    ):
+        result = await gather_sprint_context_for_developer(db_session, sample_developer.id)
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_no_sprint_data(
+        self, db_session, sample_developer, linear_integration, dev_identity_map,
+    ):
+        result = await gather_sprint_context_for_developer(db_session, sample_developer.id)
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_returns_active_sprint_context(
+        self, db_session, sample_developer, linear_integration, dev_identity_map,
+        active_sprint, sprint_issues,
+    ):
+        result = await gather_sprint_context_for_developer(db_session, sample_developer.id)
+        assert result is not None
+        assert result["active_sprint"] is not None
+        assert result["active_sprint"]["name"] == "Sprint 24"
+        assert result["active_sprint"]["issues_assigned"] == 3
+        assert result["active_sprint"]["issues_completed"] == 2
+        assert result["active_sprint"]["completion_pct"] == pytest.approx(66.7, abs=0.1)
+        assert result["active_sprint"]["days_remaining"] is not None
+
+    @pytest.mark.asyncio
+    async def test_returns_recent_sprints(
+        self, db_session, sample_developer, linear_integration, dev_identity_map,
+        closed_sprint, sprint_issues,
+    ):
+        result = await gather_sprint_context_for_developer(db_session, sample_developer.id)
+        assert result is not None
+        assert len(result["recent_sprints"]) == 1
+        recent = result["recent_sprints"][0]
+        assert recent["name"] == "Sprint 23"
+        assert recent["personal_completion_pct"] == 50.0  # 1 done out of 2
+        assert recent["carried_over"] == 1  # 1 todo issue
+
+    @pytest.mark.asyncio
+    async def test_includes_estimation_pattern(
+        self, db_session, sample_developer, linear_integration, dev_identity_map,
+        active_sprint, sprint_issues,
+    ):
+        result = await gather_sprint_context_for_developer(db_session, sample_developer.id)
+        assert result is not None
+        assert "estimation_pattern" in result
+        assert result["estimation_pattern"]["avg_estimate"] is not None
+
+    @pytest.mark.asyncio
+    async def test_context_is_json_serializable(
+        self, db_session, sample_developer, linear_integration, dev_identity_map,
+        active_sprint, closed_sprint, sprint_issues,
+    ):
+        result = await gather_sprint_context_for_developer(db_session, sample_developer.id)
+        serialized = json.dumps(result, default=str)
+        assert len(serialized) > 0
+
+
+class TestGatherPlanningHealthContext:
+    @pytest.mark.asyncio
+    async def test_returns_none_without_linear(self, db_session):
+        result = await gather_planning_health_context(db_session)
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_no_data(self, db_session, linear_integration):
+        result = await gather_planning_health_context(db_session)
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_returns_planning_health_with_data(
+        self, db_session, linear_integration, closed_sprint, sprint_issues,
+    ):
+        result = await gather_planning_health_context(db_session)
+        assert result is not None
+        assert "velocity_trend" in result
+        assert "completion_rate" in result
+        assert "scope_creep" in result
+        assert "triage_health" in result
+        assert "estimation_accuracy" in result
+        assert "work_alignment_pct" in result
+        assert "at_risk_projects" in result
+
+    @pytest.mark.asyncio
+    async def test_planning_health_is_json_serializable(
+        self, db_session, linear_integration, closed_sprint, sprint_issues,
+    ):
+        result = await gather_planning_health_context(db_session)
+        if result:
+            serialized = json.dumps(result, default=str)
+            assert len(serialized) > 0
+
+
+class TestOneOnOneContextWithSprint:
+    @pytest.mark.asyncio
+    async def test_includes_sprint_context_when_linear_active(
+        self, db_session, sample_developer, sample_pr, sample_review,
+        seed_benchmark_groups, linear_integration, dev_identity_map,
+        active_sprint, sprint_issues,
+    ):
+        context, _ = await build_one_on_one_context(
+            db_session, sample_developer.id, LONG_AGO, NOW,
+        )
+        assert "sprint_context" in context
+        assert context["sprint_context"]["active_sprint"]["name"] == "Sprint 24"
+
+    @pytest.mark.asyncio
+    async def test_no_sprint_context_without_linear(
+        self, db_session, sample_developer, sample_pr, sample_review, seed_benchmark_groups,
+    ):
+        context, _ = await build_one_on_one_context(
+            db_session, sample_developer.id, LONG_AGO, NOW,
+        )
+        assert "sprint_context" not in context
+
+
+class TestTeamHealthContextWithPlanning:
+    @pytest.mark.asyncio
+    async def test_includes_planning_health_when_linear_active(
+        self, db_session, sample_developer, sample_developer_b, sample_pr, sample_review,
+        seed_benchmark_groups, linear_integration, closed_sprint, sprint_issues,
+    ):
+        context, _ = await build_team_health_context(
+            db_session, "backend", LONG_AGO, NOW,
+        )
+        assert "planning_health" in context
+
+    @pytest.mark.asyncio
+    async def test_no_planning_health_without_linear(
+        self, db_session, sample_developer, sample_developer_b, sample_pr, sample_review,
+        seed_benchmark_groups,
+    ):
+        context, _ = await build_team_health_context(
+            db_session, "backend", LONG_AGO, NOW,
+        )
+        assert "planning_health" not in context

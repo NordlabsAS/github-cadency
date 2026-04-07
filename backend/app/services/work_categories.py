@@ -13,7 +13,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.logging import get_logger
 from app.models.models import (
+    ExternalIssue,
     Issue,
+    PRExternalIssueLink,
     PullRequest,
     WorkCategory as WorkCategoryModel,
     WorkCategoryRule,
@@ -375,45 +377,108 @@ async def reclassify_all(db: AsyncSession) -> dict:
         if issue_count % BATCH_SIZE == 0:
             await db.commit()
 
-    # --- Cross-reference: unknown PRs inherit from linked issues ---
-    # Build issue lookup from stored categories
-    issue_cats_result = await db.execute(
-        select(Issue.repo_id, Issue.number, Issue.work_category).where(
-            Issue.work_category.isnot(None),
-            Issue.work_category != "unknown",
-        )
-    )
-    issues_by_key: dict[tuple[int, int], str] = {
-        (row.repo_id, row.number): row.work_category
-        for row in issue_cats_result.all()
-    }
-
-    # Find unknown PRs with linked issues
-    unknown_prs = await db.execute(
-        select(PullRequest.id, PullRequest.repo_id, PullRequest.closes_issue_numbers).where(
-            PullRequest.work_category == "unknown",
-            PullRequest.closes_issue_numbers.isnot(None),
+    # --- Reclassify external issues (if any integration exists) ---
+    ext_issue_result = await db.execute(
+        select(ExternalIssue.id, ExternalIssue.labels, ExternalIssue.title, ExternalIssue.issue_type).where(
             or_(
-                PullRequest.work_category_source != "manual",
-                PullRequest.work_category_source.is_(None),
-            ),
+                ExternalIssue.work_category_source != "manual",
+                ExternalIssue.work_category_source.is_(None),
+            )
         )
     )
-    for row in unknown_prs.all():
-        linked_numbers = row.closes_issue_numbers or []
-        linked_cats = [
-            issues_by_key[(row.repo_id, n)]
-            for n in linked_numbers
-            if (row.repo_id, n) in issues_by_key
-        ]
-        if linked_cats:
-            best_cat = Counter(linked_cats).most_common(1)[0][0]
-            await db.execute(
-                update(PullRequest).where(PullRequest.id == row.id).values(
-                    work_category=best_cat,
-                    work_category_source="cross_ref",
-                )
+    for row in ext_issue_result.all():
+        labels = row.labels if isinstance(row.labels, list) else []
+        cat, source = classify_work_item_with_rules(labels, row.title, rules, issue_type=row.issue_type)
+        await db.execute(
+            update(ExternalIssue).where(ExternalIssue.id == row.id).values(
+                work_category=cat,
+                work_category_source=source if source else None,
             )
+        )
+
+    # --- Cross-reference: unknown PRs inherit from linked issues ---
+    from app.services.linear_sync import get_primary_issue_source
+    issue_source = await get_primary_issue_source(db)
+
+    if issue_source == "linear":
+        # Use pr_external_issue_links for cross-reference
+        ext_cats_result = await db.execute(
+            select(ExternalIssue.id, ExternalIssue.work_category).where(
+                ExternalIssue.work_category.isnot(None),
+                ExternalIssue.work_category != "unknown",
+            )
+        )
+        ext_issues_by_id = {row.id: row.work_category for row in ext_cats_result.all()}
+
+        unknown_prs = await db.execute(
+            select(PullRequest.id).where(
+                PullRequest.work_category == "unknown",
+                or_(
+                    PullRequest.work_category_source != "manual",
+                    PullRequest.work_category_source.is_(None),
+                ),
+            )
+        )
+        unknown_pr_ids = [row.id for row in unknown_prs.all()]
+
+        if unknown_pr_ids and ext_issues_by_id:
+            links = (await db.execute(
+                select(PRExternalIssueLink.pull_request_id, PRExternalIssueLink.external_issue_id)
+                .where(PRExternalIssueLink.pull_request_id.in_(unknown_pr_ids))
+            )).all()
+
+            pr_linked_cats: dict[int, list[str]] = {}
+            for pr_id, ext_id in links:
+                cat = ext_issues_by_id.get(ext_id)
+                if cat:
+                    pr_linked_cats.setdefault(pr_id, []).append(cat)
+
+            for pr_id, cats in pr_linked_cats.items():
+                best_cat = Counter(cats).most_common(1)[0][0]
+                await db.execute(
+                    update(PullRequest).where(PullRequest.id == pr_id).values(
+                        work_category=best_cat,
+                        work_category_source="cross_ref",
+                    )
+                )
+    else:
+        # GitHub path: use closes_issue_numbers
+        issue_cats_result = await db.execute(
+            select(Issue.repo_id, Issue.number, Issue.work_category).where(
+                Issue.work_category.isnot(None),
+                Issue.work_category != "unknown",
+            )
+        )
+        issues_by_key: dict[tuple[int, int], str] = {
+            (row.repo_id, row.number): row.work_category
+            for row in issue_cats_result.all()
+        }
+
+        unknown_prs = await db.execute(
+            select(PullRequest.id, PullRequest.repo_id, PullRequest.closes_issue_numbers).where(
+                PullRequest.work_category == "unknown",
+                PullRequest.closes_issue_numbers.isnot(None),
+                or_(
+                    PullRequest.work_category_source != "manual",
+                    PullRequest.work_category_source.is_(None),
+                ),
+            )
+        )
+        for row in unknown_prs.all():
+            linked_numbers = row.closes_issue_numbers or []
+            linked_cats = [
+                issues_by_key[(row.repo_id, n)]
+                for n in linked_numbers
+                if (row.repo_id, n) in issues_by_key
+            ]
+            if linked_cats:
+                best_cat = Counter(linked_cats).most_common(1)[0][0]
+                await db.execute(
+                    update(PullRequest).where(PullRequest.id == row.id).values(
+                        work_category=best_cat,
+                        work_category_source="cross_ref",
+                    )
+                )
 
     await db.commit()
 

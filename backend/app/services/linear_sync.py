@@ -295,11 +295,31 @@ async def map_user(
 # --- Sync orchestration ---
 
 
-async def run_linear_sync(db: AsyncSession, integration_id: int, sync_event_id: int | None = None) -> SyncEvent:
+async def run_linear_sync(
+    db: AsyncSession,
+    integration_id: int,
+    sync_event_id: int | None = None,
+    triggered_by: str = "manual",
+) -> SyncEvent:
     """Full Linear sync orchestration. Creates a SyncEvent if sync_event_id not provided."""
     config = await db.get(IntegrationConfig, integration_id)
     if not config or config.status != "active" or not config.api_key:
         raise ValueError("Linear integration not active or missing API key")
+
+    # Concurrency guard: skip if another Linear sync is already running
+    active = (await db.execute(
+        select(SyncEvent.id).where(
+            SyncEvent.sync_type == "linear",
+            SyncEvent.status == "started",
+        ).limit(1)
+    )).scalar_one_or_none()
+    if active:
+        logger.info(
+            "Skipping Linear sync — another sync already in progress",
+            active_sync_id=active,
+            event_type="system.sync",
+        )
+        raise ValueError("Linear sync already in progress")
 
     api_key = decrypt_token(config.api_key)
 
@@ -311,7 +331,7 @@ async def run_linear_sync(db: AsyncSession, integration_id: int, sync_event_id: 
             sync_type="linear",
             status="started",
             started_at=datetime.now(timezone.utc),
-            triggered_by="manual",
+            triggered_by=triggered_by,
             sync_scope="Linear workspace sync",
         )
         db.add(sync_event)
@@ -339,11 +359,12 @@ async def run_linear_sync(db: AsyncSession, integration_id: int, sync_event_id: 
             since = config.last_synced_at
             counts["issues"] = await sync_linear_issues(client, db, integration_id, since=since)
 
-            # 4. Link PRs to external issues
-            counts["pr_links"] = await link_prs_to_external_issues(db, integration_id)
+            # 4. Link PRs to external issues (incremental after first sync)
+            counts["pr_links"] = await link_prs_to_external_issues(db, integration_id, since=since)
 
-            # 5. Auto-map developers
-            mapped, unmapped = await auto_map_developers(db, integration_id)
+            # 5. Fetch Linear users for accurate identity mapping, then auto-map
+            linear_users = await _fetch_linear_users(client)
+            mapped, unmapped = await auto_map_developers(db, integration_id, linear_users=linear_users)
             counts["mapped"] = mapped
 
         # Update integration
@@ -469,6 +490,7 @@ query($cursor: String) {
             progress
             scopeHistory
             completedScopeHistory
+            url
             team { id key name }
             issues { nodes { id } }
             uncompletedIssuesUponClose { nodes { id } }
@@ -523,23 +545,34 @@ async def sync_linear_cycles(client: LinearClient, db: AsyncSession, integration
             else:
                 sprint.state = "active"
 
+            sprint.url = c.get("url")
+
             # Scope metrics from history arrays
             scope_history = c.get("scopeHistory") or []
             completed_history = c.get("completedScopeHistory") or []
 
-            if scope_history:
-                sprint.planned_scope = scope_history[0] if scope_history else None
-                final_scope = scope_history[-1] if scope_history else 0
-                initial_scope = scope_history[0] if scope_history else 0
-                sprint.added_scope = max(0, final_scope - initial_scope) if initial_scope else None
-
             total_issues = len((c.get("issues") or {}).get("nodes", []))
             uncompleted = len((c.get("uncompletedIssuesUponClose") or {}).get("nodes", []))
 
-            if completed_history:
-                sprint.completed_scope = completed_history[-1]
+            if scope_history:
+                # Points-based scope from Linear history arrays
+                sprint.planned_scope = scope_history[0]
+                initial_scope = scope_history[0]
+                final_scope = scope_history[-1]
+                sprint.added_scope = max(0, final_scope - initial_scope) if initial_scope is not None else None
+                sprint.completed_scope = completed_history[-1] if completed_history else None
+                sprint.scope_unit = "points"
             elif c.get("completedAt"):
+                # Fallback to issue counts for closed cycles without scope history
+                sprint.planned_scope = total_issues
                 sprint.completed_scope = total_issues - uncompleted
+                sprint.added_scope = None
+                sprint.scope_unit = "issues"
+            else:
+                sprint.planned_scope = None
+                sprint.completed_scope = None
+                sprint.added_scope = None
+                sprint.scope_unit = None
             sprint.cancelled_scope = uncompleted if c.get("completedAt") else None
 
             count += 1
@@ -568,6 +601,7 @@ _ISSUES_FIELDS = """
             estimate
             labels { nodes { name } }
             assignee { id email displayName }
+            creator { id email displayName }
             project { id }
             cycle { id }
             parent { id }
@@ -597,10 +631,22 @@ query($cursor: String) {
 """
 
 
+def _classify_external_issue(issue: ExternalIssue, rules: list) -> tuple[str, str]:
+    """Classify an external issue using the same work category rules as GitHub issues."""
+    from app.services.work_categories import classify_work_item_with_rules
+
+    labels = issue.labels if isinstance(issue.labels, list) else []
+    return classify_work_item_with_rules(labels, issue.title, rules, issue_type=issue.issue_type)
+
+
 async def sync_linear_issues(
     client: LinearClient, db: AsyncSession, integration_id: int, since: datetime | None = None
 ) -> int:
     """Sync issues from Linear updated since the given timestamp. Returns count synced."""
+    # Load classification rules once for the entire sync
+    from app.services.work_categories import get_all_rules
+    classification_rules = await get_all_rules(db)
+
     count = 0
     cursor = None
     updated_after = since.isoformat() if since else None
@@ -657,6 +703,14 @@ async def sync_linear_issues(
                     db, assignee.get("email")
                 )
 
+            # Creator
+            creator = i.get("creator")
+            if creator:
+                issue.creator_email = creator.get("email")
+                issue.creator_developer_id = await _resolve_developer_by_email(
+                    db, creator.get("email")
+                )
+
             # Foreign keys to other synced entities
             project_data = i.get("project")
             if project_data:
@@ -683,7 +737,7 @@ async def sync_linear_issues(
             issue.url = i.get("url")
 
             # Compute durations
-            if issue.status_category not in ("triage",) and issue.created_at and issue.started_at:
+            if issue.status_category != "triage" and issue.created_at and issue.started_at:
                 issue.triage_duration_s = int(
                     (issue.started_at - issue.created_at).total_seconds()
                 )
@@ -691,6 +745,12 @@ async def sync_linear_issues(
                 issue.cycle_time_s = int(
                     (issue.completed_at - issue.started_at).total_seconds()
                 )
+
+            # Work categorization (same pipeline as GitHub issues)
+            if issue.work_category_source != "manual":
+                cat, source = _classify_external_issue(issue, classification_rules)
+                issue.work_category = cat
+                issue.work_category_source = source
 
             count += 1
 
@@ -711,8 +771,14 @@ async def sync_linear_issues(
 # --- PR ↔ External Issue linking ---
 
 
-async def link_prs_to_external_issues(db: AsyncSession, integration_id: int) -> int:
-    """Scan PR titles and branches for Linear issue keys, create links. Returns count created."""
+async def link_prs_to_external_issues(
+    db: AsyncSession, integration_id: int, since: datetime | None = None
+) -> int:
+    """Scan PR titles and branches for Linear issue keys, create links. Returns count created.
+
+    When ``since`` is provided, only PRs updated after that timestamp are scanned
+    (incremental linking). Pass ``None`` for a full scan on first sync.
+    """
     # Load all known identifiers
     result = await db.execute(
         select(ExternalIssue.id, ExternalIssue.identifier).where(
@@ -735,12 +801,15 @@ async def link_prs_to_external_issues(db: AsyncSession, integration_id: int) -> 
     offset = 0
 
     while True:
-        result = await db.execute(
+        pr_query = (
             select(PullRequest.id, PullRequest.title, PullRequest.head_branch, PullRequest.body)
             .order_by(PullRequest.id)
             .limit(batch_size)
             .offset(offset)
         )
+        if since is not None:
+            pr_query = pr_query.where(PullRequest.updated_at >= since)
+        result = await db.execute(pr_query)
         rows = result.all()
         if not rows:
             break
@@ -777,11 +846,58 @@ async def link_prs_to_external_issues(db: AsyncSession, integration_id: int) -> 
 # --- Developer auto-mapping ---
 
 
-async def auto_map_developers(db: AsyncSession, integration_id: int) -> tuple[int, int]:
+async def _fetch_linear_users(client: LinearClient) -> list[dict]:
+    """Fetch all workspace users from Linear. Returns list of {id, email, displayName}."""
+    data = await client.query("""
+        {
+            users {
+                nodes {
+                    id
+                    name
+                    displayName
+                    email
+                    active
+                }
+            }
+        }
+    """)
+    return data.get("users", {}).get("nodes", [])
+
+
+async def auto_map_developers(
+    db: AsyncSession,
+    integration_id: int,
+    linear_users: list[dict] | None = None,
+) -> tuple[int, int]:
     """Auto-map Linear users to DevPulse developers by email match.
+
+    When ``linear_users`` is provided, uses the list to resolve the correct
+    ``external_user_id`` for each mapping (fixing the empty-string bug).
 
     Returns (mapped_count, unmapped_count).
     """
+    # Build email → Linear user ID lookup from the users list
+    email_to_linear_id: dict[str, str] = {}
+    if linear_users:
+        for u in linear_users:
+            u_email = u.get("email")
+            if u_email:
+                email_to_linear_id[u_email.lower()] = u["id"]
+
+    # Forward-fix: backfill existing mappings with empty external_user_id
+    if email_to_linear_id:
+        result = await db.execute(
+            select(DeveloperIdentityMap).where(
+                DeveloperIdentityMap.integration_type == "linear",
+                DeveloperIdentityMap.external_user_id == "",
+                DeveloperIdentityMap.external_email.isnot(None),
+            )
+        )
+        for stale_mapping in result.scalars().all():
+            linear_id = email_to_linear_id.get((stale_mapping.external_email or "").lower())
+            if linear_id:
+                stale_mapping.external_user_id = linear_id
+
     # Get unique assignee emails from external issues
     result = await db.execute(
         select(ExternalIssue.assignee_email)
@@ -823,10 +939,11 @@ async def auto_map_developers(db: AsyncSession, integration_id: int) -> tuple[in
                 )
             )
             if not result2.scalar_one_or_none():
+                linear_id = email_to_linear_id.get(email.lower(), "")
                 mapping = DeveloperIdentityMap(
                     developer_id=dev.id,
                     integration_type="linear",
-                    external_user_id="",  # Will be populated on next user list fetch
+                    external_user_id=linear_id,
                     external_email=email,
                     mapped_by="auto",
                 )

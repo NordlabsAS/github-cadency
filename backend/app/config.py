@@ -1,8 +1,20 @@
 import logging
+from pathlib import Path
 
 from pydantic_settings import BaseSettings
 
 logger = logging.getLogger(__name__)
+
+
+def _read_version() -> str:
+    """Read semver from VERSION file at repo root."""
+    for candidate in (
+        Path(__file__).resolve().parent.parent.parent / "VERSION",  # backend/app/../../VERSION
+        Path(__file__).resolve().parent.parent / "VERSION",
+    ):
+        if candidate.is_file():
+            return candidate.read_text().strip()
+    return "dev"
 
 
 class Settings(BaseSettings):
@@ -53,6 +65,19 @@ class Settings(BaseSettings):
     deploy_environment: str = "production"
     hotfix_labels: str = "hotfix,urgent,incident"
     hotfix_branch_prefixes: str = "hotfix/"
+
+    # Sentinel error reporting
+    sentinel_url: str = ""
+    sentinel_secret: str = ""
+
+    # App version (read from VERSION file, overridable via env)
+    app_version: str = _read_version()
+
+    # Version metadata (injected as Docker build args in production)
+    devpulse_version: str = _read_version()
+    devpulse_build_number: str = "0"
+    devpulse_commit_sha: str = "unknown"
+    devpulse_deploy_time: str = "unknown"
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

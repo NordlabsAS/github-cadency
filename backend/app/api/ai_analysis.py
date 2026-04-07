@@ -29,7 +29,6 @@ from app.services.ai_schedules import (
     run_scheduled_analysis,
     update_schedule,
 )
-from app.services.exceptions import AIBudgetExceededError, AIFeatureDisabledError
 from app.services.ai_settings import (
     build_settings_response,
     estimate_analysis_cost,
@@ -99,21 +98,16 @@ async def trigger_analysis(
     force: bool = Query(False),
     db: AsyncSession = Depends(get_db),
 ):
-    try:
-        result = await run_analysis(
-            db=db,
-            analysis_type=request.analysis_type.value,
-            scope_type=request.scope_type.value,
-            scope_id=request.scope_id,
-            date_from=request.date_from,
-            date_to=request.date_to,
-            force=force,
-            repo_ids=request.repo_ids,
-        )
-    except AIFeatureDisabledError as e:
-        raise HTTPException(status_code=403, detail=e.detail)
-    except AIBudgetExceededError as e:
-        raise HTTPException(status_code=429, detail=e.detail)
+    result = await run_analysis(
+        db=db,
+        analysis_type=request.analysis_type.value,
+        scope_type=request.scope_type.value,
+        scope_id=request.scope_id,
+        date_from=request.date_from,
+        date_to=request.date_to,
+        force=force,
+        repo_ids=request.repo_ids,
+    )
     # Compute reused flag for response
     resp = AIAnalysisResponse.model_validate(result)
     resp.reused = result.reused_from_id is not None
@@ -168,19 +162,14 @@ async def one_on_one_prep(
     dev = await db.get(Developer, request.developer_id)
     if not dev:
         raise HTTPException(status_code=404, detail="Developer not found")
-    try:
-        result = await run_one_on_one_prep(
-            db=db,
-            developer_id=request.developer_id,
-            date_from=request.date_from,
-            date_to=request.date_to,
-            force=force,
-            repo_ids=request.repo_ids,
-        )
-    except AIFeatureDisabledError as e:
-        raise HTTPException(status_code=403, detail=e.detail)
-    except AIBudgetExceededError as e:
-        raise HTTPException(status_code=429, detail=e.detail)
+    result = await run_one_on_one_prep(
+        db=db,
+        developer_id=request.developer_id,
+        date_from=request.date_from,
+        date_to=request.date_to,
+        force=force,
+        repo_ids=request.repo_ids,
+    )
     resp = AIAnalysisResponse.model_validate(result)
     resp.reused = result.reused_from_id is not None
     return resp
@@ -196,19 +185,14 @@ async def team_health(
     force: bool = Query(False),
     db: AsyncSession = Depends(get_db),
 ):
-    try:
-        result = await run_team_health(
-            db=db,
-            team=request.team,
-            date_from=request.date_from,
-            date_to=request.date_to,
-            force=force,
-            repo_ids=request.repo_ids,
-        )
-    except AIFeatureDisabledError as e:
-        raise HTTPException(status_code=403, detail=e.detail)
-    except AIBudgetExceededError as e:
-        raise HTTPException(status_code=429, detail=e.detail)
+    result = await run_team_health(
+        db=db,
+        team=request.team,
+        date_from=request.date_from,
+        date_to=request.date_to,
+        force=force,
+        repo_ids=request.repo_ids,
+    )
     resp = AIAnalysisResponse.model_validate(result)
     resp.reused = result.reused_from_id is not None
     return resp
@@ -304,12 +288,7 @@ async def run_ai_schedule(
 ):
     """Manually trigger an AI analysis schedule."""
     schedule = await get_schedule(db, schedule_id)
-    try:
-        result = await run_scheduled_analysis(db, schedule)
-    except AIFeatureDisabledError as e:
-        raise HTTPException(status_code=403, detail=e.detail)
-    except AIBudgetExceededError as e:
-        raise HTTPException(status_code=429, detail=e.detail)
+    result = await run_scheduled_analysis(db, schedule)
     resp = AIAnalysisResponse.model_validate(result)
     resp.reused = result.reused_from_id is not None
     return resp

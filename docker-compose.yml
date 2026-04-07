@@ -22,7 +22,13 @@ services:
         max-file: "3"
 
   backend:
-    build: ./backend
+    build:
+      context: ./backend
+      args:
+        DEVPULSE_VERSION: ${DEVPULSE_VERSION:-0.0.0}
+        DEVPULSE_BUILD_NUMBER: ${DEVPULSE_BUILD_NUMBER:-0}
+        DEVPULSE_COMMIT_SHA: ${DEVPULSE_COMMIT_SHA:-unknown}
+        DEVPULSE_DEPLOY_TIME: ${DEVPULSE_DEPLOY_TIME:-unknown}
     restart: unless-stopped
     ports:
       - "8000:8000"
@@ -44,7 +50,13 @@ services:
         max-file: "3"
 
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      args:
+        DEVPULSE_VERSION: ${DEVPULSE_VERSION:-0.0.0}
+        DEVPULSE_BUILD_NUMBER: ${DEVPULSE_BUILD_NUMBER:-0}
+        DEVPULSE_COMMIT_SHA: ${DEVPULSE_COMMIT_SHA:-unknown}
+        DEVPULSE_DEPLOY_TIME: ${DEVPULSE_DEPLOY_TIME:-unknown}
     restart: unless-stopped
     ports:
       - "3001:5173"

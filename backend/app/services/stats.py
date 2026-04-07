@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import and_, case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.models import BenchmarkGroupConfig, Deployment, Developer, Issue, IssueComment, PRCheckRun, PRFile, PRReview, PRReviewComment, PullRequest, RepoTreeFile, Repository
+from app.models.models import BenchmarkGroupConfig, Deployment, Developer, ExternalIssue, Issue, IssueComment, PRCheckRun, PRExternalIssueLink, PRFile, PRReview, PRReviewComment, PullRequest, RepoTreeFile, Repository
 from app.schemas.schemas import (
     BenchmarkGroupResponse,
     BenchmarkGroupUpdate,
@@ -48,6 +48,7 @@ from app.schemas.schemas import (
 )
 
 
+from app.services.linear_sync import get_primary_issue_source
 from app.services.utils import default_range as _default_range
 
 
@@ -284,33 +285,55 @@ async def get_developer_stats(
         )
     ) or 0
 
-    # Issues assigned
-    issues_assigned = await db.scalar(
-        select(func.count()).where(
-            Issue.assignee_id == developer_id,
-            Issue.created_at >= date_from,
-            Issue.created_at <= date_to,
+    # Issues assigned / closed / avg time to close — branch on primary issue source
+    issue_source = await get_primary_issue_source(db)
+    if issue_source == "linear":
+        issues_assigned = await db.scalar(
+            select(func.count()).where(
+                ExternalIssue.assignee_developer_id == developer_id,
+                ExternalIssue.created_at >= date_from,
+                ExternalIssue.created_at <= date_to,
+            )
+        ) or 0
+        issues_closed = await db.scalar(
+            select(func.count()).where(
+                ExternalIssue.assignee_developer_id == developer_id,
+                ExternalIssue.status_category == "done",
+                ExternalIssue.completed_at >= date_from,
+                ExternalIssue.completed_at <= date_to,
+            )
+        ) or 0
+        avg_ttc = await db.scalar(
+            select(func.avg(ExternalIssue.cycle_time_s)).where(
+                ExternalIssue.assignee_developer_id == developer_id,
+                ExternalIssue.cycle_time_s.isnot(None),
+                ExternalIssue.completed_at >= date_from,
+                ExternalIssue.completed_at <= date_to,
+            )
         )
-    ) or 0
-
-    # Issues closed
-    issues_closed = await db.scalar(
-        select(func.count()).where(
-            Issue.assignee_id == developer_id,
-            Issue.closed_at >= date_from,
-            Issue.closed_at <= date_to,
+    else:
+        issues_assigned = await db.scalar(
+            select(func.count()).where(
+                Issue.assignee_id == developer_id,
+                Issue.created_at >= date_from,
+                Issue.created_at <= date_to,
+            )
+        ) or 0
+        issues_closed = await db.scalar(
+            select(func.count()).where(
+                Issue.assignee_id == developer_id,
+                Issue.closed_at >= date_from,
+                Issue.closed_at <= date_to,
+            )
+        ) or 0
+        avg_ttc = await db.scalar(
+            select(func.avg(Issue.time_to_close_s)).where(
+                Issue.assignee_id == developer_id,
+                Issue.time_to_close_s.isnot(None),
+                Issue.closed_at >= date_from,
+                Issue.closed_at <= date_to,
+            )
         )
-    ) or 0
-
-    # Avg time to close issue
-    avg_ttc = await db.scalar(
-        select(func.avg(Issue.time_to_close_s)).where(
-            Issue.assignee_id == developer_id,
-            Issue.time_to_close_s.isnot(None),
-            Issue.closed_at >= date_from,
-            Issue.closed_at <= date_to,
-        )
-    )
 
     # Avg review rounds (on merged PRs in period)
     avg_review_rounds = await db.scalar(
@@ -461,13 +484,22 @@ async def get_activity_summary(
         select(func.count()).where(PRReview.reviewer_id == developer_id)
     ) or 0
 
-    # Issues created / assigned
-    issues_created = await db.scalar(
-        select(func.count()).where(Issue.creator_id == developer_id)
-    ) or 0
-    issues_assigned = await db.scalar(
-        select(func.count()).where(Issue.assignee_id == developer_id)
-    ) or 0
+    # Issues created / assigned — branch on primary issue source
+    issue_source = await get_primary_issue_source(db)
+    if issue_source == "linear":
+        issues_created = await db.scalar(
+            select(func.count()).where(ExternalIssue.creator_developer_id == developer_id)
+        ) or 0
+        issues_assigned = await db.scalar(
+            select(func.count()).where(ExternalIssue.assignee_developer_id == developer_id)
+        ) or 0
+    else:
+        issues_created = await db.scalar(
+            select(func.count()).where(Issue.creator_id == developer_id)
+        ) or 0
+        issues_assigned = await db.scalar(
+            select(func.count()).where(Issue.assignee_id == developer_id)
+        ) or 0
 
     # Repos touched (authored PRs + reviewed PRs)
     pr_repos = select(PullRequest.repo_id).where(
@@ -614,14 +646,25 @@ async def get_team_stats(
         )
     ) or 0
 
-    # Total issues closed
-    total_issues_closed = await db.scalar(
-        select(func.count()).where(
-            Issue.assignee_id.in_(dev_ids),
-            Issue.closed_at >= date_from,
-            Issue.closed_at <= date_to,
-        )
-    ) or 0
+    # Total issues closed — branch on primary issue source
+    issue_source = await get_primary_issue_source(db)
+    if issue_source == "linear":
+        total_issues_closed = await db.scalar(
+            select(func.count()).where(
+                ExternalIssue.assignee_developer_id.in_(dev_ids),
+                ExternalIssue.status_category == "done",
+                ExternalIssue.completed_at >= date_from,
+                ExternalIssue.completed_at <= date_to,
+            )
+        ) or 0
+    else:
+        total_issues_closed = await db.scalar(
+            select(func.count()).where(
+                Issue.assignee_id.in_(dev_ids),
+                Issue.closed_at >= date_from,
+                Issue.closed_at <= date_to,
+            )
+        ) or 0
 
     # Avg review rounds (team-wide, on merged PRs)
     team_avg_review_rounds = await db.scalar(
@@ -696,21 +739,43 @@ async def get_repo_stats(
         )
     ) or 0
 
-    total_issues = await db.scalar(
-        select(func.count()).where(
-            Issue.repo_id == repo_id,
-            Issue.created_at >= date_from,
-            Issue.created_at <= date_to,
-        )
-    ) or 0
-
-    total_issues_closed = await db.scalar(
-        select(func.count()).where(
-            Issue.repo_id == repo_id,
-            Issue.closed_at >= date_from,
-            Issue.closed_at <= date_to,
-        )
-    ) or 0
+    # Issues — branch on primary source. External issues have no repo_id,
+    # so count linked issues via pr_external_issue_links for this repo's PRs.
+    issue_source = await get_primary_issue_source(db)
+    if issue_source == "linear":
+        total_issues = await db.scalar(
+            select(func.count(func.distinct(PRExternalIssueLink.external_issue_id)))
+            .join(PullRequest, PRExternalIssueLink.pull_request_id == PullRequest.id)
+            .where(
+                PullRequest.repo_id == repo_id,
+                PullRequest.created_at >= date_from,
+                PullRequest.created_at <= date_to,
+            )
+        ) or 0
+        total_issues_closed = await db.scalar(
+            select(func.count(func.distinct(PRExternalIssueLink.external_issue_id)))
+            .join(PullRequest, PRExternalIssueLink.pull_request_id == PullRequest.id)
+            .join(ExternalIssue, PRExternalIssueLink.external_issue_id == ExternalIssue.id)
+            .where(
+                PullRequest.repo_id == repo_id,
+                ExternalIssue.status_category == "done",
+            )
+        ) or 0
+    else:
+        total_issues = await db.scalar(
+            select(func.count()).where(
+                Issue.repo_id == repo_id,
+                Issue.created_at >= date_from,
+                Issue.created_at <= date_to,
+            )
+        ) or 0
+        total_issues_closed = await db.scalar(
+            select(func.count()).where(
+                Issue.repo_id == repo_id,
+                Issue.closed_at >= date_from,
+                Issue.closed_at <= date_to,
+            )
+        ) or 0
 
     total_reviews = await db.scalar(
         select(func.count())
@@ -836,21 +901,40 @@ async def get_repos_summary(
     ).all()
     merged_map = {r.repo_id: r for r in merged_rows}
 
-    # 3. Issue counts (current)
-    issue_rows = (
-        await db.execute(
-            select(
-                Issue.repo_id,
-                func.count().label("total_issues"),
+    # 3. Issue counts (current) — branch on primary issue source
+    issue_source = await get_primary_issue_source(db)
+    if issue_source == "linear":
+        # Count linked external issues per repo via pr_external_issue_links
+        issue_rows = (
+            await db.execute(
+                select(
+                    PullRequest.repo_id,
+                    func.count(func.distinct(PRExternalIssueLink.external_issue_id)).label("total_issues"),
+                )
+                .join(PRExternalIssueLink, PRExternalIssueLink.pull_request_id == PullRequest.id)
+                .where(
+                    PullRequest.repo_id.in_(repo_id_set),
+                    PullRequest.created_at >= date_from,
+                    PullRequest.created_at <= date_to,
+                )
+                .group_by(PullRequest.repo_id)
             )
-            .where(
-                Issue.repo_id.in_(repo_id_set),
-                Issue.created_at >= date_from,
-                Issue.created_at <= date_to,
+        ).all()
+    else:
+        issue_rows = (
+            await db.execute(
+                select(
+                    Issue.repo_id,
+                    func.count().label("total_issues"),
+                )
+                .where(
+                    Issue.repo_id.in_(repo_id_set),
+                    Issue.created_at >= date_from,
+                    Issue.created_at <= date_to,
+                )
+                .group_by(Issue.repo_id)
             )
-            .group_by(Issue.repo_id)
-        )
-    ).all()
+        ).all()
     issue_map = {r.repo_id: r for r in issue_rows}
 
     # 4. Review counts (current)
@@ -1159,22 +1243,37 @@ async def _compute_per_developer_metrics(
             bc = blocker_count_map.get(dev_id, 0)
             blocker_map[dev_id] = round(bc / total, 4) if total > 0 else 0.0
 
-    # Batch 8: Issues closed per assignee
+    # Batch 8: Issues closed per assignee — branch on primary issue source
     need_issues = "issues_closed" in target
     issues_map: dict[int, int] = {}
     if need_issues:
-        issue_rows = (await db.execute(
-            select(
-                Issue.assignee_id,
-                func.count().label("closed"),
-            ).where(
-                Issue.assignee_id.in_(dev_ids),
-                Issue.state == "closed",
-                Issue.closed_at >= date_from,
-                Issue.closed_at <= date_to,
-            ).group_by(Issue.assignee_id)
-        )).all()
-        issues_map = {row.assignee_id: row.closed for row in issue_rows}
+        issue_source = await get_primary_issue_source(db)
+        if issue_source == "linear":
+            issue_rows = (await db.execute(
+                select(
+                    ExternalIssue.assignee_developer_id,
+                    func.count().label("closed"),
+                ).where(
+                    ExternalIssue.assignee_developer_id.in_(dev_ids),
+                    ExternalIssue.status_category == "done",
+                    ExternalIssue.completed_at >= date_from,
+                    ExternalIssue.completed_at <= date_to,
+                ).group_by(ExternalIssue.assignee_developer_id)
+            )).all()
+            issues_map = {row.assignee_developer_id: row.closed for row in issue_rows}
+        else:
+            issue_rows = (await db.execute(
+                select(
+                    Issue.assignee_id,
+                    func.count().label("closed"),
+                ).where(
+                    Issue.assignee_id.in_(dev_ids),
+                    Issue.state == "closed",
+                    Issue.closed_at >= date_from,
+                    Issue.closed_at <= date_to,
+                ).group_by(Issue.assignee_id)
+            )).all()
+            issues_map = {row.assignee_id: row.closed for row in issue_rows}
 
     # Batch 9: Bugfix PRs merged per author
     need_bugfix = "prs_merged_bugfix" in target
@@ -1194,11 +1293,12 @@ async def _compute_per_developer_metrics(
         )).all()
         bugfix_map = {row.author_id: row.bugfix_count for row in bugfix_rows}
 
-    # Batch 10: Issue linkage rate per author
+    # Batch 10: Issue linkage rate per author — branch on primary issue source
     need_linkage = "issue_linkage_rate" in target
     linkage_rate_map: dict[int, float] = {}
     if need_linkage:
-        # Total PRs per author
+        issue_source_b10 = await get_primary_issue_source(db)
+        # Total PRs per author (same for both sources)
         total_pr_rows = (await db.execute(
             select(
                 PullRequest.author_id,
@@ -1210,22 +1310,40 @@ async def _compute_per_developer_metrics(
             ).group_by(PullRequest.author_id)
         )).all()
         total_pr_map = {row.author_id: row.total for row in total_pr_rows}
-        # PRs with linked issues per author (fetch + Python filter for SQLite compat)
-        linkage_raw = (await db.execute(
-            select(
-                PullRequest.author_id,
-                PullRequest.closes_issue_numbers,
-            ).where(
-                PullRequest.author_id.in_(dev_ids),
-                PullRequest.created_at >= date_from,
-                PullRequest.created_at <= date_to,
-                PullRequest.closes_issue_numbers.isnot(None),
-            )
-        )).all()
-        linked_pr_map: dict[int, int] = {}
-        for row in linkage_raw:
-            if row.closes_issue_numbers:
-                linked_pr_map[row.author_id] = linked_pr_map.get(row.author_id, 0) + 1
+
+        if issue_source_b10 == "linear":
+            # PRs with linked external issues via pr_external_issue_links
+            linked_rows = (await db.execute(
+                select(
+                    PullRequest.author_id,
+                    func.count(func.distinct(PRExternalIssueLink.pull_request_id)).label("linked"),
+                )
+                .join(PRExternalIssueLink, PRExternalIssueLink.pull_request_id == PullRequest.id)
+                .where(
+                    PullRequest.author_id.in_(dev_ids),
+                    PullRequest.created_at >= date_from,
+                    PullRequest.created_at <= date_to,
+                )
+                .group_by(PullRequest.author_id)
+            )).all()
+            linked_pr_map = {row.author_id: row.linked for row in linked_rows}
+        else:
+            # PRs with linked issues per author (fetch + Python filter for SQLite compat)
+            linkage_raw = (await db.execute(
+                select(
+                    PullRequest.author_id,
+                    PullRequest.closes_issue_numbers,
+                ).where(
+                    PullRequest.author_id.in_(dev_ids),
+                    PullRequest.created_at >= date_from,
+                    PullRequest.created_at <= date_to,
+                    PullRequest.closes_issue_numbers.isnot(None),
+                )
+            )).all()
+            linked_pr_map: dict[int, int] = {}
+            for row in linkage_raw:
+                if row.closes_issue_numbers:
+                    linked_pr_map[row.author_id] = linked_pr_map.get(row.author_id, 0) + 1
         for dev_id in dev_ids:
             total = total_pr_map.get(dev_id, 0)
             linked = linked_pr_map.get(dev_id, 0)
@@ -1683,6 +1801,7 @@ async def get_developer_trends(
 
     now = datetime.now(timezone.utc)
     period_list: list[TrendPeriod] = []
+    issue_source_trend = await get_primary_issue_source(db)
 
     for i in range(periods - 1, -1, -1):
         end = now - timedelta(days=i * period_days)
@@ -1728,13 +1847,23 @@ async def get_developer_trends(
             )
         ).one()
 
-        issues_closed = await db.scalar(
-            select(func.count()).where(
-                Issue.assignee_id == developer_id,
-                Issue.closed_at >= start,
-                Issue.closed_at < end,
-            )
-        ) or 0
+        if issue_source_trend == "linear":
+            issues_closed = await db.scalar(
+                select(func.count()).where(
+                    ExternalIssue.assignee_developer_id == developer_id,
+                    ExternalIssue.status_category == "done",
+                    ExternalIssue.completed_at >= start,
+                    ExternalIssue.completed_at < end,
+                )
+            ) or 0
+        else:
+            issues_closed = await db.scalar(
+                select(func.count()).where(
+                    Issue.assignee_id == developer_id,
+                    Issue.closed_at >= start,
+                    Issue.closed_at < end,
+                )
+            ) or 0
 
         period_list.append(
             TrendPeriod(
@@ -1797,6 +1926,7 @@ async def get_workload(
     workloads: list[DeveloperWorkload] = []
     reviews_given_values: list[tuple[int, int]] = []  # (dev_id, count)
     open_issues_per_dev: list[tuple[int, int]] = []  # (dev_id, count)
+    issue_source_wl = await get_primary_issue_source(db)
 
     for dev in developers:
         # Open PRs authored (exclude drafts)
@@ -1828,13 +1958,21 @@ async def get_workload(
             )
         ) or 0
 
-        # Open issues assigned
-        open_issues = await db.scalar(
-            select(func.count()).where(
-                Issue.assignee_id == dev.id,
-                Issue.state == "open",
-            )
-        ) or 0
+        # Open issues assigned — branch on primary issue source
+        if issue_source_wl == "linear":
+            open_issues = await db.scalar(
+                select(func.count()).where(
+                    ExternalIssue.assignee_developer_id == dev.id,
+                    ExternalIssue.status_category.in_(["todo", "in_progress"]),
+                )
+            ) or 0
+        else:
+            open_issues = await db.scalar(
+                select(func.count()).where(
+                    Issue.assignee_id == dev.id,
+                    Issue.state == "open",
+                )
+            ) or 0
         open_issues_per_dev.append((dev.id, open_issues))
 
         # Reviews given this period
@@ -2281,7 +2419,12 @@ async def get_issue_linkage_stats(
                 prs_without_linked_issues=0,
             )
 
-    # Get all PRs in date range that have closing keywords
+    issue_source = await get_primary_issue_source(db)
+
+    if issue_source == "linear":
+        return await _get_issue_linkage_stats_linear(db, team_dev_ids, date_from, date_to)
+
+    # --- GitHub path (default) ---
     pr_filters = [
         PullRequest.created_at >= date_from,
         PullRequest.created_at <= date_to,
@@ -2295,10 +2438,8 @@ async def get_issue_linkage_stats(
     )
     pr_rows = pr_result.all()
 
-    # Build map: (repo_id, issue_number) → count of PRs referencing it
     issue_ref_counts: dict[tuple[int, int], int] = {}
     prs_with_refs = 0
-    prs_without_refs = 0
 
     for repo_id, issue_nums in pr_rows:
         if issue_nums:
@@ -2306,10 +2447,7 @@ async def get_issue_linkage_stats(
             for num in issue_nums:
                 key = (repo_id, num)
                 issue_ref_counts[key] = issue_ref_counts.get(key, 0) + 1
-        else:
-            prs_without_refs += 1
 
-    # Also count PRs with no closing keywords at all
     all_pr_filters = [
         PullRequest.created_at >= date_from,
         PullRequest.created_at <= date_to,
@@ -2322,7 +2460,6 @@ async def get_issue_linkage_stats(
     ) or 0
     prs_without_linked_issues = total_prs - prs_with_refs
 
-    # Get all closed issues in date range
     issue_filters = [
         Issue.state == "closed",
         Issue.closed_at >= date_from,
@@ -2336,7 +2473,6 @@ async def get_issue_linkage_stats(
     )
     closed_issues = issue_result.all()
 
-    # Cross-reference closed issues with PR linkage
     issues_with_linked_prs = 0
     issues_without_linked_prs = 0
     issues_with_multiple_prs = 0
@@ -2352,6 +2488,84 @@ async def get_issue_linkage_stats(
                 issues_with_multiple_prs += 1
         else:
             issues_without_linked_prs += 1
+
+    avg_prs_per_issue = (
+        round(sum(pr_counts_per_issue) / len(pr_counts_per_issue), 2)
+        if pr_counts_per_issue
+        else None
+    )
+
+    return IssueLinkageStats(
+        issues_with_linked_prs=issues_with_linked_prs,
+        issues_without_linked_prs=issues_without_linked_prs,
+        avg_prs_per_issue=avg_prs_per_issue,
+        issues_with_multiple_prs=issues_with_multiple_prs,
+        prs_without_linked_issues=prs_without_linked_issues,
+    )
+
+
+async def _get_issue_linkage_stats_linear(
+    db: AsyncSession,
+    team_dev_ids: list[int] | None,
+    date_from: datetime,
+    date_to: datetime,
+) -> IssueLinkageStats:
+    """Issue linkage stats using pr_external_issue_links for external issue trackers."""
+    # Total PRs in period
+    pr_filters = [PullRequest.created_at >= date_from, PullRequest.created_at <= date_to]
+    if team_dev_ids is not None:
+        pr_filters.append(PullRequest.author_id.in_(team_dev_ids))
+
+    total_prs = await db.scalar(select(func.count()).where(*pr_filters)) or 0
+
+    # PRs with at least one external issue link
+    linked_pr_filters = list(pr_filters)
+    prs_with_links = await db.scalar(
+        select(func.count(func.distinct(PRExternalIssueLink.pull_request_id)))
+        .join(PullRequest, PRExternalIssueLink.pull_request_id == PullRequest.id)
+        .where(*linked_pr_filters)
+    ) or 0
+    prs_without_linked_issues = total_prs - prs_with_links
+
+    # Completed external issues in period
+    issue_filters = [
+        ExternalIssue.status_category == "done",
+        ExternalIssue.completed_at >= date_from,
+        ExternalIssue.completed_at <= date_to,
+    ]
+    if team_dev_ids is not None:
+        issue_filters.append(ExternalIssue.assignee_developer_id.in_(team_dev_ids))
+
+    # For each completed issue, count how many PRs link to it
+    issue_result = await db.execute(
+        select(ExternalIssue.id).where(*issue_filters)
+    )
+    completed_issue_ids = [row[0] for row in issue_result.all()]
+
+    issues_with_linked_prs = 0
+    issues_without_linked_prs = 0
+    issues_with_multiple_prs = 0
+    pr_counts_per_issue: list[int] = []
+
+    if completed_issue_ids:
+        # Count PRs per external issue
+        link_counts = (await db.execute(
+            select(
+                PRExternalIssueLink.external_issue_id,
+                func.count(PRExternalIssueLink.pull_request_id).label("pr_count"),
+            )
+            .where(PRExternalIssueLink.external_issue_id.in_(completed_issue_ids))
+            .group_by(PRExternalIssueLink.external_issue_id)
+        )).all()
+        linked_issue_ids = {row.external_issue_id for row in link_counts}
+
+        for row in link_counts:
+            issues_with_linked_prs += 1
+            pr_counts_per_issue.append(row.pr_count)
+            if row.pr_count >= 2:
+                issues_with_multiple_prs += 1
+
+        issues_without_linked_prs = len(completed_issue_ids) - len(linked_issue_ids)
 
     avg_prs_per_issue = (
         round(sum(pr_counts_per_issue) / len(pr_counts_per_issue), 2)
@@ -2407,22 +2621,40 @@ async def get_issue_linkage_by_developer(
     )).all()
     total_map = {row.author_id: row.total for row in total_rows}
 
-    # PRs with linked issues per author (fetch + Python filter for SQLite compat)
-    linkage_raw = (await db.execute(
-        select(
-            PullRequest.author_id,
-            PullRequest.closes_issue_numbers,
-        ).where(
-            PullRequest.author_id.in_(dev_ids),
-            PullRequest.created_at >= date_from,
-            PullRequest.created_at <= date_to,
-            PullRequest.closes_issue_numbers.isnot(None),
-        )
-    )).all()
-    linked_map: dict[int, int] = {}
-    for row in linkage_raw:
-        if row.closes_issue_numbers:
-            linked_map[row.author_id] = linked_map.get(row.author_id, 0) + 1
+    # PRs with linked issues per author — branch on primary issue source
+    issue_source = await get_primary_issue_source(db)
+    if issue_source == "linear":
+        # Count PRs that have at least one external issue link
+        linked_rows = (await db.execute(
+            select(
+                PullRequest.author_id,
+                func.count(func.distinct(PRExternalIssueLink.pull_request_id)).label("linked"),
+            )
+            .join(PRExternalIssueLink, PRExternalIssueLink.pull_request_id == PullRequest.id)
+            .where(
+                PullRequest.author_id.in_(dev_ids),
+                PullRequest.created_at >= date_from,
+                PullRequest.created_at <= date_to,
+            )
+            .group_by(PullRequest.author_id)
+        )).all()
+        linked_map = {row.author_id: row.linked for row in linked_rows}
+    else:
+        linkage_raw = (await db.execute(
+            select(
+                PullRequest.author_id,
+                PullRequest.closes_issue_numbers,
+            ).where(
+                PullRequest.author_id.in_(dev_ids),
+                PullRequest.created_at >= date_from,
+                PullRequest.created_at <= date_to,
+                PullRequest.closes_issue_numbers.isnot(None),
+            )
+        )).all()
+        linked_map: dict[int, int] = {}
+        for row in linkage_raw:
+            if row.closes_issue_numbers:
+                linked_map[row.author_id] = linked_map.get(row.author_id, 0) + 1
 
     # Build per-developer rows (only devs with at least 1 PR)
     rows: list[DeveloperLinkageRow] = []
@@ -2588,21 +2820,39 @@ async def get_issue_label_distribution(
 ) -> dict[str, int]:
     date_from, date_to = _default_range(date_from, date_to)
 
-    filters = [Issue.created_at >= date_from, Issue.created_at <= date_to]
-    if team:
-        dev_result = await db.execute(
-            select(Developer.id).where(
-                Developer.is_active.is_(True), Developer.team == team
-            )
-        )
-        team_dev_ids = [row[0] for row in dev_result.all()]
-        if not team_dev_ids:
-            return {}
-        filters.append(Issue.assignee_id.in_(team_dev_ids))
+    issue_source = await get_primary_issue_source(db)
 
-    result = await db.execute(
-        select(Issue.labels).where(*filters, Issue.labels.isnot(None))
-    )
+    if issue_source == "linear":
+        filters = [ExternalIssue.created_at >= date_from, ExternalIssue.created_at <= date_to]
+        if team:
+            dev_result = await db.execute(
+                select(Developer.id).where(
+                    Developer.is_active.is_(True), Developer.team == team
+                )
+            )
+            team_dev_ids = [row[0] for row in dev_result.all()]
+            if not team_dev_ids:
+                return {}
+            filters.append(ExternalIssue.assignee_developer_id.in_(team_dev_ids))
+        result = await db.execute(
+            select(ExternalIssue.labels).where(*filters, ExternalIssue.labels.isnot(None))
+        )
+    else:
+        filters = [Issue.created_at >= date_from, Issue.created_at <= date_to]
+        if team:
+            dev_result = await db.execute(
+                select(Developer.id).where(
+                    Developer.is_active.is_(True), Developer.team == team
+                )
+            )
+            team_dev_ids = [row[0] for row in dev_result.all()]
+            if not team_dev_ids:
+                return {}
+            filters.append(Issue.assignee_id.in_(team_dev_ids))
+        result = await db.execute(
+            select(Issue.labels).where(*filters, Issue.labels.isnot(None))
+        )
+
     distribution: dict[str, int] = {}
     for (labels,) in result.all():
         if isinstance(labels, list):
@@ -2620,6 +2870,10 @@ async def get_issue_creator_stats(
     date_to: datetime | None = None,
 ) -> IssueCreatorStatsResponse:
     date_from, date_to = _default_range(date_from, date_to)
+
+    issue_source = await get_primary_issue_source(db)
+    if issue_source == "linear":
+        return await _get_issue_creator_stats_linear(db, team, date_from, date_to)
 
     # Build a lookup of registered developers by github_username
     dev_result = await db.execute(
@@ -2748,6 +3002,173 @@ async def get_issue_creator_stats(
     creators.sort(key=lambda c: c.issues_created, reverse=True)
 
     # Compute team averages
+    team_averages = _compute_team_averages(creators)
+
+    return IssueCreatorStatsResponse(
+        creators=creators,
+        team_averages=team_averages,
+    )
+
+
+async def _get_issue_creator_stats_linear(
+    db: AsyncSession,
+    team: str | None,
+    date_from: datetime,
+    date_to: datetime,
+) -> IssueCreatorStatsResponse:
+    """Issue creator stats when Linear is the primary issue source.
+
+    Uses developer_id-based grouping and ExternalIssue columns.
+    PR linkage via pr_external_issue_links instead of closes_issue_numbers.
+    """
+    # Build developer lookup by id
+    dev_q = select(
+        Developer.id,
+        Developer.github_username,
+        Developer.display_name,
+        Developer.team,
+        Developer.role,
+    ).where(Developer.is_active.is_(True))
+    if team:
+        dev_q = dev_q.where(Developer.team == team)
+    dev_result = await db.execute(dev_q)
+    dev_rows = dev_result.all()
+
+    if team and not dev_rows:
+        empty_avg = _empty_creator_stats("__team_average__")
+        return IssueCreatorStatsResponse(creators=[], team_averages=empty_avg)
+
+    dev_lookup_by_id: dict[int, tuple[str, str | None, str | None, str | None]] = {}
+    dev_ids: set[int] | None = None
+    for row in dev_rows:
+        dev_lookup_by_id[row[0]] = (row[1], row[2], row[3], row[4])
+        if team:
+            if dev_ids is None:
+                dev_ids = set()
+            dev_ids.add(row[0])
+
+    # Fetch external issues in date range
+    filters = [
+        ExternalIssue.created_at >= date_from,
+        ExternalIssue.created_at <= date_to,
+        ExternalIssue.creator_developer_id.isnot(None),
+    ]
+    if dev_ids is not None:
+        filters.append(ExternalIssue.creator_developer_id.in_(dev_ids))
+
+    issue_result = await db.execute(
+        select(
+            ExternalIssue.id,
+            ExternalIssue.creator_developer_id,
+            ExternalIssue.cycle_time_s,
+            ExternalIssue.description_length,
+            ExternalIssue.status_category,
+            ExternalIssue.created_at,
+            ExternalIssue.completed_at,
+        ).where(*filters)
+    )
+    all_issues = issue_result.all()
+
+    if not all_issues:
+        empty_avg = _empty_creator_stats("__team_average__")
+        return IssueCreatorStatsResponse(creators=[], team_averages=empty_avg)
+
+    # Group issues by creator developer_id
+    creator_issues: dict[int, list] = {}
+    issue_ids: list[int] = []
+    for row in all_issues:
+        dev_id = row[1]
+        if dev_id not in creator_issues:
+            creator_issues[dev_id] = []
+        creator_issues[dev_id].append(row)
+        issue_ids.append(row[0])
+
+    # Fetch PR linkage via pr_external_issue_links
+    # Maps external_issue_id → list of PR created_at
+    issue_pr_dates: dict[int, list[datetime]] = {}
+    issue_pr_counts: dict[int, int] = {}
+    if issue_ids:
+        link_result = await db.execute(
+            select(
+                PRExternalIssueLink.external_issue_id,
+                PullRequest.created_at,
+            )
+            .join(PullRequest, PRExternalIssueLink.pull_request_id == PullRequest.id)
+            .where(PRExternalIssueLink.external_issue_id.in_(issue_ids))
+        )
+        for ext_issue_id, pr_created_at in link_result.all():
+            issue_pr_counts[ext_issue_id] = issue_pr_counts.get(ext_issue_id, 0) + 1
+            if pr_created_at:
+                if ext_issue_id not in issue_pr_dates:
+                    issue_pr_dates[ext_issue_id] = []
+                issue_pr_dates[ext_issue_id].append(pr_created_at)
+
+    # Compute per-creator stats
+    creators: list[IssueCreatorStats] = []
+    for dev_id, issues in creator_issues.items():
+        dev_info = dev_lookup_by_id.get(dev_id)
+        username = dev_info[0] if dev_info else f"dev_{dev_id}"
+        display_name = dev_info[1] if dev_info else None
+        dev_team = dev_info[2] if dev_info else None
+        role = dev_info[3] if dev_info else None
+
+        total = len(issues)
+
+        # Cycle time (equivalent to time_to_close)
+        cycle_times = [r[2] for r in issues if r[2] is not None]
+        avg_time_to_close_hours = (
+            round(statistics.mean(cycle_times) / 3600, 1) if cycle_times else None
+        )
+
+        # Body length (description_length for Linear)
+        body_under_100 = sum(1 for r in issues if (r[3] or 0) < 100)
+
+        # Closed status — Linear uses status_category "done" or "cancelled"
+        closed_issues = [r for r in issues if r[4] in ("done", "cancelled")]
+        cancelled = sum(1 for r in closed_issues if r[4] == "cancelled")
+        pct_closed_not_planned = (
+            round(cancelled / len(closed_issues) * 100, 1) if closed_issues else 0.0
+        )
+
+        # PR linkage metrics
+        pr_counts: list[int] = []
+        time_to_first_pr: list[float] = []
+        for row in issues:
+            ext_issue_id = row[0]
+            issue_created_at = row[5]
+            if ext_issue_id in issue_pr_counts:
+                pr_counts.append(issue_pr_counts[ext_issue_id])
+            if ext_issue_id in issue_pr_dates and issue_created_at:
+                earliest_pr = min(issue_pr_dates[ext_issue_id])
+                delta_s = (earliest_pr - issue_created_at).total_seconds()
+                if delta_s >= 0:
+                    time_to_first_pr.append(delta_s)
+
+        avg_prs_per_issue = (
+            round(statistics.mean(pr_counts), 2) if pr_counts else None
+        )
+        avg_time_to_first_pr_hours = (
+            round(statistics.mean(time_to_first_pr) / 3600, 1)
+            if time_to_first_pr else None
+        )
+
+        creators.append(IssueCreatorStats(
+            github_username=username,
+            display_name=display_name,
+            team=dev_team,
+            role=role,
+            issues_created=total,
+            avg_time_to_close_hours=avg_time_to_close_hours,
+            avg_comment_count_before_pr=None,  # Linear API doesn't expose per-issue comments
+            pct_with_checklist=0.0,  # Not available in Linear
+            pct_reopened=0.0,  # Not available in Linear
+            pct_closed_not_planned=pct_closed_not_planned,
+            avg_prs_per_issue=avg_prs_per_issue,
+            issues_with_body_under_100_chars=body_under_100,
+            avg_time_to_first_pr_hours=avg_time_to_first_pr_hours,
+        ))
+
+    creators.sort(key=lambda c: c.issues_created, reverse=True)
     team_averages = _compute_team_averages(creators)
 
     return IssueCreatorStatsResponse(

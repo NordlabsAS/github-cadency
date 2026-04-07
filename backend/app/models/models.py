@@ -1038,6 +1038,7 @@ class ExternalSprint(Base):
     completed_scope: Mapped[int | None] = mapped_column(Integer)
     cancelled_scope: Mapped[int | None] = mapped_column(Integer)
     added_scope: Mapped[int | None] = mapped_column(Integer)
+    scope_unit: Mapped[str | None] = mapped_column(String(20))
     url: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=datetime.utcnow, server_default=func.now()
@@ -1060,6 +1061,7 @@ class ExternalIssue(Base):
         Index("ix_external_issues_sprint", "sprint_id"),
         Index("ix_external_issues_project", "project_id"),
         Index("ix_external_issues_assignee", "assignee_developer_id"),
+        Index("ix_external_issues_creator", "creator_developer_id"),
         Index("ix_external_issues_status_category", "status_category"),
     )
 
@@ -1077,6 +1079,10 @@ class ExternalIssue(Base):
     estimate: Mapped[float | None] = mapped_column(Float)
     assignee_email: Mapped[str | None] = mapped_column(String(320))
     assignee_developer_id: Mapped[int | None] = mapped_column(ForeignKey("developers.id", ondelete="SET NULL"))
+    creator_email: Mapped[str | None] = mapped_column(String(320))
+    creator_developer_id: Mapped[int | None] = mapped_column(ForeignKey("developers.id", ondelete="SET NULL"))
+    work_category: Mapped[str | None] = mapped_column(String(50))
+    work_category_source: Mapped[str | None] = mapped_column(String(20))
     project_id: Mapped[int | None] = mapped_column(ForeignKey("external_projects.id", ondelete="SET NULL"))
     sprint_id: Mapped[int | None] = mapped_column(ForeignKey("external_sprints.id", ondelete="SET NULL"))
     parent_issue_id: Mapped[int | None] = mapped_column(ForeignKey("external_issues.id", ondelete="SET NULL"))
@@ -1096,6 +1102,7 @@ class ExternalIssue(Base):
 
     integration: Mapped["IntegrationConfig"] = relationship(back_populates="external_issues")
     assignee: Mapped["Developer | None"] = relationship(foreign_keys=[assignee_developer_id])
+    creator: Mapped["Developer | None"] = relationship(foreign_keys=[creator_developer_id])
     project: Mapped["ExternalProject | None"] = relationship(back_populates="issues")
     sprint: Mapped["ExternalSprint | None"] = relationship(back_populates="issues")
     parent_issue: Mapped["ExternalIssue | None"] = relationship(remote_side="ExternalIssue.id")

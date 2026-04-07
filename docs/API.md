@@ -2387,7 +2387,7 @@ Generate a structured 1:1 meeting prep brief for a developer.
 
 `repo_ids`: optional array — filters PR list and review quality queries to selected repos. Stats/trends/benchmarks remain unfiltered.
 
-**Context gathered:** developer stats, 4-period trends, team benchmarks, PR list, review quality tiers, active goals with progress, previous 1:1 brief (for continuity), issue creator stats with team averages (if developer has created issues in the period).
+**Context gathered:** developer stats, 4-period trends, team benchmarks, PR list, review quality tiers, active goals with progress, previous 1:1 brief (for continuity), issue creator stats with team averages (if developer has created issues in the period), sprint context (if Linear active and developer mapped: active sprint completion/scope, last 3 sprints personal vs team completion, triage stats, estimation patterns by size bucket).
 
 **Response:** `201 Created` — `AIAnalysisResponse` where `result` contains:
 ```json
@@ -2431,7 +2431,7 @@ Generate a comprehensive team health assessment.
 `team` is optional — omit for all active developers.
 `repo_ids`: optional array — filters CR reviews and heated threads to selected repos. Stats/workload/collaboration remain unfiltered.
 
-**Context gathered:** team stats + benchmarks, workload balance + alerts, collaboration matrix + insights, CHANGES_REQUESTED reviews with body text + metadata (up to 60), heated issue threads with full chronological dialogue (3+ comments between 2 tracked devs), active team goals with current values.
+**Context gathered:** team stats + benchmarks, workload balance + alerts, collaboration matrix + insights, CHANGES_REQUESTED reviews with body text + metadata (up to 60), heated issue threads with full chronological dialogue (3+ comments between 2 tracked devs), active team goals with current values, planning health (if Linear active: velocity trend, completion rate, scope creep, triage health, estimation accuracy, work alignment %, at-risk projects).
 
 **Response:** `201 Created` — `AIAnalysisResponse` where `result` contains:
 ```json

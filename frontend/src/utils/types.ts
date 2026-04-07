@@ -1444,3 +1444,13 @@ export interface PlanningCorrelationResponse {
   data: PlanningCorrelationPoint[]
   correlation_coefficient: number | null
 }
+
+// --- System Version ---
+
+export interface VersionInfo {
+  version: string
+  build: string
+  commit: string
+  deployed_at: string
+  full_version: string
+}

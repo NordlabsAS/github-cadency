@@ -209,6 +209,8 @@ UPDATE pull_requests SET author_id = (SELECT id FROM developers WHERE ...)
    - Fetch recent PRs with review details
    - list_goals() + get_goal_progress() for each
    - get_issue_creator_stats()
+   - gather_sprint_context_for_developer() — active sprint, recent sprints,
+     triage stats, estimation patterns (only when Linear active + dev mapped)
 3. Build structured prompt with all metrics
 4. _call_claude_and_store()
 ```
@@ -220,6 +222,9 @@ UPDATE pull_requests SET author_id = (SELECT id FROM developers WHERE ...)
 2. Gather team context:
    - get_team_stats() + get_workload() + get_collaboration()
    - Per-developer stats for all team members
+   - gather_planning_health_context() — velocity trend, completion rate, scope creep,
+     triage health, estimation accuracy, work alignment, at-risk projects
+     (only when Linear active; reuses sprint_stats.py functions)
 3. _call_claude_and_store()
 ```
 

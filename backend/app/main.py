@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
@@ -19,13 +20,25 @@ configure_logging(
     json_output=settings.log_format == "json",
 )
 
-from app.api import ai_analysis, developers, goals, integrations, logs, notifications, oauth, relationships, roles, slack, sprints, stats, sync, teams, webhooks, work_categories  # noqa: E402
+from app.api import ai_analysis, developers, goals, integrations, logs, notifications, oauth, relationships, roles, slack, sprints, stats, sync, system, teams, webhooks, work_categories  # noqa: E402
+from app.libs.errors import CadencyErrorClassifier, ErrorReporter, register_error_handlers  # noqa: E402
 from app.models.database import AsyncSessionLocal  # noqa: E402
 from app.models.models import AIAnalysisSchedule, IntegrationConfig, NotificationConfig, Repository, SyncEvent, SyncScheduleConfig  # noqa: E402
 from app.services.github_sync import run_sync  # noqa: E402
 from app.services.linear_sync import run_linear_sync  # noqa: E402
 
 logger = get_logger(__name__)
+
+# Error handling — Nordlabs convention
+_classifier = CadencyErrorClassifier()
+_reporter = ErrorReporter(
+    sentinel_url=settings.sentinel_url,
+    sentinel_secret=settings.sentinel_secret,
+    app_id="github-cadency",
+    app_version=settings.app_version,
+    environment=settings.environment,
+    source_id=settings.github_org,
+)
 
 
 def reschedule_sync_jobs(config: SyncScheduleConfig, scheduler: AsyncIOScheduler | None = None) -> None:
@@ -372,7 +385,7 @@ async def lifespan(app: FastAPI):
                     )
                 )).scalar_one_or_none()
                 if config:
-                    await run_linear_sync(db, config.id)
+                    await run_linear_sync(db, config.id, triggered_by="scheduled")
             except Exception as e:
                 logger.warning("Scheduled Linear sync failed", error=str(e), event_type="system.sync")
 
@@ -413,9 +426,19 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Could not load AI analysis schedules", error=str(e), event_type="ai.schedule")
 
+    # Start Sentinel error reporter periodic flush
+    _flush_task = None
+    if _reporter.enabled:
+        _flush_task = asyncio.create_task(_reporter.periodic_flush())
+        logger.info("Sentinel reporter started", event_type="system.startup")
+
     yield
 
     # Shutdown
+    if _flush_task:
+        _flush_task.cancel()
+        with contextlib.suppress(Exception):
+            await _reporter.flush()
     scheduler.shutdown(wait=True)
 
 
@@ -424,7 +447,7 @@ _is_production = settings.environment == "production"
 app = FastAPI(
     title="DevPulse",
     description="Engineering intelligence dashboard",
-    version="0.1.0",
+    version=settings.app_version,
     lifespan=lifespan,
     docs_url="/docs" if not _is_production else None,
     redoc_url="/redoc" if not _is_production else None,
@@ -436,6 +459,7 @@ from app.rate_limit import limiter  # noqa: E402 — must be after settings impo
 
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+register_error_handlers(app, _classifier, _reporter)
 
 # Middleware is LIFO — last added = outermost.
 # LoggingContext added first so it's innermost (closest to route handlers).
@@ -477,6 +501,7 @@ app.include_router(work_categories.router, prefix="/api", tags=["work-categories
 app.include_router(notifications.router, prefix="/api", tags=["notifications"])
 app.include_router(integrations.router, prefix="/api", tags=["integrations"])
 app.include_router(sprints.router, prefix="/api", tags=["sprints"])
+app.include_router(system.router, prefix="/api", tags=["system"])
 
 
 @app.get("/api/health")

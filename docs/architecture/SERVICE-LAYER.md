@@ -19,7 +19,7 @@ related:
 | `collaboration` | `services/collaboration.py` | ~200 | Collaboration matrix, silos, bus factors, isolation detection |
 | `risk` | `services/risk.py` | ~250 | PR risk scoring (pure function + async wrappers) |
 | `goals` | `services/goals.py` | ~250 | Goal CRUD, metric computation, auto-achievement |
-| `ai_analysis` | `services/ai_analysis.py` | ~800 | Claude API integration, 1:1 prep briefs, team health checks |
+| `ai_analysis` | `services/ai_analysis.py` | ~1440 | Claude API integration, 1:1 prep briefs, team health checks, Linear sprint/planning context enrichment |
 | `ai_settings` | `services/ai_settings.py` | ~300 | AI feature toggles, budget tracking, cooldown, usage summary |
 | `work_category` | `services/work_category.py` | ~750 | Work categorization: label/title/AI classification, item drill-down, manual recategorization |
 | `relationships` | `services/relationships.py` | ~180 | Developer relationship CRUD + org tree builder |
