@@ -348,11 +348,11 @@ export default function Dashboard() {
         <>
           <h2 className="text-lg font-semibold">Sprint Planning</h2>
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {velocity && velocity.sprints && velocity.sprints.length > 0 && (
+            {velocity && velocity.data && velocity.data.length > 0 && (
               <StatCard
                 title="Sprint Velocity"
                 value={`${velocity.avg_velocity ?? 0}`}
-                subtitle={`avg over ${velocity.sprints.length} sprints`}
+                subtitle={`avg over ${velocity.data.length} sprints`}
                 tooltip="Average completed scope per sprint"
               />
             )}

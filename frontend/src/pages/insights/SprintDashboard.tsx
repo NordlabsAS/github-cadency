@@ -4,7 +4,7 @@ import {
   BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer, Legend, ReferenceLine,
 } from 'recharts'
-import { AlertTriangle, ExternalLink, TrendingUp, TrendingDown, Minus } from 'lucide-react'
+import { AlertTriangle, ExternalLink } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -84,18 +84,12 @@ export default function SprintDashboard() {
     )
   }
 
-  const trendIcon = velocity?.trend_direction === 'increasing'
-    ? <TrendingUp className="h-4 w-4 text-emerald-500" />
-    : velocity?.trend_direction === 'decreasing'
-      ? <TrendingDown className="h-4 w-4 text-red-500" />
-      : <Minus className="h-4 w-4 text-muted-foreground" />
-
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold">Sprints</h1>
         {teams.length > 0 && (
-          <Select value={teamKey ?? '__all__'} onValueChange={(v) => setTeamKey(v === '__all__' ? undefined : v)}>
+          <Select value={teamKey ?? '__all__'} onValueChange={(v) => setTeamKey(!v || v === '__all__' ? undefined : v)}>
             <SelectTrigger className="w-[160px]">
               <SelectValue placeholder="All teams" />
             </SelectTrigger>
@@ -113,7 +107,6 @@ export default function SprintDashboard() {
           title="Avg Velocity"
           value={velocity?.avg_velocity ?? 0}
           tooltip="Average completed scope per sprint"
-          suffix={<span className="ml-1">{trendIcon}</span>}
         />
         <StatCard
           title="Avg Completion"
@@ -169,7 +162,7 @@ export default function SprintDashboard() {
                   <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
                   <XAxis dataKey="sprint_name" tick={{ fontSize: 11 }} tickFormatter={(v) => v ?? ''} />
                   <YAxis tick={{ fontSize: 11 }} domain={[0, 100]} unit="%" />
-                  <Tooltip formatter={(v: number) => `${v}%`} />
+                  <Tooltip formatter={(v) => `${v}%`} />
                   <Line type="monotone" dataKey="completion_rate" stroke="hsl(var(--chart-1))" strokeWidth={2} dot={{ r: 3 }} />
                 </LineChart>
               </ResponsiveContainer>
@@ -190,7 +183,7 @@ export default function SprintDashboard() {
                   <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
                   <XAxis dataKey="sprint_name" tick={{ fontSize: 11 }} tickFormatter={(v) => v ?? ''} />
                   <YAxis tick={{ fontSize: 11 }} unit="%" />
-                  <Tooltip formatter={(v: number) => `${v}%`} />
+                  <Tooltip formatter={(v) => `${v}%`} />
                   <Bar dataKey="scope_creep_pct" name="Scope Creep %" fill="hsl(var(--chart-4))" radius={[4, 4, 0, 0]} />
                 </BarChart>
               </ResponsiveContainer>

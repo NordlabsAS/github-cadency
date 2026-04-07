@@ -7,7 +7,6 @@ import {
   TestTube,
   Trash2,
   Users,
-  ExternalLink,
   Loader2,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
@@ -135,7 +134,7 @@ function LinearIntegrationCard({ config }: { config: IntegrationConfig }) {
   const { data: syncStatus } = useIntegrationSyncStatus(config.id)
   const [showMapping, setShowMapping] = useState(false)
 
-  const saveTimer = useRef<ReturnType<typeof setTimeout>>()
+  const saveTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
   const saveApiKey = useCallback(() => {
     if (saveTimer.current) clearTimeout(saveTimer.current)
     saveTimer.current = setTimeout(() => {

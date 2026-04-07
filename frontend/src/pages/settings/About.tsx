@@ -7,7 +7,7 @@ import { Info } from 'lucide-react'
 export default function About() {
   const { data, isLoading, error } = useVersion()
 
-  if (error) return <ErrorCard title="Failed to load version info" error={error} />
+  if (error) return <ErrorCard title="Failed to load version info" message={error.message} />
 
   const clientVersion = import.meta.env.VITE_DEVPULSE_VERSION || 'dev'
   const clientBuild = import.meta.env.VITE_DEVPULSE_BUILD_NUMBER || '0'

@@ -1,9 +1,9 @@
 import { Link } from 'react-router-dom'
 import {
-  BarChart, Bar, LineChart, Line, ScatterChart, Scatter,
+  BarChart, Bar, ScatterChart, Scatter,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
 } from 'recharts'
-import { AlertTriangle, Clock, Link2, Target, GitPullRequest } from 'lucide-react'
+import { AlertTriangle } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import StatCard from '@/components/StatCard'
@@ -78,25 +78,21 @@ export default function PlanningInsights() {
           title="Work Alignment"
           value={`${alignment?.alignment_pct ?? 0}%`}
           tooltip="% of PRs linked to tracked work"
-          icon={<Link2 className="h-4 w-4" />}
         />
         <StatCard
           title="Avg Triage Time"
           value={formatDuration(triage?.avg_triage_duration_s ?? 0)}
           tooltip="Average time from issue creation to acceptance"
-          icon={<Clock className="h-4 w-4" />}
         />
         <StatCard
           title="Issues in Triage"
           value={triage?.issues_in_triage ?? 0}
           tooltip="Issues currently awaiting triage"
-          icon={<AlertTriangle className="h-4 w-4" />}
         />
         <StatCard
           title="Avg Estimation Accuracy"
           value={`${accuracy?.avg_accuracy_pct ?? 0}%`}
           tooltip="Completed points vs estimated points"
-          icon={<Target className="h-4 w-4" />}
         />
       </div>
 
@@ -222,7 +218,7 @@ export default function PlanningInsights() {
                   label={{ value: 'Avg Merge Time (h)', angle: -90, position: 'insideLeft', style: { fontSize: 11 } }}
                 />
                 <Tooltip
-                  formatter={(v: number, name: string) =>
+                  formatter={(v, name) =>
                     name === 'Completion Rate' ? `${v}%` : `${v}h`
                   }
                   labelFormatter={(_, payload) => {

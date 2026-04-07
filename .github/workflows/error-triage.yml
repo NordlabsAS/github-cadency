@@ -115,4 +115,4 @@ jobs:
               -d "{\"aggregate_id\": \"$SENTINEL_AGGREGATE_ID\", \"action\": \"issue_created\", \"github_url\": \"<ISSUE_URL>\", \"details\": {\"title\": \"...\", \"severity\": \"...\", \"confidence\": \"...\", \"root_cause\": \"...\"}}"
             ```
 
-          allowed_tools: "Read,Glob,Grep,Bash(git *),Bash(gh *),Bash(curl *),Bash(cd backend*),Bash(cd frontend*),Bash(uv *),Bash(ls *)"
+          claude_args: "--allowedTools Read Glob Grep 'Bash(git *)' 'Bash(gh *)' 'Bash(curl *)' 'Bash(cd backend*)' 'Bash(cd frontend*)' 'Bash(uv *)' 'Bash(ls *)'"
