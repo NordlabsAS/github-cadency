@@ -14,6 +14,7 @@ from sqlalchemy import and_, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.logging import get_logger
+from app.services.exceptions import AIBudgetExceededError, AIFeatureDisabledError
 from app.models.models import Developer, ExternalIssue, Issue, PRExternalIssueLink, PullRequest, Repository
 from app.schemas.schemas import (
     CategoryAllocation,
@@ -267,8 +268,15 @@ async def ai_classify_batch(
             if budget_info["over_budget"]:
                 logger.warning("AI budget exceeded — skipping work categorization", event_type="ai.categorization")
                 return {}
+        except (AIFeatureDisabledError, AIBudgetExceededError):
+            return {}
         except Exception:
-            # Feature disabled or other guard failure — skip AI silently
+            logger.warning(
+                "AI guard check failed unexpectedly",
+                exc_type=type(Exception).__name__,
+                error_category="app_bug",
+                event_type="ai.categorization",
+            )
             return {}
 
     MAX_TITLE_CHARS = 500

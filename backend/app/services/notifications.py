@@ -10,6 +10,9 @@ from app.logging import get_logger
 from app.models.models import (
     AISettings,
     Developer,
+    ExternalIssue,
+    ExternalSprint,
+    IntegrationConfig,
     Issue,
     Notification,
     NotificationConfig,
@@ -115,6 +118,39 @@ ALERT_TYPE_META: dict[str, dict] = {
     "missing_config": {
         "label": "Missing Configuration",
         "description": "Required configuration values not set (GitHub App, API keys, etc.)",
+        "thresholds": [],
+    },
+    "velocity_declining": {
+        "label": "Velocity Declining",
+        "description": "Sprint velocity has declined significantly over recent sprints",
+        "thresholds": [{"field": "velocity_decline_pct", "label": "Decline threshold", "unit": "%", "min": 5, "max": 80}],
+    },
+    "scope_creep_high": {
+        "label": "High Scope Creep",
+        "description": "Recent sprint had excessive mid-cycle scope additions",
+        "thresholds": [{"field": "scope_creep_threshold_pct", "label": "Threshold", "unit": "%", "min": 5, "max": 80}],
+    },
+    "sprint_at_risk": {
+        "label": "Sprint At Risk",
+        "description": "Active sprint is behind on completion with limited time remaining",
+        "thresholds": [{"field": "sprint_risk_completion_pct", "label": "Min completion", "unit": "%", "min": 10, "max": 90}],
+    },
+    "triage_queue_growing": {
+        "label": "Triage Queue Growing",
+        "description": "Too many issues waiting for triage or taking too long to triage",
+        "thresholds": [
+            {"field": "triage_queue_max", "label": "Max queue size", "unit": "issues", "min": 1, "max": 200},
+            {"field": "triage_duration_hours_max", "label": "Max duration", "unit": "hours", "min": 1, "max": 720},
+        ],
+    },
+    "estimation_accuracy_low": {
+        "label": "Estimation Accuracy Low",
+        "description": "Sprint estimation accuracy is trending below acceptable levels",
+        "thresholds": [{"field": "estimation_accuracy_min_pct", "label": "Min accuracy", "unit": "%", "min": 10, "max": 95}],
+    },
+    "linear_sync_failure": {
+        "label": "Linear Sync Failed",
+        "description": "Most recent Linear data sync failed",
         "thresholds": [],
     },
 }
@@ -845,7 +881,11 @@ async def _evaluate_trend_alerts(
 async def _evaluate_issue_linkage_alerts(
     db: AsyncSession, config: NotificationConfig, excluded_dev_ids: set[int]
 ) -> set[str]:
+    from app.models.models import PRExternalIssueLink
+    from app.services.linear_sync import get_primary_issue_source
+
     active_keys: set[str] = set()
+    issue_source = await get_primary_issue_source(db)
 
     devs_result = await db.execute(
         select(Developer).where(Developer.is_active.is_(True))
@@ -863,14 +903,25 @@ async def _evaluate_issue_linkage_alerts(
         if total_prs < 5:
             continue  # Not enough data
 
-        # Count PRs with linked issues (closes_issue_numbers is not null and not empty)
-        linked_prs = await db.scalar(
-            select(func.count()).where(
-                PullRequest.author_id == dev.id,
-                PullRequest.is_merged.is_(True),
-                PullRequest.closes_issue_numbers.isnot(None),
-            )
-        ) or 0
+        if issue_source == "linear":
+            # A PR is "linked" if it has at least one row in pr_external_issue_links
+            linked_prs = await db.scalar(
+                select(func.count(func.distinct(PRExternalIssueLink.pull_request_id)))
+                .join(PullRequest, PRExternalIssueLink.pull_request_id == PullRequest.id)
+                .where(
+                    PullRequest.author_id == dev.id,
+                    PullRequest.is_merged.is_(True),
+                )
+            ) or 0
+        else:
+            # Count PRs with linked issues (closes_issue_numbers is not null)
+            linked_prs = await db.scalar(
+                select(func.count()).where(
+                    PullRequest.author_id == dev.id,
+                    PullRequest.is_merged.is_(True),
+                    PullRequest.closes_issue_numbers.isnot(None),
+                )
+            ) or 0
 
         linkage_rate = linked_prs / total_prs * 100 if total_prs > 0 else 0
         if linkage_rate < config.issue_linkage_threshold_pct:
@@ -1000,6 +1051,206 @@ async def _evaluate_config_alerts(
     return active_keys
 
 
+# ── Planning / sprint evaluators ────────────────────────────────────────
+
+
+async def _has_active_linear_integration(db: AsyncSession) -> bool:
+    """Check if an active Linear integration exists."""
+    result = await db.scalar(
+        select(IntegrationConfig.id).where(
+            IntegrationConfig.type == "linear",
+            IntegrationConfig.status == "active",
+        ).limit(1)
+    )
+    return result is not None
+
+
+async def _evaluate_planning_alerts(
+    db: AsyncSession, config: NotificationConfig
+) -> set[str]:
+    """Evaluate sprint/planning alerts. No-op if Linear not configured."""
+    active_keys: set[str] = set()
+
+    if not await _has_active_linear_integration(db):
+        return active_keys
+
+    from datetime import date as date_type
+
+    now = datetime.now(timezone.utc)
+
+    # ── velocity_declining ──
+    if config.alert_velocity_declining_enabled:
+        velocity_keys: set[str] = set()
+        from app.services.sprint_stats import get_sprint_velocity
+        velocity = await get_sprint_velocity(db, limit=5)
+        sprints = velocity.get("sprints", [])
+        if len(sprints) >= 4:
+            values = [s.get("completed_scope", 0) or 0 for s in sprints]
+            # sprints are newest-first; compare older half to newer half
+            older = values[len(values) // 2:]
+            newer = values[:len(values) // 2]
+            avg_older = sum(older) / len(older) if older else 0
+            avg_newer = sum(newer) / len(newer) if newer else 0
+            if avg_older > 0:
+                decline_pct = (avg_older - avg_newer) / avg_older * 100
+                threshold = config.velocity_decline_pct
+                if decline_pct >= threshold:
+                    key = "velocity_declining:system:trend"
+                    velocity_keys.add(key)
+                    active_keys.add(key)
+                    await _upsert_notification(
+                        db, alert_key=key, alert_type="velocity_declining",
+                        severity="warning",
+                        title=f"Sprint velocity declined {decline_pct:.0f}% over last {len(sprints)} sprints",
+                        entity_type="system",
+                        link_path="/insights/sprints",
+                        metadata={"decline_pct": round(decline_pct, 1), "sprint_count": len(sprints)},
+                    )
+        await _auto_resolve_stale(db, "velocity_declining", velocity_keys)
+
+    # ── scope_creep_high ──
+    if config.alert_scope_creep_high_enabled:
+        creep_keys: set[str] = set()
+        from app.services.sprint_stats import get_scope_creep
+        scope = await get_scope_creep(db, limit=1)
+        sprints = scope.get("sprints", [])
+        if sprints:
+            latest = sprints[0]
+            creep_pct = latest.get("scope_creep_pct", 0) or 0
+            threshold = config.scope_creep_threshold_pct
+            if creep_pct >= threshold:
+                sprint_name = latest.get("name", "Sprint")
+                key = f"scope_creep_high:sprint:{latest.get('sprint_id', 0)}"
+                creep_keys.add(key)
+                active_keys.add(key)
+                await _upsert_notification(
+                    db, alert_key=key, alert_type="scope_creep_high",
+                    severity="warning",
+                    title=f"{sprint_name}: {creep_pct:.0f}% scope creep",
+                    entity_type="sprint",
+                    link_path="/insights/sprints",
+                    metadata={"scope_creep_pct": round(creep_pct, 1), "sprint_name": sprint_name},
+                )
+        await _auto_resolve_stale(db, "scope_creep_high", creep_keys)
+
+    # ── sprint_at_risk ──
+    if config.alert_sprint_at_risk_enabled:
+        risk_keys: set[str] = set()
+        active_sprints = (await db.execute(
+            select(ExternalSprint).where(ExternalSprint.state == "active")
+        )).scalars().all()
+        for sprint in active_sprints:
+            if sprint.start_date and sprint.end_date:
+                today = now.date()
+                total_days = (sprint.end_date - sprint.start_date).days
+                elapsed_days = (today - sprint.start_date).days
+                if total_days > 0 and elapsed_days > 0:
+                    elapsed_pct = elapsed_days / total_days * 100
+                    if elapsed_pct >= 50:
+                        planned = sprint.planned_scope or 0
+                        completed = sprint.completed_scope or 0
+                        completion_pct = (completed / planned * 100) if planned > 0 else 100
+                        threshold = config.sprint_risk_completion_pct
+                        if completion_pct < threshold:
+                            key = f"sprint_at_risk:sprint:{sprint.id}"
+                            risk_keys.add(key)
+                            active_keys.add(key)
+                            severity = "critical" if elapsed_pct >= 75 and completion_pct < 50 else "warning"
+                            name = sprint.name or f"Sprint #{sprint.number}"
+                            await _upsert_notification(
+                                db, alert_key=key, alert_type="sprint_at_risk",
+                                severity=severity,
+                                title=f"{name}: {completion_pct:.0f}% done with {max(0, (sprint.end_date - today).days)}d left",
+                                entity_type="sprint", entity_id=sprint.id,
+                                link_path="/insights/sprints",
+                                metadata={
+                                    "completion_pct": round(completion_pct, 1),
+                                    "elapsed_pct": round(elapsed_pct, 1),
+                                    "days_remaining": max(0, (sprint.end_date - today).days),
+                                },
+                            )
+        await _auto_resolve_stale(db, "sprint_at_risk", risk_keys)
+
+    # ── triage_queue_growing ──
+    if config.alert_triage_queue_growing_enabled:
+        triage_keys: set[str] = set()
+        from app.services.sprint_stats import get_triage_metrics
+        triage = await get_triage_metrics(db)
+        queue_depth = triage.get("current_queue_depth", 0) or 0
+        avg_hours = triage.get("avg_triage_hours", 0) or 0
+        q_max = config.triage_queue_max
+        d_max = config.triage_duration_hours_max
+        if queue_depth >= q_max or avg_hours >= d_max:
+            key = "triage_queue_growing:system:triage"
+            triage_keys.add(key)
+            active_keys.add(key)
+            parts = []
+            if queue_depth >= q_max:
+                parts.append(f"{queue_depth} issues in triage")
+            if avg_hours >= d_max:
+                parts.append(f"avg {avg_hours:.0f}h triage time")
+            await _upsert_notification(
+                db, alert_key=key, alert_type="triage_queue_growing",
+                severity="warning",
+                title="; ".join(parts),
+                entity_type="system",
+                link_path="/insights/planning",
+                metadata={"queue_depth": queue_depth, "avg_triage_hours": round(avg_hours, 1)},
+            )
+        await _auto_resolve_stale(db, "triage_queue_growing", triage_keys)
+
+    # ── estimation_accuracy_low ──
+    if config.alert_estimation_accuracy_low_enabled:
+        est_keys: set[str] = set()
+        from app.services.sprint_stats import get_estimation_accuracy
+        accuracy = await get_estimation_accuracy(db, limit=5)
+        sprints = accuracy.get("sprints", [])
+        if sprints:
+            accuracies = [s.get("accuracy_pct", 100) or 100 for s in sprints]
+            avg_accuracy = sum(accuracies) / len(accuracies)
+            threshold = config.estimation_accuracy_min_pct
+            if avg_accuracy < threshold:
+                key = "estimation_accuracy_low:system:trend"
+                est_keys.add(key)
+                active_keys.add(key)
+                await _upsert_notification(
+                    db, alert_key=key, alert_type="estimation_accuracy_low",
+                    severity="info",
+                    title=f"Estimation accuracy at {avg_accuracy:.0f}% over last {len(sprints)} sprints",
+                    entity_type="system",
+                    link_path="/insights/planning",
+                    metadata={"avg_accuracy_pct": round(avg_accuracy, 1), "sprint_count": len(sprints)},
+                )
+        await _auto_resolve_stale(db, "estimation_accuracy_low", est_keys)
+
+    # ── linear_sync_failure ──
+    if config.alert_linear_sync_failure_enabled:
+        lsf_keys: set[str] = set()
+        result = await db.execute(
+            select(SyncEvent)
+            .where(SyncEvent.sync_type == "linear")
+            .order_by(SyncEvent.started_at.desc())
+            .limit(1)
+        )
+        latest = result.scalar_one_or_none()
+        if latest and latest.status in ("failed", "completed_with_errors"):
+            key = f"linear_sync_failure:sync:{latest.id}"
+            lsf_keys.add(key)
+            active_keys.add(key)
+            severity = "critical" if latest.status == "failed" else "warning"
+            await _upsert_notification(
+                db, alert_key=key, alert_type="linear_sync_failure",
+                severity=severity,
+                title=f"Linear sync {latest.status.replace('_', ' ')}",
+                body=f"Sync #{latest.id} started at {latest.started_at}",
+                entity_type="system", entity_id=latest.id,
+                link_path="/admin/integrations",
+            )
+        await _auto_resolve_stale(db, "linear_sync_failure", lsf_keys)
+
+    return active_keys
+
+
 # ── Main evaluation orchestrator ─────────────────────────────────────────
 
 
@@ -1022,6 +1273,7 @@ async def evaluate_all_alerts(db: AsyncSession) -> dict[str, int]:
         ("issue_linkage", _evaluate_issue_linkage_alerts, config.alert_issue_linkage_enabled),
         ("ai_budget", _evaluate_ai_budget_alert, config.alert_ai_budget_enabled),
         ("sync_failure", _evaluate_sync_failure_alert, config.alert_sync_failure_enabled),
+        ("planning", _evaluate_planning_alerts, True),  # has sub-toggles, short-circuits if no Linear
         ("config", _evaluate_config_alerts, True),  # has sub-toggles
     ]
 
@@ -1029,7 +1281,7 @@ async def evaluate_all_alerts(db: AsyncSession) -> dict[str, int]:
         if not enabled:
             continue
         try:
-            if evaluator in (_evaluate_ai_budget_alert, _evaluate_sync_failure_alert):
+            if evaluator in (_evaluate_ai_budget_alert, _evaluate_sync_failure_alert, _evaluate_planning_alerts):
                 await evaluator(db, config)
             elif evaluator == _evaluate_config_alerts:
                 await evaluator(db, config)
@@ -1038,10 +1290,20 @@ async def evaluate_all_alerts(db: AsyncSession) -> dict[str, int]:
             else:
                 await evaluator(db, config, excluded_dev_ids)
         except Exception as e:
-            logger.warning(
-                f"Notification evaluator '{name}' failed",
-                error=str(e), event_type="system.notifications",
+            from app.main import _classifier, _reporter
+
+            classified = _classifier.classify(e)
+            log_level = logger.error if classified.category.value == "app_bug" else logger.warning
+            log_level(
+                "Notification evaluator failed",
+                evaluator=name,
+                error=str(e)[:200],
+                exc_type=type(e).__name__,
+                error_category=classified.category.value,
+                event_type="system.notifications",
             )
+            if classified.category.value == "app_bug" and _reporter:
+                _reporter.record(exc=e, component=f"services.notifications.{name}")
 
     await db.commit()
 

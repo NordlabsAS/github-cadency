@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import and_, case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.models import BenchmarkGroupConfig, Deployment, Developer, ExternalIssue, Issue, IssueComment, PRCheckRun, PRExternalIssueLink, PRFile, PRReview, PRReviewComment, PullRequest, RepoTreeFile, Repository
+from app.models.models import BenchmarkGroupConfig, Deployment, Developer, ExternalIssue, ExternalSprint, Issue, IssueComment, PRCheckRun, PRExternalIssueLink, PRFile, PRReview, PRReviewComment, PullRequest, RepoTreeFile, Repository
 from app.schemas.schemas import (
     BenchmarkGroupResponse,
     BenchmarkGroupUpdate,
@@ -18,6 +18,7 @@ from app.schemas.schemas import (
     DeveloperStatsWithPercentilesResponse,
     DeveloperTrendsResponse,
     DeveloperWorkload,
+    SprintCommitment,
     IssueCreatorStats,
     IssueCreatorStatsResponse,
     IssueLinkageByDeveloper,
@@ -2028,6 +2029,43 @@ async def get_workload(
         else:
             score = "overloaded"
 
+        # Sprint commitment context when Linear is active
+        sprint_commit: SprintCommitment | None = None
+        if issue_source_wl == "linear":
+            active_sprint = (await db.execute(
+                select(ExternalSprint).where(ExternalSprint.state == "active").limit(1)
+            )).scalar_one_or_none()
+            if active_sprint:
+                total_sprint_issues = await db.scalar(
+                    select(func.count()).where(
+                        ExternalIssue.sprint_id == active_sprint.id,
+                        ExternalIssue.assignee_developer_id == dev.id,
+                    )
+                ) or 0
+                completed_sprint = await db.scalar(
+                    select(func.count()).where(
+                        ExternalIssue.sprint_id == active_sprint.id,
+                        ExternalIssue.assignee_developer_id == dev.id,
+                        ExternalIssue.status_category == "done",
+                    )
+                ) or 0
+                if total_sprint_issues > 0:
+                    remaining = total_sprint_issues - completed_sprint
+                    today = datetime.now(timezone.utc).date()
+                    days_left = max(0, (active_sprint.end_date - today).days) if active_sprint.end_date else 0
+                    total_days = (active_sprint.end_date - active_sprint.start_date).days if active_sprint.start_date and active_sprint.end_date else 1
+                    elapsed_pct = ((today - active_sprint.start_date).days / total_days * 100) if active_sprint.start_date and total_days > 0 else 0
+                    completion_pct = completed_sprint / total_sprint_issues * 100
+                    on_track = completion_pct >= elapsed_pct
+                    sprint_commit = SprintCommitment(
+                        sprint_name=active_sprint.name or f"Sprint #{active_sprint.number}",
+                        total_issues=total_sprint_issues,
+                        completed=completed_sprint,
+                        remaining=remaining,
+                        days_left=days_left,
+                        on_track=on_track,
+                    )
+
         workloads.append(
             DeveloperWorkload(
                 developer_id=dev.id,
@@ -2042,6 +2080,7 @@ async def get_workload(
                 prs_waiting_for_review=prs_waiting,
                 avg_review_wait_h=round(avg_wait / 3600, 2) if avg_wait else None,
                 workload_score=score,
+                sprint_commitment=sprint_commit,
             )
         )
 
@@ -2700,6 +2739,10 @@ async def get_issue_quality_stats(
 ) -> IssueQualityStats:
     date_from, date_to = _default_range(date_from, date_to)
 
+    issue_source = await get_primary_issue_source(db)
+    if issue_source == "linear":
+        return await _get_issue_quality_stats_linear(db, team, date_from, date_to)
+
     # Optional team filter
     team_dev_ids: list[int] | None = None
     if team:
@@ -2807,6 +2850,112 @@ async def get_issue_quality_stats(
         avg_comment_count=round(float(avg_comment_count), 1),
         pct_closed_not_planned=pct_closed_not_planned,
         avg_reopen_count=round(float(avg_reopen_count), 2),
+        issues_without_body=issues_without_body,
+        label_distribution=label_distribution,
+    )
+
+
+async def _get_issue_quality_stats_linear(
+    db: AsyncSession,
+    team: str | None,
+    date_from: datetime,
+    date_to: datetime,
+) -> IssueQualityStats:
+    """Issue quality stats from Linear ExternalIssue data."""
+    empty = IssueQualityStats(
+        total_issues_created=0,
+        avg_body_length=0.0,
+        pct_with_checklist=0.0,
+        avg_comment_count=0.0,
+        pct_closed_not_planned=0.0,
+        avg_reopen_count=0.0,
+        issues_without_body=0,
+        label_distribution={},
+    )
+
+    team_dev_ids: list[int] | None = None
+    if team:
+        dev_result = await db.execute(
+            select(Developer.id).where(
+                Developer.is_active.is_(True), Developer.team == team
+            )
+        )
+        team_dev_ids = [row[0] for row in dev_result.all()]
+        if not team_dev_ids:
+            return empty
+
+    filters = [ExternalIssue.created_at >= date_from, ExternalIssue.created_at <= date_to]
+    if team_dev_ids is not None:
+        filters.append(ExternalIssue.assignee_developer_id.in_(team_dev_ids))
+
+    total_issues_created = await db.scalar(
+        select(func.count()).select_from(ExternalIssue).where(*filters)
+    ) or 0
+
+    if total_issues_created == 0:
+        return empty
+
+    # description_length maps to avg_body_length
+    avg_body_length = await db.scalar(
+        select(func.avg(ExternalIssue.description_length)).where(*filters)
+    ) or 0.0
+
+    # Issues without meaningful description (<50 chars)
+    issues_without_body = await db.scalar(
+        select(func.count()).select_from(ExternalIssue).where(
+            *filters,
+            (ExternalIssue.description_length < 50) | (ExternalIssue.description_length.is_(None)),
+        )
+    ) or 0
+
+    # Cancelled issues as "not planned" equivalent
+    closed_filters = [
+        ExternalIssue.created_at >= date_from,
+        ExternalIssue.created_at <= date_to,
+        ExternalIssue.status_category == "done",
+    ]
+    if team_dev_ids is not None:
+        closed_filters.append(ExternalIssue.assignee_developer_id.in_(team_dev_ids))
+
+    total_closed = await db.scalar(
+        select(func.count()).select_from(ExternalIssue).where(*closed_filters)
+    ) or 0
+
+    cancelled_count = await db.scalar(
+        select(func.count()).select_from(ExternalIssue).where(
+            ExternalIssue.created_at >= date_from,
+            ExternalIssue.created_at <= date_to,
+            ExternalIssue.cancelled_at.isnot(None),
+            *(
+                [ExternalIssue.assignee_developer_id.in_(team_dev_ids)]
+                if team_dev_ids is not None else []
+            ),
+        )
+    ) or 0
+
+    pct_closed_not_planned = (
+        round(cancelled_count / (total_closed + cancelled_count) * 100, 1)
+        if (total_closed + cancelled_count) > 0 else 0.0
+    )
+
+    # Label distribution
+    label_result = await db.execute(
+        select(ExternalIssue.labels).where(*filters, ExternalIssue.labels.isnot(None))
+    )
+    label_distribution: dict[str, int] = {}
+    for (labels,) in label_result.all():
+        if isinstance(labels, list):
+            for label in labels:
+                if isinstance(label, str):
+                    label_distribution[label] = label_distribution.get(label, 0) + 1
+
+    return IssueQualityStats(
+        total_issues_created=total_issues_created,
+        avg_body_length=round(float(avg_body_length), 1),
+        pct_with_checklist=0.0,  # not applicable to Linear
+        avg_comment_count=0.0,  # not synced from Linear
+        pct_closed_not_planned=pct_closed_not_planned,
+        avg_reopen_count=0.0,  # not tracked in Linear
         issues_without_body=issues_without_body,
         label_distribution=label_distribution,
     )

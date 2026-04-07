@@ -3,6 +3,8 @@ import { Link } from 'react-router-dom'
 import { useDateRange } from '@/hooks/useDateRange'
 import { useRiskSummary, useStalePRs, useTeamStats, useWorkload } from '@/hooks/useStats'
 import { useDevelopers } from '@/hooks/useDevelopers'
+import { useIntegrations } from '@/hooks/useIntegrations'
+import { useSprintVelocity, useWorkAlignment } from '@/hooks/useSprints'
 import StatCard from '@/components/StatCard'
 import StatCardSkeleton from '@/components/StatCardSkeleton'
 import TableSkeleton from '@/components/TableSkeleton'
@@ -76,6 +78,10 @@ export default function Dashboard() {
   const { data: stalePRs, isLoading: stalePRsLoading, isError: stalePRsError, refetch: refetchStalePRs } = useStalePRs()
   const { data: riskSummary } = useRiskSummary(undefined, dateFrom, dateTo, 'low', 'all')
   const { data: riskOpen } = useRiskSummary(undefined, dateFrom, dateTo, 'high', 'open')
+  const { data: integrations } = useIntegrations()
+  const hasLinear = integrations?.some((i) => i.type === 'linear' && i.status === 'active')
+  const { data: velocity } = useSprintVelocity(undefined, 5)
+  const { data: alignment } = useWorkAlignment(dateFrom, dateTo)
   const { data: developers } = useDevelopers()
 
   // Team grid state
@@ -333,6 +339,31 @@ export default function Dashboard() {
               value={stats.revert_rate != null ? `${(stats.revert_rate * 100).toFixed(1)}%` : 'N/A'}
               tooltip="Percentage of merged PRs that are reverts — high rates signal quality issues"
             />
+          </div>
+        </>
+      )}
+
+      {/* Sprint Planning Cards — only when Linear is active */}
+      {hasLinear && (velocity || alignment) && (
+        <>
+          <h2 className="text-lg font-semibold">Sprint Planning</h2>
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {velocity && velocity.sprints && velocity.sprints.length > 0 && (
+              <StatCard
+                title="Sprint Velocity"
+                value={`${velocity.avg_velocity ?? 0}`}
+                subtitle={`avg over ${velocity.sprints.length} sprints`}
+                tooltip="Average completed scope per sprint"
+              />
+            )}
+            {alignment && (
+              <StatCard
+                title="Work Alignment"
+                value={`${alignment.alignment_pct ?? 0}%`}
+                subtitle={`${alignment.linked_prs ?? 0} of ${(alignment.linked_prs ?? 0) + (alignment.unlinked_prs ?? 0)} PRs linked`}
+                tooltip="Percentage of PRs linked to planned work items"
+              />
+            )}
           </div>
         </>
       )}

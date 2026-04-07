@@ -6,6 +6,7 @@ from fastapi import HTTPException
 from slack_sdk.web.async_client import AsyncWebClient
 from slack_sdk.errors import SlackApiError
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.logging import get_logger
@@ -62,7 +63,11 @@ def get_decrypted_bot_token(config: SlackConfig) -> str | None:
     try:
         return decrypt_token(config.bot_token)
     except ValueError:
-        logger.error("Failed to decrypt Slack bot token", event_type="system.slack")
+        logger.warning(
+            "Failed to decrypt Slack bot token",
+            error_category="user_config",
+            event_type="system.slack",
+        )
         return None
 
 
@@ -94,7 +99,7 @@ async def get_slack_user_settings(
             db.add(row)
             await db.commit()
             await db.refresh(row)
-        except Exception:
+        except IntegrityError:
             await db.rollback()
             result = await db.execute(
                 select(SlackUserSettings).where(
@@ -489,7 +494,7 @@ async def scheduled_stale_pr_check() -> None:
                 return
             await send_stale_pr_nudges(db)
         except Exception as e:
-            logger.error("Stale PR check failed", error=str(e), event_type="system.slack")
+            _log_scheduled_error("Stale PR check failed", e, "services.slack")
 
 
 async def scheduled_weekly_digest() -> None:
@@ -508,4 +513,21 @@ async def scheduled_weekly_digest() -> None:
                 return
             await send_weekly_digest(db)
         except Exception as e:
-            logger.error("Weekly digest failed", error=str(e), event_type="system.slack")
+            _log_scheduled_error("Weekly digest failed", e, "services.slack")
+
+
+def _log_scheduled_error(message: str, exc: Exception, component: str) -> None:
+    """Classify, log, and report errors from APScheduler-driven Slack jobs."""
+    from app.main import _classifier, _reporter
+
+    classified = _classifier.classify(exc)
+    log_level = logger.error if classified.category.value == "app_bug" else logger.warning
+    log_level(
+        message,
+        error=str(exc)[:200],
+        exc_type=type(exc).__name__,
+        error_category=classified.category.value,
+        event_type="system.slack",
+    )
+    if classified.category.value == "app_bug" and _reporter:
+        _reporter.record(exc, component=component)

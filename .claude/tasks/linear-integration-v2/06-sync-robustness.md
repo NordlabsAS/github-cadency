@@ -4,7 +4,7 @@
 > Prerequisite: Phase 1 (bugfixes — concurrency guard is there, rest is here)
 > Independent of: Phase 2-5, 7
 
-## Status: Pending
+## Status: Completed
 
 ## Problem
 

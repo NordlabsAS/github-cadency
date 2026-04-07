@@ -12,6 +12,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.models import (
     Developer,
     DeveloperCollaborationScore,
+    ExternalIssue,
+    IntegrationConfig,
     Issue,
     IssueComment,
     PRReview,
@@ -190,6 +192,34 @@ async def recompute_collaboration_scores(
         if creator_id and creator_id != assignee_id:
             pair = _canonical_pair(creator_id, assignee_id)
             pair_co_assigned[pair] += 1
+
+    # Linear sprint co-membership: developers assigned to issues in the same sprint
+    has_linear = await db.scalar(
+        select(IntegrationConfig.id).where(
+            IntegrationConfig.type == "linear",
+            IntegrationConfig.status == "active",
+        ).limit(1)
+    )
+    if has_linear:
+        linear_rows = await db.execute(
+            select(
+                ExternalIssue.sprint_id,
+                ExternalIssue.assignee_developer_id,
+            ).where(
+                ExternalIssue.sprint_id.isnot(None),
+                ExternalIssue.assignee_developer_id.isnot(None),
+                ExternalIssue.updated_at >= date_from,
+            )
+        )
+        sprint_devs: dict[int, set[int]] = defaultdict(set)
+        for sprint_id, dev_id in linear_rows:
+            sprint_devs[sprint_id].add(dev_id)
+
+        for devs in sprint_devs.values():
+            dev_list = sorted(devs)
+            for i, a in enumerate(dev_list):
+                for b in dev_list[i + 1:]:
+                    pair_co_assigned[_canonical_pair(a, b)] += 1
 
     # --- Combine all signals ---
     all_pairs = (

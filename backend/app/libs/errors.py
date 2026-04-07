@@ -114,7 +114,7 @@ class CadencyErrorClassifier(ErrorClassifier):
     """GitHub Cadency–specific classification rules."""
 
     def _app_rules(self) -> list[Callable]:
-        return [self._github_api_rules, self._ai_exception_rules, *super()._app_rules()]
+        return [self._linear_api_rules, self._github_api_rules, self._ai_exception_rules, *super()._app_rules()]
 
     def _github_api_rules(self, exc: Exception, http_status: int | None, context: dict | None) -> ClassifiedError | None:
         if not isinstance(exc, httpx.HTTPStatusError):
@@ -189,6 +189,66 @@ class CadencyErrorClassifier(ErrorClassifier):
                 user_fixable=True,
                 user_message=exc.detail,
             )
+        return None
+
+    def _linear_api_rules(self, exc: Exception, http_status: int | None, context: dict | None) -> ClassifiedError | None:
+        from app.services.linear_sync import LinearAPIError
+
+        # GraphQL-level errors (200 response with errors payload)
+        if isinstance(exc, LinearAPIError):
+            msg = str(exc).lower()
+            if "authentication" in msg or "unauthorized" in msg:
+                return ClassifiedError(
+                    category=ErrorCategory.USER_CONFIG,
+                    user_fixable=True,
+                    user_message="Linear API key is invalid — check integration settings",
+                    remediation="Verify Linear API key in integration configuration",
+                )
+            if "rate" in msg and "limit" in msg:
+                return ClassifiedError(
+                    category=ErrorCategory.RATE_LIMITED,
+                    user_fixable=False,
+                    remediation="Linear API rate limit — back off",
+                )
+            return ClassifiedError(
+                category=ErrorCategory.PROVIDER,
+                user_fixable=False,
+                remediation=f"Linear GraphQL error: {str(exc)[:100]}",
+            )
+
+        # HTTP-level errors from Linear (httpx.HTTPStatusError with linear.app URL)
+        if isinstance(exc, httpx.HTTPStatusError) and "linear.app" in str(exc.request.url):
+            status = exc.response.status_code
+
+            if status == 401:
+                return ClassifiedError(
+                    category=ErrorCategory.USER_CONFIG,
+                    user_fixable=True,
+                    user_message="Linear API authentication failed — check API key",
+                    remediation="Verify Linear API key in integration configuration",
+                )
+
+            if status == 429:
+                return ClassifiedError(
+                    category=ErrorCategory.RATE_LIMITED,
+                    user_fixable=False,
+                    remediation="Linear API rate limit hit",
+                )
+
+            if status == 403:
+                return ClassifiedError(
+                    category=ErrorCategory.USER_PERMISSION,
+                    user_fixable=True,
+                    user_message="Linear API permission denied",
+                )
+
+            if 500 <= status < 600:
+                return ClassifiedError(
+                    category=ErrorCategory.PROVIDER,
+                    user_fixable=False,
+                    remediation="Linear API server error",
+                )
+
         return None
 
 

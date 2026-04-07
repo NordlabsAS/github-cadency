@@ -1,6 +1,7 @@
 import { useParams, Link } from 'react-router-dom'
 import { useDeveloper, useActivitySummary, useUpdateDeveloper } from '@/hooks/useDevelopers'
 import { useDeveloperStats, useDeveloperTrends } from '@/hooks/useStats'
+import { useDeveloperSprintSummary } from '@/hooks/useSprints'
 import { useDateRange } from '@/hooks/useDateRange'
 import { useAIHistory } from '@/hooks/useAI'
 import { useAuth } from '@/hooks/useAuth'
@@ -434,6 +435,7 @@ export default function DeveloperDetail() {
   const { data: stats } = useDeveloperStats(devId, dateFrom, dateTo)
   const { data: trends } = useDeveloperTrends(devId)
   const { data: aiHistory } = useAIHistory()
+  const { data: sprintSummary } = useDeveloperSprintSummary(devId)
   const { user, isAdmin } = useAuth()
   const { data: goals } = useGoals(devId)
   const updateSelfGoal = useUpdateSelfGoal()
@@ -526,6 +528,44 @@ export default function DeveloperDetail() {
 
       {/* Activity Summary — visible to admin or own page */}
       {(isOwnPage || isAdmin) && <ActivitySummaryCard developerId={devId} />}
+
+      {/* Active Sprint Card — shown when developer is mapped to Linear */}
+      {sprintSummary?.active_sprint && (
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-base">Active Sprint: {sprintSummary.active_sprint.name}</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-2">
+              <div className="flex items-center gap-3">
+                <div className="flex-1">
+                  <div className="flex h-2.5 overflow-hidden rounded-full bg-muted">
+                    <div
+                      className={sprintSummary.active_sprint.on_track ? 'bg-emerald-500' : 'bg-amber-500'}
+                      style={{ width: `${Math.min(sprintSummary.active_sprint.completion_pct, 100)}%` }}
+                    />
+                  </div>
+                </div>
+                <span className="text-sm font-medium">
+                  {sprintSummary.active_sprint.completed_issues}/{sprintSummary.active_sprint.total_issues} issues ({sprintSummary.active_sprint.completion_pct}%)
+                </span>
+              </div>
+              <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                <span>{sprintSummary.active_sprint.days_remaining}d remaining</span>
+                <span>·</span>
+                <Badge variant={sprintSummary.active_sprint.on_track ? 'default' : 'secondary'} className="text-xs">
+                  {sprintSummary.active_sprint.on_track ? 'On track' : 'Behind'}
+                </Badge>
+              </div>
+              {sprintSummary.recent_sprints.length > 0 && (
+                <p className="text-xs text-muted-foreground">
+                  Recent: {sprintSummary.recent_sprints.map(s => `${s.name} (${s.completion_pct}%)`).join(' · ')}
+                </p>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Edit Profile Dialog (admin only) */}
       {isAdmin && dev && (

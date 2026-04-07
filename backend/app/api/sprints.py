@@ -24,6 +24,8 @@ from app.schemas.schemas import (
     WorkAlignmentResponse,
 )
 from app.services.sprint_stats import (
+    get_developer_linear_issues,
+    get_developer_sprint_summary,
     get_estimation_accuracy,
     get_planning_correlation,
     get_project_detail,
@@ -240,3 +242,37 @@ async def planning_correlation(
     """Planning vs delivery correlation."""
     data = await get_planning_correlation(db, team_key=team_key, limit=limit)
     return PlanningCorrelationResponse(**data)
+
+
+# --- Developer sprint endpoints ---
+
+
+@router.get(
+    "/developers/{developer_id}/sprint-summary",
+    dependencies=[Depends(require_admin)],
+)
+async def developer_sprint_summary(
+    developer_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Sprint summary for a developer: active sprint + recent completion."""
+    data = await get_developer_sprint_summary(db, developer_id)
+    if data is None:
+        return {"active_sprint": None, "recent_sprints": []}
+    return data
+
+
+@router.get(
+    "/developers/{developer_id}/linear-issues",
+    dependencies=[Depends(require_admin)],
+)
+async def developer_linear_issues(
+    developer_id: int,
+    db: AsyncSession = Depends(get_db),
+    status_category: str | None = Query(None, description="Comma-separated: todo,in_progress,done"),
+    limit: int = Query(20, ge=1, le=100),
+):
+    """Linear issues assigned to a developer."""
+    categories = status_category.split(",") if status_category else None
+    issues = await get_developer_linear_issues(db, developer_id, status_category=categories, limit=limit)
+    return issues

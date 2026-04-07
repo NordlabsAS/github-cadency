@@ -3,6 +3,7 @@
 > Priority: High | Effort: Large | Impact: High
 > Prerequisite: Phase 1 complete (backend data layer + frontend pages exist)
 > Related: `.claude/tasks/linear-integration/01-linear-integration.md`
+> **Status: All phases completed (2026-04-07)**
 
 ## Problem Statement
 
@@ -14,7 +15,7 @@ For teams using Linear as their primary issue tracker, the core DevPulse experie
 
 Make the Linear integration a first-class citizen: when a team toggles Linear as primary, their issue data flows through every feature that currently uses GitHub issues. Fix existing bugs. Add sprint-aware notifications and AI context. Make the sync robust.
 
-## Current State (as of 2026-04-06)
+## State Before v2 (as of 2026-04-06)
 
 **What works:**
 - Linear GraphQL client (read-only, projects/cycles/issues sync)
@@ -46,15 +47,15 @@ Make the Linear integration a first-class citizen: when a team toggles Linear as
 
 ## Phase Structure
 
-| Phase | Task File | Focus | Effort |
-|-------|-----------|-------|--------|
-| 1 | `01-bugfixes.md` | Fix existing bugs and technical debt | Small |
-| 2 | `02-primary-issue-source.md` | Make the toggle actually work in stats/benchmarks/linkage | Large |
-| 3 | `03-ai-context-enrichment.md` | Feed Linear data into AI 1:1 prep and team health | Medium |
-| 4 | `04-sprint-notifications.md` | Sprint-aware alert types in notification center | Medium |
-| 5 | `05-collaboration-workload.md` | Linear data in collaboration scoring + workload | Medium |
-| 6 | `06-sync-robustness.md` | Concurrency guard, incremental linking, cancellation, live config | Medium |
-| 7 | `07-cross-linking-ux.md` | Sprint on DeveloperDetail, project health in dashboard | Medium |
+| Phase | Task File | Focus | Effort | Status |
+|-------|-----------|-------|--------|--------|
+| 1 | `01-bugfixes.md` | Fix existing bugs and technical debt | Small | Completed |
+| 2 | `02-primary-issue-source.md` | Make the toggle actually work in stats/benchmarks/linkage | Large | Completed |
+| 3 | `03-ai-context-enrichment.md` | Feed Linear data into AI 1:1 prep and team health | Medium | Completed |
+| 4 | `04-sprint-notifications.md` | Sprint-aware alert types in notification center | Medium | Completed |
+| 5 | `05-collaboration-workload.md` | Linear data in collaboration scoring + workload | Medium | Completed |
+| 6 | `06-sync-robustness.md` | Concurrency guard, incremental linking, cancellation, live config | Medium | Completed |
+| 7 | `07-cross-linking-ux.md` | Sprint on DeveloperDetail, project health in dashboard | Medium | Completed |
 
 Phases 1-2 are sequential (bugs first, then branching). Phases 3-5 are independent and can be parallelized. Phase 6 can run anytime. Phase 7 depends on phases 2-5 being complete.
 

@@ -487,6 +487,15 @@ class DeveloperTrendsResponse(BaseModel):
 # --- Workload schemas (M4) ---
 
 
+class SprintCommitment(BaseModel):
+    sprint_name: str
+    total_issues: int
+    completed: int
+    remaining: int
+    days_left: int
+    on_track: bool
+
+
 class DeveloperWorkload(BaseModel):
     developer_id: int
     github_username: str
@@ -500,6 +509,7 @@ class DeveloperWorkload(BaseModel):
     prs_waiting_for_review: int = 0
     avg_review_wait_h: float | None = None
     workload_score: str = "balanced"  # low, balanced, high, overloaded
+    sprint_commitment: SprintCommitment | None = None
 
 
 class WorkloadAlert(BaseModel):
@@ -897,6 +907,8 @@ class SyncScheduleConfigUpdate(BaseModel):
     auto_sync_enabled: bool | None = None
     incremental_interval_minutes: int | None = None
     full_sync_cron_hour: int | None = None
+    linear_sync_enabled: bool | None = None
+    linear_sync_interval_minutes: int | None = None
 
 
 class SyncStatusResponse(BaseModel):
@@ -1575,6 +1587,12 @@ class NotificationConfigUpdate(BaseModel):
     alert_sync_failure_enabled: bool | None = None
     alert_unassigned_roles_enabled: bool | None = None
     alert_missing_config_enabled: bool | None = None
+    alert_velocity_declining_enabled: bool | None = None
+    alert_scope_creep_high_enabled: bool | None = None
+    alert_sprint_at_risk_enabled: bool | None = None
+    alert_triage_queue_growing_enabled: bool | None = None
+    alert_estimation_accuracy_low_enabled: bool | None = None
+    alert_linear_sync_failure_enabled: bool | None = None
     stale_pr_threshold_hours: int | None = None
     review_bottleneck_multiplier: float | None = None
     revert_spike_threshold_pct: float | None = None
@@ -1582,6 +1600,12 @@ class NotificationConfigUpdate(BaseModel):
     issue_linkage_threshold_pct: float | None = None
     declining_trend_pr_drop_pct: float | None = None
     declining_trend_quality_drop_pct: float | None = None
+    velocity_decline_pct: float | None = None
+    scope_creep_threshold_pct: float | None = None
+    sprint_risk_completion_pct: float | None = None
+    triage_queue_max: int | None = None
+    triage_duration_hours_max: int | None = None
+    estimation_accuracy_min_pct: float | None = None
     exclude_contribution_categories: list[str] | None = None
     evaluation_interval_minutes: int | None = None
 

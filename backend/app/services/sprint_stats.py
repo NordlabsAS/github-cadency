@@ -8,9 +8,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.logging import get_logger
 from app.models.models import (
+    DeveloperIdentityMap,
     ExternalIssue,
     ExternalProject,
     ExternalSprint,
+    IntegrationConfig,
     PRExternalIssueLink,
     PullRequest,
 )
@@ -418,3 +420,142 @@ def _pearson_correlation(x: list[float], y: list[float]) -> float | None:
         return None
 
     return round(numerator / (denom_x * denom_y), 3)
+
+
+async def get_developer_sprint_summary(
+    db: AsyncSession, developer_id: int
+) -> dict | None:
+    """Sprint summary for a specific developer. Returns None if not mapped to Linear."""
+    # Check if developer is mapped and Linear is active
+    has_linear = await db.scalar(
+        select(IntegrationConfig.id).where(
+            IntegrationConfig.type == "linear",
+            IntegrationConfig.status == "active",
+        ).limit(1)
+    )
+    if not has_linear:
+        return None
+
+    has_mapping = await db.scalar(
+        select(DeveloperIdentityMap.id).where(
+            DeveloperIdentityMap.developer_id == developer_id,
+            DeveloperIdentityMap.integration_type == "linear",
+        ).limit(1)
+    )
+    if not has_mapping:
+        return None
+
+    # Active sprint
+    active_sprint_result = await db.execute(
+        select(ExternalSprint).where(ExternalSprint.state == "active").limit(1)
+    )
+    active_sprint = active_sprint_result.scalar_one_or_none()
+
+    active_data = None
+    if active_sprint:
+        total = await db.scalar(
+            select(func.count()).where(
+                ExternalIssue.sprint_id == active_sprint.id,
+                ExternalIssue.assignee_developer_id == developer_id,
+            )
+        ) or 0
+        completed = await db.scalar(
+            select(func.count()).where(
+                ExternalIssue.sprint_id == active_sprint.id,
+                ExternalIssue.assignee_developer_id == developer_id,
+                ExternalIssue.status_category == "done",
+            )
+        ) or 0
+        if total > 0:
+            from datetime import timezone
+            today = datetime.now(timezone.utc).date()
+            days_left = max(0, (active_sprint.end_date - today).days) if active_sprint.end_date else 0
+            total_days = (active_sprint.end_date - active_sprint.start_date).days if active_sprint.start_date and active_sprint.end_date else 1
+            elapsed_pct = ((today - active_sprint.start_date).days / total_days * 100) if active_sprint.start_date and total_days > 0 else 0
+            completion_pct = round(completed / total * 100, 1)
+            active_data = {
+                "sprint_id": active_sprint.id,
+                "name": active_sprint.name or f"Sprint #{active_sprint.number}",
+                "start_date": str(active_sprint.start_date) if active_sprint.start_date else None,
+                "end_date": str(active_sprint.end_date) if active_sprint.end_date else None,
+                "total_issues": total,
+                "completed_issues": completed,
+                "completion_pct": completion_pct,
+                "days_remaining": days_left,
+                "on_track": completion_pct >= elapsed_pct,
+            }
+
+    # Recent closed sprints (last 3)
+    recent_sprints_result = await db.execute(
+        select(ExternalSprint)
+        .where(ExternalSprint.state == "closed")
+        .order_by(ExternalSprint.end_date.desc())
+        .limit(3)
+    )
+    recent_data = []
+    for sprint in recent_sprints_result.scalars().all():
+        total = await db.scalar(
+            select(func.count()).where(
+                ExternalIssue.sprint_id == sprint.id,
+                ExternalIssue.assignee_developer_id == developer_id,
+            )
+        ) or 0
+        completed = await db.scalar(
+            select(func.count()).where(
+                ExternalIssue.sprint_id == sprint.id,
+                ExternalIssue.assignee_developer_id == developer_id,
+                ExternalIssue.status_category == "done",
+            )
+        ) or 0
+        if total > 0:
+            recent_data.append({
+                "sprint_id": sprint.id,
+                "name": sprint.name or f"Sprint #{sprint.number}",
+                "total_issues": total,
+                "completed_issues": completed,
+                "completion_pct": round(completed / total * 100, 1),
+            })
+
+    if not active_data and not recent_data:
+        return None
+
+    return {
+        "active_sprint": active_data,
+        "recent_sprints": recent_data,
+    }
+
+
+async def get_developer_linear_issues(
+    db: AsyncSession,
+    developer_id: int,
+    status_category: list[str] | None = None,
+    limit: int = 20,
+) -> list[dict]:
+    """List Linear issues assigned to a developer."""
+    query = (
+        select(ExternalIssue)
+        .where(ExternalIssue.assignee_developer_id == developer_id)
+        .order_by(ExternalIssue.updated_at.desc())
+        .limit(limit)
+    )
+    if status_category:
+        query = query.where(ExternalIssue.status_category.in_(status_category))
+
+    result = await db.execute(query)
+    issues = result.scalars().all()
+
+    return [
+        {
+            "id": i.id,
+            "identifier": i.identifier,
+            "title": i.title,
+            "status": i.status,
+            "status_category": i.status_category,
+            "priority": i.priority,
+            "priority_label": i.priority_label,
+            "estimate": i.estimate,
+            "url": i.url,
+            "sprint_id": i.sprint_id,
+        }
+        for i in issues
+    ]

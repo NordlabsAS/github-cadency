@@ -35,7 +35,7 @@ backend/app/
 ├── api/              # FastAPI routers (thin — delegate to services)
 ├── models/
 │   ├── database.py   # Async engine, session factory, Base, get_db()
-│   └── models.py     # All ORM models (36 tables)
+│   └── models.py     # All ORM models (42 tables)
 ├── schemas/schemas.py # All Pydantic request/response models
 ├── services/         # Business logic (all async, accept AsyncSession as first param)
 ├── libs/errors.py    # Nordlabs error convention (ErrorCategory, Classifier, Sanitizer, Reporter)
@@ -50,7 +50,7 @@ backend/app/
 ```
 frontend/src/
 ├── pages/            # Route components (lazy-loaded)
-│   ├── insights/     # Workload, Collaboration, Benchmarks, DORA, etc.
+│   ├── insights/     # Workload, Collaboration, Benchmarks, DORA, Sprints, Planning, Projects
 │   ├── sync/         # Sync wizard, progress, history
 │   ├── ai/           # AI analysis wizard
 │   └── settings/     # AI, Slack, Notification settings
@@ -93,13 +93,14 @@ docker compose --profile logging up
 - **Date ranges:** `_default_range()` defaults to last 30 days if params are None.
 - **Contribution categories:** `code_contributor`, `issue_contributor`, `non_contributor`, `system`. Controls stats inclusion. Roles are admin-configurable via `role_definitions` table.
 - **Work categorization cascade:** label rules → issue type rules → title regex/prefix → cross-reference → AI (optional) → "unknown". Manual overrides (`source="manual"`) never overwritten. ReDoS protection on regex rules.
-- **Sync:** `SyncContext` threads db/client/sync_event/logger. Per-repo commits + batch commits every 50 PRs. PostgreSQL advisory lock prevents concurrent syncs. Cancellation checked at repo boundaries and every 50-PR batch. `resolve_author()` auto-creates developers from GitHub user data.
+- **Sync (GitHub):** `SyncContext` threads db/client/sync_event/logger. Per-repo commits + batch commits every 50 PRs. PostgreSQL advisory lock prevents concurrent syncs. Cancellation checked at repo boundaries and every 50-PR batch. `resolve_author()` auto-creates developers from GitHub user data.
+- **Sync (Linear):** `run_linear_sync()` orchestrates projects → cycles → issues → PR linking → developer mapping. Concurrency guard via active `SyncEvent` check. `_check_linear_cancel()` at each step boundary and every 50 issues. `_add_log()` writes structured entries to `sync_event.log_summary`. Rate limit handling in `LinearClient.query()` (proactive slowdown + 429 retry). Live-configurable schedule via `linear_sync_enabled`/`linear_sync_interval_minutes` on `SyncScheduleConfig`. Post-sync triggers `evaluate_all_alerts()` for planning notifications.
 - **AI guards:** All AI call sites check feature toggles → budget → cooldown before calling Claude. `AIFeatureDisabledError` → 403, `AIBudgetExceededError` → 429 (handled globally).
 - **AI context enrichment:** 1:1 prep (`build_one_on_one_context`) and team health (`build_team_health_context`) include Linear sprint data when an active integration + developer mapping exists. `gather_sprint_context_for_developer()` adds active sprint, recent sprints, triage stats, estimation patterns. `gather_planning_health_context()` adds velocity trend, completion rate, scope creep, triage health, estimation accuracy, work alignment, at-risk projects. Both return `None` gracefully when Linear is not configured.
 - **Encryption:** Shared Fernet in `services/encryption.py` for Slack tokens and Linear API keys. Requires `ENCRYPTION_KEY` env var.
-- **Issue tracker integration:** Linear is the primary issue tracker. Generic `integration_config` table (type column) designed for future Jira support. Stats functions branch on `get_primary_issue_source()` to query `issues` (GitHub) or `external_issues` (Linear) table. `developer_identity_map` links developers to external system accounts.
-- **Collaboration scores:** Materialized post-sync from 5 signals. Canonical pair ordering (`a_id < b_id`).
-- **Notifications:** 16 alert types, dedup by `alert_key`, auto-resolution, per-user read/dismiss tracking with optional expiry.
+- **Issue tracker integration:** Linear is the primary issue tracker. Generic `integration_config` table (type column) designed for future Jira support. Stats functions branch on `get_primary_issue_source()` to query `issues` (GitHub) or `external_issues` (Linear) table — covers developer stats, team stats, repo stats, issue linkage, issue quality, issue creators, work categorization, work allocation, benchmarks, and trends. `developer_identity_map` links developers to external system accounts. Workload includes `sprint_commitment` context (active sprint progress, on-track status) when Linear is primary.
+- **Collaboration scores:** Materialized post-sync from 5 signals (review 0.35, co-author 0.15, issue comments 0.20, mentions 0.15, co-assignment 0.15). Canonical pair ordering (`a_id < b_id`). Co-assignment signal includes Linear sprint co-membership when active (additive — developers in same sprint count as co-assigned).
+- **Notifications:** 22 alert types (16 GitHub + 6 planning), dedup by `alert_key`, auto-resolution, per-user read/dismiss tracking with optional expiry. Planning alerts (`velocity_declining`, `scope_creep_high`, `sprint_at_risk`, `triage_queue_growing`, `estimation_accuracy_low`, `linear_sync_failure`) evaluated via `_evaluate_planning_alerts()` — no-op when Linear not configured. Issue linkage evaluator branches on primary issue source (`pr_external_issue_links` for Linear, `closes_issue_numbers` for GitHub).
 - **Logging:** structlog with `event_type` taxonomy. JSON in prod, console in dev. `LoggingContextMiddleware` injects `request_id`.
 - **Error handling:** `libs/errors.py` — classifies all exceptions into 8 categories, only reports `app_bug` to Sentinel after frequency threshold.
 - **Rate limiting:** slowapi, default 120/min. Disabled via `RATE_LIMIT_ENABLED=false` in tests.
@@ -111,7 +112,7 @@ docker compose --profile logging up
 - **Charts:** Recharts 3, `ResponsiveContainer`, CSS vars for colors, `useId()` for SVG gradient IDs.
 - **Error handling:** `ErrorCard` + per-section `ErrorBoundary`. `StatCardSkeleton`/`TableSkeleton` for loading.
 - **Code splitting:** All pages lazy-loaded via `React.lazy()`.
-- **Nav:** Top nav (Dashboard, Executive, Insights, Goals, Admin dropdown). Insights + Admin use `SidebarLayout`. `isNavActive()` uses prefix matching.
+- **Nav:** Top nav (Dashboard, Executive, Insights, Goals, Admin dropdown). Insights + Admin use `SidebarLayout`. `isNavActive()` uses prefix matching. Sprint/Planning/Projects sidebar links conditionally rendered based on `useIntegrations()` — shows "Sprint Planning ›" setup link when Linear not configured.
 - **Date range:** Global `DateRangeContext` in Layout header, consumed by all pages.
 - **Trend deltas:** Current vs previous period. For lower-is-better metrics, green = decrease.
 

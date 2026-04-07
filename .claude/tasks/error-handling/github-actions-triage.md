@@ -1,6 +1,6 @@
 # Task: Add GitHub Actions Error Triage Workflow
 
-## Status: Complete (code) — secrets + registration pending
+## Status: Complete
 ## Depends On: adopt-error-convention.md (error classification must be implemented first)
 
 ## Context
@@ -183,4 +183,4 @@ gh api repos/anders-vedal/github-cadency/dispatches \
 - [x] `.github/workflows/error-triage.yml` created
 - [x] `ANTHROPIC_API_KEY` and `SENTINEL_SECRET` secrets set in repo
 - [x] Project registered in Sentinel (project ID: `5a17dd30-96e5-4935-8c00-44b469bc1fa3`)
-- [ ] Manual dispatch tested (workflow must be pushed to `main` first — re-send dispatch after merge)
+- [x] Manual dispatch tested (run `24077567156` triggered successfully)

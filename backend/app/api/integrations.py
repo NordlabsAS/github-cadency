@@ -3,6 +3,10 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.logging import get_logger
+
+logger = get_logger(__name__)
+
 from app.api.auth import get_current_user, require_admin
 from app.models.database import get_db
 from app.schemas.schemas import (
@@ -184,8 +188,28 @@ async def trigger_sync(
 
     # Run sync in background with its own session (request-scoped session will close)
     async def _bg_sync():
-        async with AsyncSessionLocal() as bg_db:
-            await run_linear_sync(bg_db, integration_id)
+        try:
+            async with AsyncSessionLocal() as bg_db:
+                await run_linear_sync(bg_db, integration_id)
+        except Exception as e:
+            from app.main import _classifier, _reporter
+
+            classified = _classifier.classify(e)
+            logger.error(
+                "Background Linear sync failed",
+                error=str(e)[:200],
+                exc_type=type(e).__name__,
+                error_category=classified.category.value,
+                integration_id=integration_id,
+                event_type="system.sync",
+                exc_info=e,
+            )
+            if classified.category.value == "app_bug" and _reporter:
+                _reporter.record(
+                    e,
+                    component="services.linear_sync",
+                    endpoint_path="/api/integrations/sync",
+                )
 
     asyncio.create_task(_bg_sync())
     return {"message": "Sync started"}

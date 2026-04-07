@@ -801,7 +801,7 @@ async def run_contributor_sync() -> SyncEvent:
             sync_event.is_resumable = False
 
         except Exception as e:
-            sync_log.error("Contributor sync failed: %s", e)
+            sync_log.error("Contributor sync failed", error=str(e)[:200], exc_type=type(e).__name__, event_type="system.sync")
             saved_logs = list(sync_event.log_summary or [])
             saved_errors = list(sync_event.errors or [])
             await db.rollback()
@@ -2273,7 +2273,7 @@ async def run_sync(
                         break
 
                     except Exception as e:
-                        sync_log.error("Error syncing %s: %s", repo.full_name, e)
+                        sync_log.error("Error syncing repo", repo=repo.full_name, error=str(e)[:200], exc_type=type(e).__name__, event_type="system.sync")
 
                         # Preserve in-memory state before rollback expires attributes
                         saved_logs = list(sync_event.log_summary or [])
@@ -2372,7 +2372,7 @@ async def run_sync(
             _add_log(ctx, "warn", "Sync cancelled by user")
 
         except Exception as e:
-            sync_log.error("Sync failed: %s", e)
+            sync_log.error("Sync failed", error=str(e)[:200], exc_type=type(e).__name__, event_type="system.sync")
             saved_logs = list(sync_event.log_summary or [])
             saved_errors = list(sync_event.errors or [])
             await db.rollback()

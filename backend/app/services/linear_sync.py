@@ -1,6 +1,8 @@
 """Linear integration service — GraphQL client, sync orchestration, PR linking, developer mapping."""
 
+import asyncio
 import re
+import time
 from datetime import datetime, timezone
 
 import httpx
@@ -50,7 +52,33 @@ class LinearClient:
         if variables:
             payload["variables"] = variables
         resp = await self._client.post("", json=payload)
+
+        # Handle 429 rate limit with single retry
+        if resp.status_code == 429:
+            retry_after = int(resp.headers.get("Retry-After", "60"))
+            logger.warning(
+                "Linear rate limited (429)",
+                retry_after=retry_after,
+                event_type="system.linear_api",
+            )
+            await asyncio.sleep(min(retry_after, 120))
+            resp = await self._client.post("", json=payload)
+
         resp.raise_for_status()
+
+        # Proactive slowdown when approaching rate limit
+        remaining = int(resp.headers.get("X-RateLimit-Remaining", "100"))
+        if remaining < 10:
+            reset_at = int(resp.headers.get("X-RateLimit-Reset", "0"))
+            wait_seconds = max(0, reset_at - int(time.time())) + 1
+            logger.warning(
+                "Linear rate limit approaching",
+                remaining=remaining,
+                wait_seconds=wait_seconds,
+                event_type="system.linear_api",
+            )
+            await asyncio.sleep(min(wait_seconds, 60))
+
         body = resp.json()
         if "errors" in body:
             errors = body["errors"]
@@ -207,7 +235,7 @@ async def list_linear_users(db: AsyncSession, config: IntegrationConfig) -> dict
     try:
         api_key = decrypt_token(config.api_key)
     except ValueError:
-        logger.error("Failed to decrypt Linear API key", event_type="system.sync")
+        logger.warning("Failed to decrypt Linear API key", error_category="user_config", event_type="system.sync")
         return {"users": [], "total": 0, "mapped_count": 0, "unmapped_count": 0}
 
     async with LinearClient(api_key) as client:
@@ -295,6 +323,47 @@ async def map_user(
 # --- Sync orchestration ---
 
 
+MAX_LOG_ENTRIES = 500
+
+
+class LinearSyncCancelled(Exception):
+    """Raised when a Linear sync is cancelled by user request."""
+    pass
+
+
+def _add_log(sync_event: SyncEvent, level: str, msg: str) -> None:
+    """Append a structured log entry to sync_event.log_summary."""
+    entry = {
+        "ts": datetime.now(timezone.utc).strftime("%H:%M:%S"),
+        "level": level.lower(),
+        "msg": msg[:200],
+    }
+    logs = list(sync_event.log_summary or [])
+    if len(logs) >= MAX_LOG_ENTRIES:
+        # Drop oldest info entries first
+        for i, e in enumerate(logs):
+            if e.get("level") == "info":
+                logs.pop(i)
+                break
+        else:
+            logs.pop(0)
+    logs.append(entry)
+    sync_event.log_summary = logs
+
+
+async def _check_linear_cancel(db: AsyncSession, sync_event: SyncEvent) -> None:
+    """Check if cancellation was requested. Raises LinearSyncCancelled if so."""
+    result = await db.execute(
+        select(SyncEvent.cancel_requested).where(SyncEvent.id == sync_event.id)
+    )
+    if result.scalar_one_or_none():
+        _add_log(sync_event, "warn", "Sync cancelled by user")
+        sync_event.status = "cancelled"
+        sync_event.completed_at = datetime.now(timezone.utc)
+        await db.commit()
+        raise LinearSyncCancelled("Linear sync cancelled by user")
+
+
 async def run_linear_sync(
     db: AsyncSession,
     integration_id: int,
@@ -344,28 +413,57 @@ async def run_linear_sync(
         integration_id=integration_id,
         event_type="system.sync",
     )
+    _add_log(sync_event, "info", "Starting Linear workspace sync")
 
     counts = {"projects": 0, "sprints": 0, "issues": 0, "pr_links": 0, "mapped": 0}
 
     try:
         async with LinearClient(api_key) as client:
             # 1. Sync projects
+            await _check_linear_cancel(db, sync_event)
+            sync_event.current_step = "syncing_projects"
+            _add_log(sync_event, "info", "Syncing Linear projects...")
+            await db.commit()
             counts["projects"] = await sync_linear_projects(client, db, integration_id)
+            _add_log(sync_event, "info", f"Synced {counts['projects']} projects")
 
             # 2. Sync cycles (sprints)
+            await _check_linear_cancel(db, sync_event)
+            sync_event.current_step = "syncing_cycles"
+            _add_log(sync_event, "info", "Syncing Linear cycles (sprints)...")
+            await db.commit()
             counts["sprints"] = await sync_linear_cycles(client, db, integration_id)
+            _add_log(sync_event, "info", f"Synced {counts['sprints']} sprints")
 
             # 3. Sync issues (since last sync or all)
+            await _check_linear_cancel(db, sync_event)
             since = config.last_synced_at
-            counts["issues"] = await sync_linear_issues(client, db, integration_id, since=since)
+            sync_event.current_step = "syncing_issues"
+            mode = f"incremental since {since.strftime('%Y-%m-%d %H:%M')}" if since else "full scan"
+            _add_log(sync_event, "info", f"Syncing issues ({mode})...")
+            await db.commit()
+            counts["issues"] = await sync_linear_issues(
+                client, db, integration_id, since=since, sync_event=sync_event
+            )
+            _add_log(sync_event, "info", f"Synced {counts['issues']} issues")
 
             # 4. Link PRs to external issues (incremental after first sync)
+            await _check_linear_cancel(db, sync_event)
+            sync_event.current_step = "linking_prs"
+            _add_log(sync_event, "info", "Linking PRs to external issues...")
+            await db.commit()
             counts["pr_links"] = await link_prs_to_external_issues(db, integration_id, since=since)
+            _add_log(sync_event, "info", f"Created {counts['pr_links']} new PR-issue links")
 
             # 5. Fetch Linear users for accurate identity mapping, then auto-map
+            await _check_linear_cancel(db, sync_event)
+            sync_event.current_step = "mapping_developers"
+            _add_log(sync_event, "info", "Auto-mapping developers...")
+            await db.commit()
             linear_users = await _fetch_linear_users(client)
             mapped, unmapped = await auto_map_developers(db, integration_id, linear_users=linear_users)
             counts["mapped"] = mapped
+            _add_log(sync_event, "info", f"Mapped {mapped} developers ({unmapped} unmapped)")
 
         # Update integration
         config.last_synced_at = datetime.now(timezone.utc)
@@ -375,6 +473,11 @@ async def run_linear_sync(
         sync_event.status = "completed"
         sync_event.completed_at = datetime.now(timezone.utc)
         sync_event.repos_synced = counts["issues"]  # reuse field for issue count
+        sync_event.current_step = None
+        started = sync_event.started_at
+        if started:
+            sync_event.duration_s = int((sync_event.completed_at - started).total_seconds())
+        _add_log(sync_event, "info", f"Sync completed: {counts}")
 
         await db.commit()
 
@@ -385,16 +488,39 @@ async def run_linear_sync(
             event_type="system.sync",
         )
 
+        # Trigger planning notification evaluation after successful sync
+        try:
+            from app.services.notifications import evaluate_all_alerts
+            await evaluate_all_alerts(db)
+        except Exception as eval_err:
+            logger.warning(
+                "Post-sync notification evaluation failed",
+                error=str(eval_err),
+                event_type="system.notifications",
+            )
+
+    except LinearSyncCancelled:
+        logger.info("Linear sync cancelled", sync_id=sync_event.id, event_type="system.sync")
+        # Status already set by _check_linear_cancel
+
     except Exception as e:
         sync_event.status = "failed"
         sync_event.completed_at = datetime.now(timezone.utc)
+        sync_event.current_step = None
         config.error_message = str(e)[:500]
+        _add_log(sync_event, "error", f"Sync failed: {str(e)[:180]}")
         await db.commit()
 
-        logger.error(
+        from app.main import _classifier
+
+        classified = _classifier.classify(e)
+        log_level = logger.error if classified.category.value == "app_bug" else logger.warning
+        log_level(
             "Linear sync failed",
             sync_id=sync_event.id,
-            error=str(e),
+            error=str(e)[:200],
+            exc_type=type(e).__name__,
+            error_category=classified.category.value,
             event_type="system.sync",
         )
         raise
@@ -640,7 +766,11 @@ def _classify_external_issue(issue: ExternalIssue, rules: list) -> tuple[str, st
 
 
 async def sync_linear_issues(
-    client: LinearClient, db: AsyncSession, integration_id: int, since: datetime | None = None
+    client: LinearClient,
+    db: AsyncSession,
+    integration_id: int,
+    since: datetime | None = None,
+    sync_event: SyncEvent | None = None,
 ) -> int:
     """Sync issues from Linear updated since the given timestamp. Returns count synced."""
     # Load classification rules once for the entire sync
@@ -755,8 +885,13 @@ async def sync_linear_issues(
             count += 1
 
             if count % 50 == 0:
+                if sync_event:
+                    sync_event.current_repo_issues_done = count
+                    await _check_linear_cancel(db, sync_event)
                 await db.commit()
 
+        if sync_event:
+            sync_event.current_repo_issues_done = count
         await db.commit()
 
         page_info = issues.get("pageInfo", {})

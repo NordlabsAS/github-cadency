@@ -21,7 +21,8 @@ const GROUPS = [
   { label: 'Risk Alerts', types: ['high_risk_pr'] },
   { label: 'Collaboration Alerts', types: ['bus_factor', 'team_silo', 'isolated_developer'] },
   { label: 'Trend Alerts', types: ['declining_trend', 'issue_linkage'] },
-  { label: 'System Alerts', types: ['ai_budget', 'sync_failure', 'unassigned_roles', 'missing_config'] },
+  { label: 'Planning Alerts', types: ['velocity_declining', 'scope_creep_high', 'sprint_at_risk', 'triage_queue_growing', 'estimation_accuracy_low'] },
+  { label: 'System Alerts', types: ['ai_budget', 'sync_failure', 'linear_sync_failure', 'unassigned_roles', 'missing_config'] },
 ]
 
 const CATEGORIES = [

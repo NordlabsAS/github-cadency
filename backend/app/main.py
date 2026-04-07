@@ -21,7 +21,7 @@ configure_logging(
 )
 
 from app.api import ai_analysis, developers, goals, integrations, logs, notifications, oauth, relationships, roles, slack, sprints, stats, sync, system, teams, webhooks, work_categories  # noqa: E402
-from app.libs.errors import CadencyErrorClassifier, ErrorReporter, register_error_handlers  # noqa: E402
+from app.libs.errors import CadencyErrorClassifier, ErrorCategory, ErrorReporter, register_error_handlers  # noqa: E402
 from app.models.database import AsyncSessionLocal  # noqa: E402
 from app.models.models import AIAnalysisSchedule, IntegrationConfig, NotificationConfig, Repository, SyncEvent, SyncScheduleConfig  # noqa: E402
 from app.services.github_sync import run_sync  # noqa: E402
@@ -79,11 +79,44 @@ def reschedule_sync_jobs(config: SyncScheduleConfig, scheduler: AsyncIOScheduler
             misfire_grace_time=None,
         )
 
+    # Linear sync job
+    try:
+        scheduler.remove_job("linear_sync")
+    except Exception:
+        pass
+    if config.linear_sync_enabled:
+        from app.services.linear_sync import run_linear_sync as _run_linear_sync
+
+        async def _rescheduled_linear_sync() -> None:
+            from app.models.models import IntegrationConfig
+            async with AsyncSessionLocal() as db:
+                try:
+                    ic = (await db.execute(
+                        select(IntegrationConfig).where(
+                            IntegrationConfig.type == "linear",
+                            IntegrationConfig.status == "active",
+                        )
+                    )).scalar_one_or_none()
+                    if ic:
+                        await _run_linear_sync(db, ic.id, triggered_by="scheduled")
+                except Exception:
+                    pass
+
+        scheduler.add_job(
+            _rescheduled_linear_sync,
+            "interval",
+            minutes=config.linear_sync_interval_minutes,
+            id="linear_sync",
+            misfire_grace_time=None,
+        )
+
     logger.info(
         "Rescheduled sync jobs",
         enabled=config.auto_sync_enabled,
         interval_minutes=config.incremental_interval_minutes,
         full_hour=config.full_sync_cron_hour,
+        linear_enabled=config.linear_sync_enabled,
+        linear_interval=config.linear_sync_interval_minutes,
         event_type="system.scheduler",
     )
 
@@ -194,12 +227,18 @@ async def scheduled_ai_analysis(schedule_id: int) -> None:
         try:
             await run_scheduled_analysis(db, schedule)
         except Exception as e:
-            logger.error(
+            classified = _classifier.classify(e)
+            log_level = logger.error if classified.category == ErrorCategory.APP_BUG else logger.warning
+            log_level(
                 "Scheduled AI analysis failed",
                 schedule_id=schedule_id,
-                error=str(e),
+                error=str(e)[:200],
+                exc_type=type(e).__name__,
+                error_category=classified.category.value,
                 event_type="ai.schedule",
             )
+            if classified.category == ErrorCategory.APP_BUG:
+                _reporter.record(exc=e, component="services.ai_schedules")
 
 
 async def _recover_orphaned_syncs() -> None:
@@ -337,7 +376,17 @@ async def lifespan(app: FastAPI):
             try:
                 await _eval_alerts(db)
             except Exception as e:
-                logger.warning("Scheduled notification evaluation failed", error=str(e), event_type="system.notifications")
+                classified = _classifier.classify(e)
+                log_level = logger.error if classified.category == ErrorCategory.APP_BUG else logger.warning
+                log_level(
+                    "Scheduled notification evaluation failed",
+                    error=str(e)[:200],
+                    exc_type=type(e).__name__,
+                    error_category=classified.category.value,
+                    event_type="system.notifications",
+                )
+                if classified.category == ErrorCategory.APP_BUG:
+                    _reporter.record(exc=e, component="services.notifications")
 
     eval_interval = 15
     try:
@@ -345,8 +394,14 @@ async def lifespan(app: FastAPI):
             nc = await db.get(NotificationConfig, 1)
             if nc:
                 eval_interval = nc.evaluation_interval_minutes
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(
+            "Failed to load notification config — using default interval",
+            error=str(e)[:200],
+            default_interval=eval_interval,
+            error_category="transient",
+            event_type="system.config",
+        )
 
     scheduler.add_job(
         scheduled_notification_evaluation,
@@ -387,7 +442,17 @@ async def lifespan(app: FastAPI):
                 if config:
                     await run_linear_sync(db, config.id, triggered_by="scheduled")
             except Exception as e:
-                logger.warning("Scheduled Linear sync failed", error=str(e), event_type="system.sync")
+                classified = _classifier.classify(e)
+                log_level = logger.error if classified.category == ErrorCategory.APP_BUG else logger.warning
+                log_level(
+                    "Scheduled Linear sync failed",
+                    error=str(e)[:200],
+                    exc_type=type(e).__name__,
+                    error_category=classified.category.value,
+                    event_type="system.sync",
+                )
+                if classified.category == ErrorCategory.APP_BUG:
+                    _reporter.record(exc=e, component="services.linear_sync")
 
     scheduler.add_job(
         scheduled_linear_sync,

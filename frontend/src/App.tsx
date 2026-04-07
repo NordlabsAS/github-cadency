@@ -1,10 +1,11 @@
-import { useState, useContext, lazy, Suspense } from 'react'
+import { useState, useContext, useMemo, lazy, Suspense } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Toaster } from 'sonner'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { DateRangeContext, defaultFrom, defaultTo } from '@/hooks/useDateRange'
 import { AuthContext, useAuthProvider } from '@/hooks/useAuth'
+import { useIntegrations } from '@/hooks/useIntegrations'
 import ErrorBoundary from '@/components/ErrorBoundary'
 import Layout from '@/components/Layout'
 import SidebarLayout from '@/components/SidebarLayout'
@@ -55,7 +56,7 @@ function PageSkeleton() {
   )
 }
 
-const insightsSidebarItems: SidebarItem[] = [
+const baseInsightsSidebarItems: SidebarItem[] = [
   { to: '/insights/workload', label: 'Workload' },
   { to: '/insights/collaboration', label: 'Collaboration' },
   { to: '/insights/benchmarks', label: 'Benchmarks' },
@@ -66,10 +67,15 @@ const insightsSidebarItems: SidebarItem[] = [
   { to: '/insights/dora', label: 'DORA Metrics' },
   { to: '/insights/investment', label: 'Investment' },
   { to: '/insights/org-chart', label: 'Org Chart' },
+]
+
+const linearInsightsSidebarItems: SidebarItem[] = [
   { to: '/insights/sprints', label: 'Sprints' },
   { to: '/insights/planning', label: 'Planning' },
   { to: '/insights/projects', label: 'Projects' },
 ]
+
+const setupLinearSidebarItem: SidebarItem = { to: '/admin/integrations', label: 'Sprint Planning ›' }
 
 const adminSidebarItems: SidebarItem[] = [
   { to: '/admin/team', label: 'Team' },
@@ -114,6 +120,18 @@ function AppRoutes() {
   const [dateFrom, setDateFrom] = useState(defaultFrom)
   const [dateTo, setDateTo] = useState(defaultTo)
   const auth = useAuthProvider()
+  const { data: integrations } = useIntegrations()
+  const hasLinear = integrations?.some((i) => i.type === 'linear' && i.status === 'active')
+
+  const insightsSidebarItems = useMemo(() => {
+    const items = [...baseInsightsSidebarItems]
+    if (hasLinear) {
+      items.push(...linearInsightsSidebarItems)
+    } else {
+      items.push(setupLinearSidebarItem)
+    }
+    return items
+  }, [hasLinear])
 
   return (
     <AuthContext value={auth}>

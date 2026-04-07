@@ -5,7 +5,7 @@
 > Independent of: Phase 2, 3, 5
 > Related: `backend/app/services/notifications.py`
 
-## Status: Pending
+## Status: Completed
 
 ## Problem
 

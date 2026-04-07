@@ -2149,11 +2149,13 @@ Get the sync schedule configuration (auto-sync toggle, intervals).
   "auto_sync_enabled": true,
   "incremental_interval_minutes": 15,
   "full_sync_cron_hour": 2,
+  "linear_sync_enabled": true,
+  "linear_sync_interval_minutes": 120,
   "updated_at": "2026-03-28T10:00:00Z"
 }
 ```
 
-Returns defaults (`true`, `15`, `2`) if no config row exists yet.
+Returns defaults (`true`, `15`, `2`, `true`, `120`) if no config row exists yet.
 
 ### PATCH /api/sync/schedule
 
@@ -2164,15 +2166,19 @@ Update the sync schedule configuration. Changes take effect immediately — APSc
 {
   "auto_sync_enabled": false,
   "incremental_interval_minutes": 30,
-  "full_sync_cron_hour": 4
+  "full_sync_cron_hour": 4,
+  "linear_sync_enabled": true,
+  "linear_sync_interval_minutes": 60
 }
 ```
 
 | Field | Type | Constraints | Description |
 |-------|------|-------------|-------------|
-| `auto_sync_enabled` | `bool` | | Enable/disable automatic background syncing |
-| `incremental_interval_minutes` | `int` | >= 5 | Minutes between incremental syncs |
-| `full_sync_cron_hour` | `int` | 0-23 | Hour (server time) for nightly full sync |
+| `auto_sync_enabled` | `bool` | | Enable/disable automatic GitHub background syncing |
+| `incremental_interval_minutes` | `int` | >= 5 | Minutes between incremental GitHub syncs |
+| `full_sync_cron_hour` | `int` | 0-23 | Hour (server time) for nightly full GitHub sync |
+| `linear_sync_enabled` | `bool` | | Enable/disable automatic Linear background syncing |
+| `linear_sync_interval_minutes` | `int` | >= 5 | Minutes between Linear syncs (default 120) |
 
 **Response:** `200 OK` — `SyncScheduleConfigResponse` (updated values)
 
@@ -3223,6 +3229,18 @@ Get notification config (singleton). Includes `alert_types` metadata for the adm
   "issue_linkage_threshold_pct": 20.0,
   "declining_trend_pr_drop_pct": 30.0,
   "declining_trend_quality_drop_pct": 20.0,
+  "alert_velocity_declining_enabled": true,
+  "alert_scope_creep_high_enabled": true,
+  "alert_sprint_at_risk_enabled": true,
+  "alert_triage_queue_growing_enabled": true,
+  "alert_estimation_accuracy_low_enabled": true,
+  "alert_linear_sync_failure_enabled": true,
+  "velocity_decline_pct": 20.0,
+  "scope_creep_threshold_pct": 25.0,
+  "sprint_risk_completion_pct": 50.0,
+  "triage_queue_max": 10,
+  "triage_duration_hours_max": 48,
+  "estimation_accuracy_min_pct": 60.0,
   "exclude_contribution_categories": ["system", "non_contributor"],
   "evaluation_interval_minutes": 15,
   "alert_types": [
@@ -3730,3 +3748,64 @@ Planning vs delivery correlation (sprint completion rate vs avg PR merge time). 
 ```
 
 `correlation_coefficient`: Pearson r (-1 to 1). Negative = higher completion correlates with faster merge times. `null` if fewer than 3 data points.
+
+### GET /api/developers/{developer_id}/sprint-summary
+
+Active sprint + recent completion data for a developer. Returns empty data when developer is not mapped to Linear or Linear is not configured. **Admin only.**
+
+**Response:** `200 OK`
+```json
+{
+  "active_sprint": {
+    "sprint_id": 5,
+    "name": "Sprint 24",
+    "start_date": "2026-03-25",
+    "end_date": "2026-04-08",
+    "total_issues": 10,
+    "completed_issues": 6,
+    "completion_pct": 60.0,
+    "days_remaining": 1,
+    "on_track": true
+  },
+  "recent_sprints": [
+    {
+      "sprint_id": 4,
+      "name": "Sprint 23",
+      "total_issues": 8,
+      "completed_issues": 7,
+      "completion_pct": 87.5
+    }
+  ]
+}
+```
+
+`active_sprint`: `null` if no active sprint or developer has no issues in it. `on_track`: true if `completion_pct >= elapsed_pct`. `recent_sprints`: last 3 closed sprints where the developer had assigned issues.
+
+### GET /api/developers/{developer_id}/linear-issues
+
+Linear issues assigned to a developer. **Admin only.**
+
+**Query params:**
+
+| Param | Type | Default | Notes |
+|-------|------|---------|-------|
+| `status_category` | `string` | `null` | Comma-separated: `todo`, `in_progress`, `done` |
+| `limit` | `int` | `20` | Max results (1-100) |
+
+**Response:** `200 OK`
+```json
+[
+  {
+    "id": 42,
+    "identifier": "ENG-456",
+    "title": "Fix auth timeout",
+    "status": "In Progress",
+    "status_category": "in_progress",
+    "priority": 1,
+    "priority_label": "Urgent",
+    "estimate": 3.0,
+    "url": "https://linear.app/workspace/issue/ENG-456",
+    "sprint_id": 5
+  }
+]
+```

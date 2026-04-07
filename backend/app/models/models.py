@@ -672,6 +672,13 @@ class SyncScheduleConfig(Base):
     full_sync_cron_hour: Mapped[int] = mapped_column(
         Integer, default=2, server_default="2"
     )
+    # Linear sync schedule
+    linear_sync_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default="true"
+    )
+    linear_sync_interval_minutes: Mapped[int] = mapped_column(
+        Integer, default=120, server_default="120"
+    )
     updated_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), onupdate=datetime.utcnow, server_default=func.now()
     )
@@ -935,6 +942,13 @@ class NotificationConfig(Base):
     alert_sync_failure_enabled: Mapped[bool] = mapped_column(Boolean, server_default="true")
     alert_unassigned_roles_enabled: Mapped[bool] = mapped_column(Boolean, server_default="true")
     alert_missing_config_enabled: Mapped[bool] = mapped_column(Boolean, server_default="true")
+    # Planning alert toggles
+    alert_velocity_declining_enabled: Mapped[bool] = mapped_column(Boolean, server_default="true")
+    alert_scope_creep_high_enabled: Mapped[bool] = mapped_column(Boolean, server_default="true")
+    alert_sprint_at_risk_enabled: Mapped[bool] = mapped_column(Boolean, server_default="true")
+    alert_triage_queue_growing_enabled: Mapped[bool] = mapped_column(Boolean, server_default="true")
+    alert_estimation_accuracy_low_enabled: Mapped[bool] = mapped_column(Boolean, server_default="true")
+    alert_linear_sync_failure_enabled: Mapped[bool] = mapped_column(Boolean, server_default="true")
     # Configurable thresholds
     stale_pr_threshold_hours: Mapped[int] = mapped_column(Integer, server_default="48")
     review_bottleneck_multiplier: Mapped[float] = mapped_column(Float, server_default="2.0")
@@ -943,6 +957,13 @@ class NotificationConfig(Base):
     issue_linkage_threshold_pct: Mapped[float] = mapped_column(Float, server_default="20.0")
     declining_trend_pr_drop_pct: Mapped[float] = mapped_column(Float, server_default="30.0")
     declining_trend_quality_drop_pct: Mapped[float] = mapped_column(Float, server_default="20.0")
+    # Planning thresholds
+    velocity_decline_pct: Mapped[float] = mapped_column(Float, server_default="20.0")
+    scope_creep_threshold_pct: Mapped[float] = mapped_column(Float, server_default="25.0")
+    sprint_risk_completion_pct: Mapped[float] = mapped_column(Float, server_default="50.0")
+    triage_queue_max: Mapped[int] = mapped_column(Integer, server_default="10")
+    triage_duration_hours_max: Mapped[int] = mapped_column(Integer, server_default="48")
+    estimation_accuracy_min_pct: Mapped[float] = mapped_column(Float, server_default="60.0")
     # Contribution category exclusion
     exclude_contribution_categories: Mapped[list | None] = mapped_column(JSONB, server_default='["system", "non_contributor"]')
     # Evaluation schedule

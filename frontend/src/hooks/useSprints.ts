@@ -128,3 +128,57 @@ export function usePlanningCorrelation(teamKey?: string, limit = 10) {
     staleTime: 30_000,
   })
 }
+
+export interface DeveloperSprintSummary {
+  active_sprint: {
+    sprint_id: number
+    name: string
+    start_date: string | null
+    end_date: string | null
+    total_issues: number
+    completed_issues: number
+    completion_pct: number
+    days_remaining: number
+    on_track: boolean
+  } | null
+  recent_sprints: {
+    sprint_id: number
+    name: string
+    total_issues: number
+    completed_issues: number
+    completion_pct: number
+  }[]
+}
+
+export function useDeveloperSprintSummary(developerId?: number) {
+  return useQuery<DeveloperSprintSummary>({
+    queryKey: ['developer-sprint-summary', developerId],
+    queryFn: () => apiFetch(`/developers/${developerId}/sprint-summary`),
+    staleTime: 30_000,
+    enabled: !!developerId,
+  })
+}
+
+export interface DeveloperLinearIssue {
+  id: number
+  identifier: string
+  title: string
+  status: string | null
+  status_category: string | null
+  priority: number
+  priority_label: string | null
+  estimate: number | null
+  url: string | null
+  sprint_id: number | null
+}
+
+export function useDeveloperLinearIssues(developerId?: number, statusCategory?: string) {
+  const params = new URLSearchParams()
+  if (statusCategory) params.set('status_category', statusCategory)
+  return useQuery<DeveloperLinearIssue[]>({
+    queryKey: ['developer-linear-issues', developerId, statusCategory],
+    queryFn: () => apiFetch(`/developers/${developerId}/linear-issues?${params}`),
+    staleTime: 30_000,
+    enabled: !!developerId,
+  })
+}
