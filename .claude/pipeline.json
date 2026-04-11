@@ -1,0 +1,28 @@
+{
+  "project_name": "github-cadency",
+  "project_description": "Engineering intelligence — tracks developer activity across GitHub repos (PRs, reviews, cycle times, team benchmarks, workload distribution). Read-only GitHub App + deterministic metrics + optional AI analysis.",
+  "is_monorepo": false,
+  "apps": ["backend", "frontend"],
+  "linear_team_prefix": "NOR",
+
+  "stack": {
+    "backend_package_manager": "pip"
+  },
+
+  "commands": {
+    "lint": "cd backend && ruff check .",
+    "test_shared": null,
+    "test_package": null,
+    "test_backend_targeted": "cd backend && pytest -x",
+    "test_frontend_targeted": "cd frontend && pnpm test --run",
+    "test_backend_full": "cd backend && pytest"
+  },
+
+  "agents": {
+    "skip": ["cross-app-analyst"]
+  },
+
+  "paths": {
+    "shared_packages_root": null
+  }
+}
