@@ -31,7 +31,9 @@ export async function apiFetch<T>(
   if (!res.ok) {
     if (res.status === 401) {
       localStorage.removeItem('devpulse_token')
-      window.location.href = '/login'
+      if (window.location.pathname !== '/login') {
+        window.location.href = '/login'
+      }
       throw new Error('Session expired')
     }
     let detail: any
