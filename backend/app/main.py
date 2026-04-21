@@ -354,6 +354,8 @@ async def lifespan(app: FastAPI):
     interval_minutes = settings.sync_interval_minutes
     full_hour = settings.full_sync_cron_hour
     auto_enabled = True
+    linear_enabled = True
+    linear_interval_minutes = settings.linear_sync_interval_minutes
     try:
         async with AsyncSessionLocal() as db:
             config_row = await db.get(SyncScheduleConfig, 1)
@@ -361,6 +363,8 @@ async def lifespan(app: FastAPI):
                 interval_minutes = config_row.incremental_interval_minutes
                 full_hour = config_row.full_sync_cron_hour
                 auto_enabled = config_row.auto_sync_enabled
+                linear_enabled = config_row.linear_sync_enabled
+                linear_interval_minutes = config_row.linear_sync_interval_minutes
     except Exception as e:
         logger.warning("Could not load sync schedule config — using env defaults", error=str(e), event_type="system.config")
 
@@ -468,13 +472,14 @@ async def lifespan(app: FastAPI):
                 if classified.category == ErrorCategory.APP_BUG:
                     _reporter.record(exc=e, component="services.linear_sync", trigger_type="scheduled")
 
-    scheduler.add_job(
-        scheduled_linear_sync,
-        "interval",
-        minutes=settings.linear_sync_interval_minutes,
-        id="linear_sync",
-        misfire_grace_time=None,
-    )
+    if linear_enabled:
+        scheduler.add_job(
+            scheduled_linear_sync,
+            "interval",
+            minutes=linear_interval_minutes,
+            id="linear_sync",
+            misfire_grace_time=None,
+        )
 
     scheduler.start()
     app.state.scheduler = scheduler

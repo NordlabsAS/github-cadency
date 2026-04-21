@@ -1083,12 +1083,12 @@ async def _evaluate_planning_alerts(
         velocity_keys: set[str] = set()
         from app.services.sprint_stats import get_sprint_velocity
         velocity = await get_sprint_velocity(db, limit=5)
-        sprints = velocity.get("sprints", [])
+        sprints = velocity.get("data", [])
         if len(sprints) >= 4:
             values = [s.get("completed_scope", 0) or 0 for s in sprints]
-            # sprints are newest-first; compare older half to newer half
-            older = values[len(values) // 2:]
-            newer = values[:len(values) // 2]
+            # get_sprint_velocity returns oldest-first; first half is older, second half is newer
+            older = values[: len(values) // 2]
+            newer = values[len(values) // 2 :]
             avg_older = sum(older) / len(older) if older else 0
             avg_newer = sum(newer) / len(newer) if newer else 0
             if avg_older > 0:
@@ -1113,13 +1113,13 @@ async def _evaluate_planning_alerts(
         creep_keys: set[str] = set()
         from app.services.sprint_stats import get_scope_creep
         scope = await get_scope_creep(db, limit=1)
-        sprints = scope.get("sprints", [])
+        sprints = scope.get("data", [])
         if sprints:
             latest = sprints[0]
             creep_pct = latest.get("scope_creep_pct", 0) or 0
             threshold = config.scope_creep_threshold_pct
             if creep_pct >= threshold:
-                sprint_name = latest.get("name", "Sprint")
+                sprint_name = latest.get("sprint_name", "Sprint")
                 key = f"scope_creep_high:sprint:{latest.get('sprint_id', 0)}"
                 creep_keys.add(key)
                 active_keys.add(key)
@@ -1176,8 +1176,8 @@ async def _evaluate_planning_alerts(
         triage_keys: set[str] = set()
         from app.services.sprint_stats import get_triage_metrics
         triage = await get_triage_metrics(db)
-        queue_depth = triage.get("current_queue_depth", 0) or 0
-        avg_hours = triage.get("avg_triage_hours", 0) or 0
+        queue_depth = triage.get("issues_in_triage", 0) or 0
+        avg_hours = (triage.get("avg_triage_duration_s", 0) or 0) / 3600.0
         q_max = config.triage_queue_max
         d_max = config.triage_duration_hours_max
         if queue_depth >= q_max or avg_hours >= d_max:
@@ -1204,7 +1204,7 @@ async def _evaluate_planning_alerts(
         est_keys: set[str] = set()
         from app.services.sprint_stats import get_estimation_accuracy
         accuracy = await get_estimation_accuracy(db, limit=5)
-        sprints = accuracy.get("sprints", [])
+        sprints = accuracy.get("data", [])
         if sprints:
             accuracies = [s.get("accuracy_pct", 100) or 100 for s in sprints]
             avg_accuracy = sum(accuracies) / len(accuracies)
