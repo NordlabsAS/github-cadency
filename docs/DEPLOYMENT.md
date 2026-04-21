@@ -68,9 +68,11 @@ sudo cp /opt/devpulse/infrastructure/Caddyfile /etc/caddy/Caddyfile
 ```
 
 Edit `/etc/caddy/Caddyfile`:
-1. Replace `devpulse.internal.company.com` with your domain
+1. Replace `devpulse.claros.no` (the Nordlabs production hostname) with your domain
 2. Replace the IP ranges in the `@blocked` matcher with your VPN/office CIDR ranges
 3. Configure TLS (see comments in the Caddyfile for options)
+
+> **Nordlabs deployment:** The production instance is at `https://devpulse.claros.no` on the Hetzner VPS (`204.168.229.167`). The live Caddyfile there does **not** include the IP whitelist block — DevPulse is served over the public internet, gated only by GitHub OAuth. Add the whitelist back if you want to restrict by network.
 
 For multi-app deployments, see [HETZNER-SETUP.md Section 7](HETZNER-SETUP.md#7-caddy-configuration-multi-app).
 
@@ -172,7 +174,7 @@ python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().
 | `GITHUB_CLIENT_ID` | Yes | OAuth Client ID from GitHub App | `Iv1.xxxxxxxxxxxx` |
 | `GITHUB_CLIENT_SECRET` | Yes | OAuth Client Secret from GitHub App | `xxxxxxxxxxxxxxxxxxxx` |
 | `DEVPULSE_INITIAL_ADMIN` | Yes | GitHub username of the first admin user | `your-username` |
-| `FRONTEND_URL` | Yes | Your production URL (used for CORS) | `https://devpulse.internal.company.com` |
+| `FRONTEND_URL` | Yes | Your production URL (used for CORS) | `https://devpulse.claros.no` |
 | `ENCRYPTION_KEY` | Yes | Fernet key for encrypting Slack tokens | `abc...=` (output of Fernet command) |
 | `ENVIRONMENT` | Yes | Set to `production` (disables /docs, /redoc, enables HSTS) | `production` |
 | `LOG_FORMAT` | Yes | Set to `json` for structured Docker logging | `json` |

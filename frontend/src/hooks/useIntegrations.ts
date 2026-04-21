@@ -17,6 +17,7 @@ export function useIntegrations() {
   return useQuery<IntegrationConfig[]>({
     queryKey: ['integrations'],
     queryFn: () => apiFetch('/integrations'),
+    enabled: !!localStorage.getItem('devpulse_token'),
     staleTime: 30_000,
   })
 }

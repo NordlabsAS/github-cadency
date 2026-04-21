@@ -8,9 +8,15 @@
 # Start:   sudo systemctl enable --now caddy
 # Reload:  sudo systemctl reload caddy
 #
-# Replace the domain and IP ranges below with your values.
+# Production hostname: devpulse.claros.no (Hetzner 204.168.229.167).
+# When forking for another deployment, replace the hostname and IP ranges
+# below with your values.
+#
+# NOTE: The live Caddyfile on Hetzner does NOT currently have the IP
+# whitelist — it serves the public internet. The whitelist below is the
+# template's recommended hardening if you want to restrict to a VPN/office.
 
-devpulse.internal.company.com {
+devpulse.claros.no {
     # --- IP Whitelist ---
     # Only allow requests from VPN / office network ranges.
     # Requests from other IPs get a 403.
@@ -43,7 +49,7 @@ devpulse.internal.company.com {
 #   Caddy auto-provisions a Let's Encrypt certificate. Zero config needed.
 #
 # If the domain is internal-only (no public DNS):
-#   Option 1 — Use your company's internal CA:
+#   Option 1 — Use your organization's internal CA:
 #     Add inside the site block:
 #       tls /etc/caddy/certs/devpulse.crt /etc/caddy/certs/devpulse.key
 #
