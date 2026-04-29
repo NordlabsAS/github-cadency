@@ -1,0 +1,112 @@
+name: Runner Meter (auto-overflow toggle)
+
+# Polls the org's Actions usage and flips vars.CI_RUNNER between
+# unset (→ hosted ubuntu-latest) and '["self-hosted","ci"]' (→ home-server
+# runner pool) past a configurable threshold. Resets unconditionally on
+# the 1st of each month so the next billing cycle starts on hosted.
+#
+# Drop this file into each repo's .github/workflows/ as `runner-meter.yml`.
+#
+# Required repo secret:
+#   GH_BILLING_PAT — fine-grained PAT, NordlabsAS-scoped, with:
+#     - Org permissions:    Administration: Read         (reads /orgs/.../settings/billing/usage)
+#     - Repo permissions:   Variables: Read and write    (sets/deletes the CI_RUNNER variable)
+#
+#   NOTE: GitHub deprecated the simpler `Plan: Read` permission and the
+#   `/settings/billing/actions` endpoint in early 2026. The new
+#   `/settings/billing/usage` endpoint requires the broader
+#   `organization_administration:read` (UI label: "Administration: Read").
+#
+# Plan baseline (INCLUDED_MINUTES) is hardcoded — GitHub's new billing API
+# no longer returns the included allowance directly. Update if NordlabsAS
+# changes plans:
+#   Free:  2000 min/mo
+#   Team:  3000 min/mo  ← current
+#   Enterprise: 50000 min/mo
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"     # every 6h
+    - cron: "1 0 1 * *"       # 00:01 UTC on the 1st of each month — month rollover reset
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runner-meter
+  cancel-in-progress: false
+
+env:
+  ORG: NordlabsAS
+  THRESHOLD_PCT: "100"         # use the full hosted allowance before flipping; 6h cron lag = ~$3 worst-case overage at $0.008/min Linux, acceptable
+  INCLUDED_MINUTES: "3000"     # Team plan baseline; see header
+
+jobs:
+  meter:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check usage and flip CI_RUNNER variable
+        env:
+          GH_TOKEN: ${{ secrets.GH_BILLING_PAT }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          # Month rollover branch — schedule[1] fires on day 1 only
+          if [ "$(date -u +%d)" = "01" ] && [ "$(date -u +%H)" = "00" ]; then
+            echo "Month rollover — unconditionally clearing CI_RUNNER"
+            gh variable delete CI_RUNNER --repo "$REPO" 2>/dev/null || true
+            exit 0
+          fi
+
+          # Read current-month Actions usage. The new API returns a per-repo,
+          # per-SKU breakdown in `usageItems[]`; sum minutes weighted by SKU
+          # multiplier per GitHub's billing model:
+          #   Linux        1×
+          #   Windows      2×
+          #   macOS *      10×
+          USAGE="$(gh api "/orgs/$ORG/settings/billing/usage?product=actions")"
+
+          USED=$(echo "$USAGE" | jq '
+            [
+              .usageItems[]
+              | select(.product == "actions" and .unitType == "Minutes")
+              | (.quantity * (
+                  if   (.sku | test("macOS"))   then 10
+                  elif (.sku | test("Windows")) then 2
+                  else                                1
+                  end
+                ))
+            ] | add // 0 | floor
+          ')
+
+          if [ -z "$INCLUDED_MINUTES" ] || [ "$INCLUDED_MINUTES" = "0" ]; then
+            echo "WARN: INCLUDED_MINUTES is 0 — refusing to compute percentage."
+            exit 0
+          fi
+
+          PCT=$(( USED * 100 / INCLUDED_MINUTES ))
+          echo "Org $ORG: $USED / $INCLUDED_MINUTES weighted minutes used ($PCT%)"
+          echo "Threshold: $THRESHOLD_PCT%"
+
+          CURRENT=$(gh variable list --repo "$REPO" --json name,value \
+            --jq '.[] | select(.name=="CI_RUNNER") | .value' 2>/dev/null || echo "")
+
+          if [ "$PCT" -ge "$THRESHOLD_PCT" ]; then
+            DESIRED='["self-hosted","ci"]'
+            if [ "$CURRENT" = "$DESIRED" ]; then
+              echo "CI_RUNNER already set to overflow — no change."
+            else
+              echo "Flipping CI_RUNNER → overflow (self-hosted,ci)"
+              gh variable set CI_RUNNER --body "$DESIRED" --repo "$REPO"
+            fi
+          else
+            if [ -z "$CURRENT" ]; then
+              echo "CI_RUNNER already unset — staying on hosted."
+            else
+              echo "Clearing CI_RUNNER — back on hosted."
+              gh variable delete CI_RUNNER --repo "$REPO"
+            fi
+          fi
