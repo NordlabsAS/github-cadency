@@ -8,8 +8,8 @@ on:
 
 jobs:
   e2e:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+    runs-on: ${{ vars.CI_RUNNER && fromJSON(vars.CI_RUNNER) || 'ubuntu-latest' }}
+    timeout-minutes: 30
 
     services:
       postgres:
